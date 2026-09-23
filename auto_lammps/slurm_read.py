@@ -82,9 +82,11 @@ def interpret(queue, accounting, request_id, manifest_sha256):
             cost = None
             if source == 'accounting':
                 cores, elapsed, exit_code, restarts = (x.strip() for x in fields[4:])
+                if restarts.isascii() and restarts.isdigit() and int(restarts) > 0:
+                    return Observation('unknown', job, reason='restarted_allocation')
                 if not (cores.isascii() and cores.isdigit() and elapsed.isascii() and elapsed.isdigit()
                         and re.fullmatch(r'[0-9]+:[0-9]+', exit_code) and restarts == '0'):
-                    return Observation('unknown', job, reason='accounting_incomplete_or_restarted')
+                    return Observation('unknown', job, reason='accounting_incomplete')
                 if mapped in TERMINAL:
                     if int(cores) == 0 and int(elapsed) != 0:
                         return Observation('unknown', job, reason='incomplete_allocation')

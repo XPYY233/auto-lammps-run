@@ -247,6 +247,8 @@ class Ledger:
                 raise LimitExceeded("Per-job resources exceed approved limits")
             all_rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?",
                                   (ev["campaign"],)).fetchall()
+            if any(r["state"] == "reconcile_required" for r in all_rows):
+                raise Conflict("Campaign contains an unresolved scheduler conflict")
             own = [r for r in all_rows if r["evaluation"] == evaluation]
             if any(r["state"] in ACTIVE for r in own):
                 raise Conflict("Existing evaluation request must finish or be reconciled first")
@@ -278,6 +280,8 @@ class Ledger:
             policy = json.loads(db.execute("SELECT policy FROM campaigns WHERE id=?", (campaign,)).fetchone()[0])
             rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
                               (campaign,)).fetchall()
+            if any(r["state"] == "reconcile_required" for r in rows):
+                raise Conflict("Campaign contains an unresolved scheduler conflict")
             if (sum(r["charge_core_seconds"] for r in rows) > policy["total_core_seconds"]
                     or sum(r["charge_storage_bytes"] for r in rows) > policy["total_storage_bytes"]
                     or sum(r["state"] in ACTIVE for r in rows) > policy["concurrency"]):
@@ -326,8 +330,11 @@ class Ledger:
                 db.execute("UPDATE requests SET state='cancelled_before_dispatch',charge_core_seconds=0 WHERE id=?", (request_id,))
                 self._event(db, request_id, "cancelled_before_dispatch", {})
             elif row["job_id"]:
-                db.execute("UPDATE requests SET state='cancelling' WHERE id=?", (request_id,))
-                self._event(db, request_id, "cancel_intent", {})
+                # Requesting cancellation cannot clear a scheduler/accounting
+                # conflict or reopen the campaign for further submissions.
+                if row['state'] != 'reconcile_required':
+                    db.execute("UPDATE requests SET state='cancelling' WHERE id=?", (request_id,))
+                self._event(db, request_id, "cancel_intent", {'conflict_retained': row['state'] == 'reconcile_required'})
             else:
                 raise Conflict("Reconcile unknown dispatch before cancellation")
             return self._request(db, request_id)
@@ -387,7 +394,107 @@ class Ledger:
     def recoverable(self):
         with self._transaction() as db:
             placeholders = ",".join("?" for _ in ACTIVE)
-            return [dict(r) for r in db.execute(f"SELECT * FROM requests WHERE state IN ({placeholders})", ACTIVE)]
+            terminals = ",".join("?" for _ in JOB_TERMINAL)
+            return [dict(r) for r in db.execute(
+                f"SELECT * FROM requests WHERE state IN ({placeholders}) "
+                f"OR (state IN ({terminals}) AND accounted=0)", (*ACTIVE, *JOB_TERMINAL))]
+
+    def begin_reconciliation(self, request_id: str):
+        """Persist a query ticket and derive identity/time from the original intent."""
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if not row['dispatch_claimed'] or row['state'] in {'rejected', 'cancelled_before_dispatch'}:
+                raise Conflict('No dispatched job to reconcile')
+            intent = db.execute("SELECT at FROM events WHERE request_id=? AND kind='dispatch_intent' ORDER BY seq LIMIT 1",
+                                (request_id,)).fetchone()
+            if intent is None:
+                raise Conflict('Missing original dispatch intent')
+            self._event(db, request_id, 'reconciliation_started', {'manifest_sha256': row['manifest_sha256']})
+            ticket = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            return dict(ticket=ticket, request_id=request_id, manifest_sha256=row['manifest_sha256'],
+                        dispatch_at=intent['at'])
+
+    def apply_reconciliation(self, request_id: str, ticket: int, *, state: str, job_id: str | None,
+                             core_seconds: int | None, reason: str, evidence_sha256: str):
+        """Atomically bind identity, observe and account a trusted scheduler receipt.
+
+        A query ticket is single-use. Later queries or state changes supersede it.
+        Evidence is produced by the trusted reader, never supplied by the Agent.
+        """
+        if type(ticket) is not int or ticket <= 0:
+            raise ValueError('Invalid query ticket')
+        if state not in {'unknown', 'queued', 'running', *JOB_TERMINAL}:
+            raise ValueError('Invalid scheduler observation')
+        if job_id is not None and (not isinstance(job_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', job_id)):
+            raise ValueError('Invalid scheduler job')
+        if state != 'unknown' and job_id is None:
+            raise ValueError('Verified observations require a job identity')
+        if core_seconds is not None and (type(core_seconds) is not int or core_seconds < 0 or state not in JOB_TERMINAL):
+            raise ValueError('Invalid final allocation usage')
+        if not isinstance(reason, str) or len(reason) > 120:
+            raise ValueError('Invalid observation reason')
+        _digest(evidence_sha256)
+        evidence = dict(ticket=ticket, state=state, job_id=job_id, core_seconds=core_seconds,
+                        reason=reason, evidence_sha256=evidence_sha256)
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            started = db.execute("SELECT * FROM events WHERE seq=? AND request_id=? AND kind='reconciliation_started'",
+                                 (ticket, request_id)).fetchone()
+            if started is None:
+                raise Conflict('Query ticket belongs to another request or does not exist')
+            later = db.execute('SELECT kind,payload FROM events WHERE request_id=? AND seq>? ORDER BY seq',
+                               (request_id, ticket)).fetchall()
+            for event in later:
+                if event['kind'] == 'reconciliation_finished' and json.loads(event['payload'])['ticket'] == ticket:
+                    if json.loads(event['payload'])['observation'] != evidence:
+                        raise Conflict('Cannot replace a recorded query receipt')
+                    return row
+
+            def finish(outcome):
+                self._event(db, request_id, 'reconciliation_finished',
+                            {'ticket': ticket, 'outcome': outcome, 'observation': evidence})
+                return self._request(db, request_id)
+
+            # A newer query intent or any intervening state mutation makes this
+            # response stale. Audit-only query outcomes do not mutate state.
+            if any(event['kind'] != 'reconciliation_finished' for event in later):
+                return finish('stale')
+
+            def quarantine(detail):
+                if row['state'] != 'reconcile_required':
+                    cap = Resources(**json.loads(row['resources'])).core_seconds
+                    db.execute("UPDATE requests SET state='reconcile_required',charge_core_seconds=charge_core_seconds+? WHERE id=?",
+                               (cap, request_id))
+                self._event(db, request_id, 'reconciliation_conflict', {'reason': detail, 'evidence': evidence})
+                return finish('conflict')
+
+            if row['state'] == 'reconcile_required':
+                return finish('requires_review')
+            if job_id is not None and row['job_id'] is not None and job_id != row['job_id']:
+                return quarantine('different_job')
+            if state == 'unknown':
+                if reason in {'duplicate_allocations_or_restarts', 'restarted_allocation', 'queue_accounting_conflict'}:
+                    return quarantine(reason)
+                if row['state'] == 'dispatching':
+                    db.execute("UPDATE requests SET state='unknown' WHERE id=?", (request_id,))
+                return finish('unresolved')
+            if row['job_id'] is None:
+                if db.execute('SELECT 1 FROM requests WHERE job_id=? AND id<>?', (job_id, request_id)).fetchone():
+                    return quarantine('job_already_bound')
+                db.execute('UPDATE requests SET job_id=? WHERE id=?', (job_id, request_id))
+                self._event(db, request_id, 'scheduler_accepted', {'job_id': job_id, 'evidence': evidence})
+            if row['state'] in JOB_TERMINAL and state != row['state']:
+                return quarantine('terminal_state_changed')
+            if row['accounted'] and core_seconds is not None and row['actual_core_seconds'] != core_seconds:
+                return quarantine('final_usage_changed')
+            effective = row['state'] if row['state'] == 'cancelling' and state not in JOB_TERMINAL else state
+            db.execute('UPDATE requests SET state=? WHERE id=?', (effective, request_id))
+            self._event(db, request_id, 'scheduler_observed', {'job_id': job_id, 'state': state, 'evidence': evidence})
+            if core_seconds is not None and not row['accounted']:
+                db.execute('UPDATE requests SET charge_core_seconds=?,actual_core_seconds=?,accounted=1 WHERE id=?',
+                           (core_seconds, core_seconds, request_id))
+                self._event(db, request_id, 'accounting_final', {'core_seconds': core_seconds, 'evidence_sha256': evidence_sha256})
+            return finish('applied')
 
     def summary(self, campaign: str):
         with self._transaction() as db:
