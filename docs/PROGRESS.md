@@ -8,8 +8,8 @@
 - [PR 1a / #4](https://github.com/XPYY233/auto-lammps-run/pull/4)：受信提交账本、防重复派发、并发核时/存储/次数控制、未知状态、取消及恢复。基于 PR 0 分支；父 PR 合并后应将 base 转向 main。关联 [Issue #3](https://github.com/XPYY233/auto-lammps-run/issues/3)，尚未完成其中的真实 HPC 验证。
 - [PR 1b / #5](https://github.com/XPYY233/auto-lammps-run/pull/5)：输入冻结与受控 Slurm 只读查询，基于 PR 1a 分支，继续关联 Issue #3；59 项本地检查通过，远端 CI 以 PR 当前提交检查为准，等待授权维护者审查。
 - [PR 1c / #6](https://github.com/XPYY233/auto-lammps-run/pull/6)：分支 feat/pr1c-ledger-reconciliation，基于 PR 1b，继续关联 Issue #3；补齐终态未核算恢复、查询顺序、原子回写和冲突批次阻断。尚无真实计算作业恢复验收。
-- PR 1d：当前分支 feat/pr1d-restricted-staging，基于 PR 1c，继续关联 Issue #3；受限流式上传、私人接收程序与资源脚本已完成离线验证，未部署真实上传或提交。
-- 主分支保护已读回核实：offline-checks、一次审查、管理员同样受约束；没有自称独立审查或绕过保护。
+- [PR 1d / #7](https://github.com/XPYY233/auto-lammps-run/pull/7)：分支 feat/pr1d-restricted-staging，基于 PR 1c，继续关联 Issue #3；受限流式上传、私人接收程序与资源脚本已完成离线验证，未部署真实上传或提交。
+- 主分支保护已读回核实：offline-checks、一次审查、管理员同样受约束；没有自称独立审查或绕过保护。当前 PR 由同一账号发起，GitHub 不允许该账号自行批准；已请求用户提供有写权限的审阅者，尚未修改保护。
 
 ## 实际验证
 
