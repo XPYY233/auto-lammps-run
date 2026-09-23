@@ -7,3 +7,4 @@
 
 - PR 1a: durable accounting and dispatch coordination with cross-process budget tests; no production scheduler adapter yet.
 - Zotero schema v2 distinguishes reference records from DOI groups and preserves duplicate evidence.
+- PR 1b: content-addressed private input snapshots and bounded, durably audited Slurm read-only lookup; no production submit, cancellation or ledger reconciliation writeback yet. MIT state-map attribution retained.
