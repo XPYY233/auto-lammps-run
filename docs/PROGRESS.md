@@ -6,7 +6,7 @@
 
 - [PR 0 / #2](https://github.com/XPYY233/auto-lammps-run/pull/2)：现状审计、三周规范、候选与只读 Zotero 发现。CI 已通过，等待授权维护者审查。
 - [PR 1a / #4](https://github.com/XPYY233/auto-lammps-run/pull/4)：受信提交账本、防重复派发、并发核时/存储/次数控制、未知状态、取消及恢复。基于 PR 0 分支；父 PR 合并后应将 base 转向 main。关联 [Issue #3](https://github.com/XPYY233/auto-lammps-run/issues/3)，尚未完成其中的真实 HPC 验证。
-- PR 1b：输入冻结与受控 Slurm 只读查询，基于 PR 1a 分支，继续关联 Issue #3；当前本地检查通过，PR 和远端 CI 状态将在推送后核实。
+- [PR 1b / #5](https://github.com/XPYY233/auto-lammps-run/pull/5)：输入冻结与受控 Slurm 只读查询，基于 PR 1a 分支，继续关联 Issue #3；59 项本地检查通过，远端 CI 以 PR 当前提交检查为准，等待授权维护者审查。
 - 主分支保护已读回核实：offline-checks、一次审查、管理员同样受约束；没有自称独立审查或绕过保护。
 
 ## 实际验证
