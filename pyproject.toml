@@ -4,3 +4,4 @@ version = "0.0.1"
 description = "Read-only literature discovery foundation for HPC-only LAMMPS research"
 requires-python = ">=3.11"
 dependencies = []
+license = "Apache-2.0"

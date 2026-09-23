@@ -4,7 +4,7 @@
 
 | 资源 | 已核实 | 决定 |
 |---|---|---|
-| 本项目新代码 | Python 标准库，无第三方复制 | 原创许可待确认；建议 Apache-2.0 |
+| 本项目新代码 | Python 标准库，无第三方复制 | 用户已确认 Apache-2.0；见 LICENSE |
 | 既有 SIGA-LAMMPS | 本机 LICENSE 为 MIT；HPC 与 adapter 代码存在 | 可复用前需逐文件来源检查并保留声明；本 PR 未复制 |
 | Auto Research | COPYRIGHT 仅允许有限本机使用，未授予一般改编再分发 | 优先通过证据导出接口集成，不将整仓复制到本项目 |
 | DeepSeekHarness | 本机源码存在；完整依赖/许可证审计未做 | 不内嵌或重打包 |
