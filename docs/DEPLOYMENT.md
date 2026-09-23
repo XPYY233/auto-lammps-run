@@ -15,3 +15,5 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 后台重启需恢复持久任务而非重提。本地后台离线或电脑休眠后无法承诺实时管理；多人正式使用时部署在持续在线服务器并补访问控制，迁移前先验证备份和恢复。
 
 内部控制端已提供输入冻结及只读 Slurm 查询，使用方式和边界见 [FROZEN_INPUTS.md](FROZEN_INPUTS.md)。仅支持具有 POSIX 文件描述符与 flock 的 macOS/Linux；SSH 密钥及真实别名继续使用仓库之外的管理员配置，不写入项目。审计目录必须仅本人可读写；每次查询保留原始回执。尚未提供启动 worker 的生产命令。
+
+已增加受信管理员的一次作业恢复命令，见 [RECOVERY.md](RECOVERY.md)。该命令读取现有账本并查询调度器，不启动持续在线服务、不运行模型或物理引擎。
