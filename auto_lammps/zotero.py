@@ -16,6 +16,23 @@ class ZoteroError(RuntimeError):
     pass
 
 
+def reference_counts(records: list[dict]) -> dict:
+    """Retain records; matching DOI strings are grouping hints, not identity proof."""
+    groups: dict[str, list[str]] = {}
+    without_doi = 0
+    for record in records:
+        doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)", "",
+                     record.get("doi", "").strip().lower())
+        if not re.fullmatch(r"10\.\d{4,9}/\S+", doi):
+            without_doi += 1
+            continue
+        groups.setdefault(doi, []).append(record["local_item_key"])
+    return {"reference_records": len(records), "distinct_doi_strings": len(groups),
+            "records_without_valid_doi": without_doi,
+            "duplicate_doi_groups": [{"doi": doi, "local_item_keys": keys}
+                                     for doi, keys in sorted(groups.items()) if len(keys) > 1]}
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ZoteroError("Zotero redirects are disabled")
@@ -117,7 +134,7 @@ class LocalZotero:
         final = self.page({"q": query, "qmode": "everything", "limit": 1})
         if final.total != len(hits) or final.version != version:
             raise ZoteroError("Library changed during parent resolution; retry")
-        return {"schema_version": 1, "query": query, "library_version": version,
+        return {"schema_version": 2, "query": query, "library_version": version,
                 "consistency": "version_and_count_checked" if version is not None else "count_only",
-                "search_hits": len(hits), "unique_papers": len(papers), "papers": papers,
+                "search_hits": len(hits), **reference_counts(papers), "papers": papers,
                 "limitation": "Search covers Zotero indexed content, not guaranteed full PDF coverage."}
