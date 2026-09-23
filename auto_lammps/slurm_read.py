@@ -108,16 +108,21 @@ def interpret(queue, accounting, request_id, manifest_sha256):
     return recorded or Observation('unknown', reason='not_visible')
 
 
-def _capture(argv, *, timeout, max_bytes):
+def _capture(argv, *, timeout, max_bytes, input_chunks=None):
     """Drain both streams under one byte/time bound; kill/reap on every failure."""
     output = {'stdout': bytearray(), 'stderr': bytearray()}
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    with subprocess.Popen(argv, stdin=subprocess.PIPE if input_chunks is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, start_new_session=True) as process:
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
                 selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+                pending = memoryview(b'')
+                producer = iter(input_chunks) if input_chunks is not None else None
+                if producer is not None:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
                 count = 0
                 while selector.get_map():
                     remaining = deadline - time.monotonic()
@@ -125,6 +130,25 @@ def _capture(argv, *, timeout, max_bytes):
                         returncode, failure = None, 'timeout'
                         break
                     for key, _ in selector.select(min(remaining, .1)):
+                        if key.data == 'stdin':
+                            if not pending:
+                                try:
+                                    pending = memoryview(next(producer))
+                                except StopIteration:
+                                    selector.unregister(process.stdin)
+                                    process.stdin.close()
+                                    continue
+                                if not pending or len(pending) > 65536:
+                                    raise ValueError('Input chunks must contain 1 to 65536 bytes')
+                            try:
+                                written = os.write(process.stdin.fileno(), pending)
+                                pending = pending[written:]
+                            except BlockingIOError:
+                                pass
+                            except BrokenPipeError:
+                                selector.unregister(process.stdin)
+                                process.stdin.close()
+                            continue
                         data = os.read(key.fileobj.fileno(), min(65536, max_bytes - count + 1))
                         if not data:
                             selector.unregister(key.fileobj)

@@ -38,10 +38,11 @@ def validate_provenance(provenance):
 
 def relative_name(name):
     if (not isinstance(name, str) or len(name) > 240 or not name
+            or len(name.split('/')) > 8
             or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', part) for part in name.split('/'))
             or str(PurePosixPath(name)) != name):
         raise ManifestError('Unsafe input path')
-    if name in {'manifest.json', 'job.sh', 'receipt.json'}:
+    if name.split('/')[0] in {'manifest.json', 'job.sh', 'receipt.json', 'allocation.json', 'stage.json', 'output'}:
         raise ManifestError('Reserved input name')
     return name
 
@@ -205,8 +206,13 @@ def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources,
         (staging / 'manifest.json').chmod(0o400)
         digest = sha256(encoded)
         destination = store / digest
-        lock = os.open(store / '.freeze.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
+            lock = os.open(store / '.freeze.lock', os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            lock = os.open(store / '.freeze.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(lock).st_mode) or os.fstat(lock).st_nlink != 1:
+                raise ManifestError('Unsafe snapshot lock')
             fcntl.flock(lock, fcntl.LOCK_EX)
             if not destination.exists():
                 os.rename(staging, destination)

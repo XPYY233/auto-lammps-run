@@ -290,6 +290,33 @@ class Ledger:
             self._event(db, request_id, "dispatch_intent", {"note": "Request may reach scheduler; reconcile after any interruption"})
             return True
 
+    def begin_staging(self, request_id: str) -> bool:
+        """Claim one upload only after resources have been reserved."""
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if db.execute("SELECT 1 FROM events WHERE request_id=? AND kind='upload_intent'", (request_id,)).fetchone():
+                return False
+            if row['state'] != 'prepared':
+                raise Conflict('Only a reserved, undispatched request may upload')
+            self._event(db, request_id, 'upload_intent', {'manifest_sha256': row['manifest_sha256']})
+            return True
+
+    def staging_result(self, request_id: str, *, evidence_sha256: str | None = None, error_type: str | None = None):
+        if (evidence_sha256 is None) == (error_type is None):
+            raise ValueError('Record exactly one upload receipt or failure category')
+        if evidence_sha256 is not None:
+            _digest(evidence_sha256)
+        elif not isinstance(error_type, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,99}', error_type):
+            raise ValueError('Upload requires a receipt or error category')
+        with self._transaction() as db:
+            self._request(db, request_id)
+            if not db.execute("SELECT 1 FROM events WHERE request_id=? AND kind='upload_intent'", (request_id,)).fetchone():
+                raise Conflict('Missing upload intent')
+            if db.execute("SELECT 1 FROM events WHERE request_id=? AND kind IN ('inputs_staged','upload_failed')", (request_id,)).fetchone():
+                raise Conflict('Upload outcome is already recorded')
+            self._event(db, request_id, 'inputs_staged' if evidence_sha256 else 'upload_failed',
+                        {'evidence_sha256': evidence_sha256, 'error_type': error_type})
+
     def uncertain(self, request_id: str, evidence: dict):
         with self._transaction() as db:
             row = self._request(db, request_id)

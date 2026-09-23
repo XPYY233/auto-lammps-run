@@ -17,3 +17,5 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 内部控制端已提供输入冻结及只读 Slurm 查询，使用方式和边界见 [FROZEN_INPUTS.md](FROZEN_INPUTS.md)。仅支持具有 POSIX 文件描述符与 flock 的 macOS/Linux；SSH 密钥及真实别名继续使用仓库之外的管理员配置，不写入项目。审计目录必须仅本人可读写；每次查询保留原始回执。尚未提供启动 worker 的生产命令。
 
 已增加受信管理员的一次作业恢复命令，见 [RECOVERY.md](RECOVERY.md)。该命令读取现有账本并查询调度器，不启动持续在线服务、不运行模型或物理引擎。
+
+受限上传接收程序、资源脚本及配置边界见 [STAGING.md](STAGING.md)。尚未在真实集群安装接收端，不提供可直接运行目标计算的部署命令；计算节点隔离启动器和物理存储配额仍需实现与验证。
