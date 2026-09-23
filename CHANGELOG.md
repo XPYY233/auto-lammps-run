@@ -9,3 +9,4 @@
 - Zotero schema v2 distinguishes reference records from DOI groups and preserves duplicate evidence.
 - PR 1b: content-addressed private input snapshots and bounded, durably audited Slurm read-only lookup; no production submit, cancellation or ledger reconciliation writeback yet. MIT state-map attribution retained.
 - PR 1c: atomic scheduler reconciliation, durable query ordering, recovery of terminal but unaccounted jobs, campaign-wide conflict holds, and administrator one-pass recovery command. Validated with synthetic receipts; actual job recovery remains unverified.
+- PR 1d: reserved one-shot streaming upload, pinned standalone file receiver, aggregate remote logical-byte reservations and deterministic resource scripts. No real upload deployment, isolated runtime launcher or sbatch execution yet.
