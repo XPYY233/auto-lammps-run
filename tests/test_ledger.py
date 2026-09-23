@@ -2,6 +2,7 @@
 from contextlib import closing
 from dataclasses import replace
 import multiprocessing as mp
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -49,6 +50,16 @@ def dispatch_worker(path, evaluation, barrier, count, queue):
     barrier.wait(timeout=10)
     row = SubmissionService(ledger, CounterScheduler()).submit(evaluation, 'same-key', H2, RESOURCE)
     queue.put(row['id'])
+
+
+def crash_after_fake_acceptance(path, evaluation, receipt_path):
+    class CrashScheduler:
+        def submit(self, request):
+            # Stand in for a scheduler accepting the job, then the worker dying
+            # before its receipt reaches the ledger. No external command runs.
+            Path(receipt_path).write_text(request.request_id)
+            os._exit(17)
+    SubmissionService(Ledger(Path(path)), CrashScheduler()).submit(evaluation, 'crash', H2, RESOURCE)
 
 
 class LedgerTests(unittest.TestCase):
@@ -332,6 +343,27 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(len(set(ids)), 1)
         self.assertEqual(counter.value, 1)
         self.assertEqual(self.ledger.get(ids[0])['state'], 'queued')
+
+    def test_actual_worker_exit_after_fake_acceptance_recovers_without_resubmit(self):
+        receipt = Path(self.tmp.name) / 'synthetic-receipt'
+        child = mp.get_context('spawn').Process(target=crash_after_fake_acceptance,
+                    args=(str(self.path), self.evaluation, str(receipt)))
+        child.start()
+        child.join(timeout=10)
+        if child.is_alive():
+            child.terminate()
+            child.join()
+        self.assertEqual(child.exitcode, 17)
+        request_id = receipt.read_text()
+        fresh = Ledger(self.path)
+        self.assertEqual(fresh.get(request_id)['state'], 'dispatching')
+        scheduler = FakeScheduler()
+        service = SubmissionService(fresh, scheduler)
+        service.submit(self.evaluation, 'crash', H2, RESOURCE)
+        self.assertEqual(scheduler.calls, [])
+        fresh.accepted(request_id, '777', {'synthetic_exact_request_lookup': True})
+        self.assertEqual(service.submit(self.evaluation, 'crash', H2, RESOURCE)['job_id'], '777')
+        self.assertEqual(scheduler.calls, [])
 
 
 if __name__ == '__main__':
