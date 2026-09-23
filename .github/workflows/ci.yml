@@ -1,0 +1,17 @@
+name: Offline checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Standard-library tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Public-tree guard
+        run: python3 scripts/check_public_tree.py
