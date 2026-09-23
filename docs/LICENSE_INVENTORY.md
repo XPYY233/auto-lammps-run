@@ -4,8 +4,8 @@
 
 | 资源 | 已核实 | 决定 |
 |---|---|---|
-| 本项目新代码 | Python 标准库，无第三方复制 | 用户已确认 Apache-2.0；见 LICENSE |
-| 既有 SIGA-LAMMPS | 本机 LICENSE 为 MIT；HPC 与 adapter 代码存在 | 可复用前需逐文件来源检查并保留声明；本 PR 未复制 |
+| 本项目新代码 | 原创实现使用 Python 标准库；第三方改编另列 | 用户已确认 Apache-2.0；见 LICENSE |
+| 既有 SIGA-LAMMPS | 本机 LICENSE 为 MIT；HPC 与 adapter 代码存在 | PR 1b 改编 hpc/slurm.py 状态映射，版本 dd2e0e7；保留 third_party/SIGA-LAMMPS-LICENSE.txt，范围见 FROZEN_INPUTS.md |
 | Auto Research | COPYRIGHT 仅允许有限本机使用，未授予一般改编再分发 | 优先通过证据导出接口集成，不将整仓复制到本项目 |
 | DeepSeekHarness | 本机源码存在；完整依赖/许可证审计未做 | 不内嵌或重打包 |
 | uf3/uf3 | GitHub 及 LICENSE 元数据为 Apache-2.0 | 索引固定版本；作者参考源码仅私有评估端保存 |
