@@ -31,7 +31,7 @@ def main() -> None:
         save_private(args.output, result)
     except (ZoteroError, ValueError, OSError) as exc:
         parser.exit(1, f"Discovery failed: {type(exc).__name__}. Check local API and private output location.\n")
-    print(json.dumps({key: result[key] for key in ("search_hits", "unique_papers", "consistency")}))
+    print(json.dumps({key: result[key] for key in ("search_hits", "reference_records", "distinct_doi_strings", "consistency")}))
 
 
 if __name__ == "__main__":

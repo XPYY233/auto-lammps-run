@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from auto_lammps.__main__ import save_private
-from auto_lammps.zotero import LocalZotero, NoRedirect, Page, ZoteroError
+from auto_lammps.zotero import LocalZotero, NoRedirect, Page, ZoteroError, reference_counts
 
 
 def item(key, kind="journalArticle", parent=None):
@@ -52,7 +52,7 @@ class PaginationTests(unittest.TestCase):
                 ([item("ATTACH01", "attachment", "PAPER001"), item("PAPER001")], "1")]), \
                 patch.object(self.client, "page", return_value=Page(hits[:1], 2, "1")):
             result = self.client.discover("LAMMPS")
-        self.assertEqual(result["unique_papers"], 1)
+        self.assertEqual(result["reference_records"], 1)
         self.assertEqual(result["papers"][0]["source_class"], "unresolved")
 
     def test_missing_parent_and_version_drift_rejected(self):
@@ -73,7 +73,7 @@ class PaginationTests(unittest.TestCase):
         with patch.object(self.client, "collect", side_effect=[([hit], "1"), (extras, "1")]), \
                 patch.object(self.client, "page", return_value=Page([hit], 1, "1")):
             result = self.client.discover("LAMMPS")
-        self.assertEqual(result["unique_papers"], 1)
+        self.assertEqual(result["reference_records"], 1)
         self.assertEqual(result["papers"][0]["local_item_key"], "PAPER001")
 
     def test_query_and_port_validation(self):
@@ -87,6 +87,16 @@ class PaginationTests(unittest.TestCase):
     def test_redirects_blocked(self):
         with self.assertRaises(ZoteroError):
             NoRedirect().redirect_request(None, None, 302, "", {}, "https://example.org")
+
+    def test_doi_duplicates_are_disclosed_without_dropping_records(self):
+        records = [dict(local_item_key="PAPER001", doi="https://doi.org/10.1234/EXAMPLE"),
+                   dict(local_item_key="PAPER002", doi="DOI:10.1234/example"),
+                   dict(local_item_key="PAPER003", doi="not a DOI")]
+        result = reference_counts(records)
+        self.assertEqual(result["reference_records"], 3)
+        self.assertEqual(result["distinct_doi_strings"], 1)
+        self.assertEqual(result["records_without_valid_doi"], 1)
+        self.assertEqual(result["duplicate_doi_groups"][0]["local_item_keys"], ["PAPER001", "PAPER002"])
 
 
 class ExportTests(unittest.TestCase):
