@@ -2,7 +2,7 @@
 import base64
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import io
 import json
 from pathlib import Path
@@ -31,13 +31,17 @@ from test_analysis import DATA, PLAN
 
 
 class ExecutionTests(unittest.TestCase):
+    cores=1
+
     def setUp(self):
         f=candidates.AgentCandidateTests();f.setUp();self.addCleanup(f.doCleanups);self.f=f
         remote=runtime_fixtures.RuntimeTests();remote.setUp();self.addCleanup(remote.doCleanups);self.remote=remote
+        self.resources=replace(runtime_fixtures.RESOURCES,cores=self.cores)
+        if self.cores>1: remote.enable_mpi_fixture()
         self.root=f.root.resolve();self.tasks=TaskStore(self.root/'tasks.sqlite');self.doc=frozen_research(self.tasks)
         f.value['analysis']={'quantity':'synthetic curve','method':'synthetic arithmetic','files':['trajectory.dump'],'plan':deepcopy(PLAN)}
         f.value['workflow']='run 0\nprint "# columns: strain stress" file /output/trajectory.dump'
-        service=CandidateService(self.tasks,f.client,f.adapter,resources=runtime_fixtures.RESOURCES,
+        service=CandidateService(self.tasks,f.client,f.adapter,resources=self.resources,
                                  snapshots=self.root/'snapshots')
         service.enqueue(self.doc['id'],self.doc['revision']);service.close(wait=True)
         self.assertEqual(service.history.get(self.doc['id'])['state'],'prepared')
@@ -63,13 +67,14 @@ class ExecutionTests(unittest.TestCase):
             approval_sha256='a'*64,scoring_sha256='d'*64,static_check_sha256='e'*64,software_sha256='b'*64)
         auth=ExistingAuthorization(remote.control,**self.pins)
         environment=BatchEnvironment('synthetic',None,str(requests),common['python_path'],str(self.helper),collect_endpoint.helper_sha256)
-        self.controller=CandidateExecution(self.tasks,self.ledger,self.root/'snapshots',staging,submission,self.following,auth,environment)
+        self.controller=CandidateExecution(self.tasks,self.ledger,self.root/'snapshots',staging,submission,self.following,auth,environment,
+            runtime_profile_path=remote.profile_path if self.cores>1 else None)
         self.plan=self.controller.prepare(self.doc['id'],self.evaluation);self.request_id=self.plan['row']['id']
         self.outputs=json.loads((self.plan['snapshot'].path/'analysis.json').read_bytes())['outputs']
         self.payload=dict(request_id=self.request_id,manifest_sha256=self.plan['snapshot'].digest,
             **{k:v for k,v in self.pins.items() if k!='software_sha256'},expires_at=4102444800,
             task_sha256=self.plan['snapshot'].verify()['provenance']['task_sha256'],
-            resources=asdict(runtime_fixtures.RESOURCES),outputs=self.outputs,batch_sha256=self.plan['batch'].sha256)
+            resources=asdict(self.resources),outputs=self.outputs,batch_sha256=self.plan['batch'].sha256)
         self.scheduler_binary=remote.root/'not-a-scheduler';self.scheduler_binary.write_bytes(b'never executed')
         self.submit_config=remote.root/'submission.json'
         remote.private(self.submit_config,canonical(dict(runtime_path=str(self.helper),runtime_sha256=sha256(self.helper.read_bytes()),
@@ -200,6 +205,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result['reason'],'request_not_prepared');self.upload.assert_not_called()
         path=self.plan['snapshot'].path/'in.lammps';path.chmod(0o600);path.write_bytes(b'changed')
         with self.assertRaises(ValueError):self.controller.prepare(self.doc['id'],self.evaluation)
+
+    def test_declared_capacity_requires_exact_pinned_profile(self):
+        self.controller.runtime_profile_path=self.remote.profile_path
+        self.controller.prepare(self.doc['id'],self.evaluation)
+        self.remote.private(self.remote.profile_path,b'{}')
+        with self.assertRaisesRegex(Conflict,'pinned deployment'):
+            self.controller.prepare(self.doc['id'],self.evaluation)
+
+
+class MultiCoreExecutionTests(ExecutionTests):
+    """Same candidate/submission/recovery checks with a four-rank frozen request."""
+    cores=4
+
+    def test_missing_capacity_declaration_blocks_before_dispatch(self):
+        self.controller.runtime_profile_path=None
+        with self.transports(),self.assertRaisesRegex(runtime.ExecutionDenied,'capacity'):
+            self.execute()
+        self.upload.assert_not_called();self.dispatch.assert_not_called()
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['dispatch_claims'],0)
+
+    def test_batch_request_retains_frozen_cpu_count(self):
+        self.assertIn(b'#SBATCH --ntasks=4\n',self.plan['batch'].script)
+        self.assertEqual(self.plan['snapshot'].verify()['resources']['cores'],4)
 
 
 if __name__=='__main__':unittest.main()

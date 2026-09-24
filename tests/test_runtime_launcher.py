@@ -98,6 +98,7 @@ class RuntimeTests(unittest.TestCase):
         stack.enter_context(patch.object(runtime.sys,'platform','linux'))
         stack.enter_context(patch.dict(os.environ,{'SLURM_JOB_ID':'123'},clear=True))
         stack.enter_context(patch.object(runtime.os,'sched_getaffinity',return_value={0},create=True))
+        stack.enter_context(patch.object(runtime,'cgroup_cpu_set',return_value={0}))
         stack.enter_context(patch.object(runtime.socket,'gethostname',return_value='compute-fixture'))
         stack.enter_context(patch.object(runtime,'cgroup_memory_limit',return_value=RESOURCES.memory_bytes))
         stack.enter_context(patch.object(runtime.subprocess,'run',return_value=subprocess.CompletedProcess([],0,self.allocation().encode(),b'')))
@@ -150,6 +151,34 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
         proc.write_text('0::/../escape\n')
         with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
+
+    def test_kernel_cpu_set_formats_and_effective_membership(self):
+        self.assertEqual(runtime.cpu_set('0-2,5,8-9'), {0,1,2,5,8,9})
+        for value in ('', '1,1', '3-1', '-1', '1-65536', '1,', '0-2,2-3', '1 2', None):
+            with self.subTest(value=value), self.assertRaises(runtime.ExecutionDenied):
+                runtime.cpu_set(value)
+        root=self.root/'cpu-cgroup'; (root/'job').mkdir(parents=True)
+        proc=self.root/'cpu-membership'; proc.write_text('0::/job\n')
+        (root/'job/cpuset.cpus.effective').write_text('0,2,4,6\n')
+        self.assertEqual(runtime.cgroup_cpu_set(proc,root), {0,2,4,6})
+        (root/'job/cpuset.cpus.effective').write_text('')
+        with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_cpu_set(proc,root)
+        for value in ('0::/../job\n', '0::/job\n0::/other\n', '0:cpuset:/job\n', '3:cpu:/job\n'):
+            proc.write_text(value)
+            with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_cpu_set(proc,root)
+
+    def test_legacy_cpu_controller_intersects_parents_and_hybrid_prefers_v1(self):
+        root=self.root/'legacy-cpus'; current=root/'cpuset/parent/job'; current.mkdir(parents=True)
+        proc=self.root/'legacy-cpu-membership'
+        proc.write_text('0::/unified\n3:cpuset:/parent/job\n')
+        (current/'cpuset.cpus').write_text('0-7')
+        (current.parent/'cpuset.cpus').write_text('2-5')
+        (root/'cpuset/cpuset.cpus').write_text('0-15')
+        self.assertEqual(runtime.cgroup_cpu_set(proc,root), {2,3,4,5})
+        (current/'cpuset.effective_cpus').write_text('3-4')
+        self.assertEqual(runtime.cgroup_cpu_set(proc,root), {3,4})
+        proc.write_text('3:cpuset:/parent/job\n4:cpuset:/other\n')
+        with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_cpu_set(proc,root)
 
     def legacy_memory_fixture(self, own='4096', effective='2048'):
         mount=self.root/'cgroup-v1'
@@ -237,6 +266,92 @@ class RuntimeTests(unittest.TestCase):
         extra.unlink()
         (self.tree/'link').symlink_to(self.control,target_is_directory=True)
         with self.assertRaises(runtime.ExecutionDenied): runtime.verify_runtime_tree(self.profile)
+
+    def enable_mpi_fixture(self, max_ranks=8):
+        for name in ('mpiexec.hydra', 'hydra_pmi_proxy', 'hydra_bstrap_proxy'):
+            data=('synthetic inventory, not executable: '+name).encode()
+            (self.tree/'bin'/name).write_bytes(data)
+            self.profile['runtime_files']['bin/'+name]=runtime.digest(data)
+        (self.tree/'dev/shm').mkdir(exist_ok=True)
+        self.profile['runtime_options']={'mpi_transport':'intel-shm', 'mpi_launcher':{
+            'kind':'intel-hydra-fork','launcher_relative':'bin/mpiexec.hydra',
+            'pmi_proxy_relative':'bin/hydra_pmi_proxy','bootstrap_proxy_relative':'bin/hydra_bstrap_proxy',
+            'max_ranks':max_ranks}}
+        self.profile_bytes=runtime.canonical(self.profile)
+        self.private(self.profile_path,self.profile_bytes)
+
+    def test_mpi_uses_only_local_pinned_commands_and_exact_cpu_ids(self):
+        self.enable_mpi_fixture()
+        runtime.verify_runtime_tree(self.profile)
+        with patch.dict(os.environ,{'I_MPI_HYDRA_BOOTSTRAP':'ssh','I_MPI_GTOOL':'malicious',
+                                   'SLURM_NODELIST':'external','OMP_NUM_THREADS':'99'}):
+            args=runtime.sandbox_command(self.profile,case=self.case,outputs=OUTPUTS,
+                 entrypoint='input.in',filter_fd=42,cores=4,cpu_ids={0,2,4,6})
+        command=args[args.index('--')+1:]
+        self.assertEqual(command, ['/bin/mpiexec.hydra','-launcher','fork','-hosts','127.0.0.1',
+            '-localhost','127.0.0.1','-iface','lo','-n','4','/bin/lmp',
+            '-in','/work/input.in','-log','/output/log.lammps','-screen','none'])
+        env={args[i+1]:args[i+2] for i,v in enumerate(args) if v=='--setenv'}
+        self.assertEqual(env['I_MPI_PIN_PROCESSOR_LIST'],'0,2,4,6')
+        self.assertEqual(env['I_MPI_FABRICS'],'shm')
+        self.assertEqual(env['OMP_NUM_THREADS'],'1')
+        self.assertNotIn('I_MPI_GTOOL',env)
+        self.assertNotIn('SLURM_NODELIST',env)
+        self.assertIn('--unshare-all',args)
+        self.assertEqual([args[i+1] for i,v in enumerate(args) if v=='--tmpfs'], ['/tmp','/dev/shm'])
+        for ids in (None, {0}, [0,0,2,4], [0,1,2,False], [0,1,2,-1]):
+            with self.assertRaises(runtime.ExecutionDenied):
+                runtime.sandbox_command(self.profile,case=self.case,outputs=OUTPUTS,
+                    entrypoint='input.in',filter_fd=42,cores=4,cpu_ids=ids)
+
+    def test_mpi_capacity_requires_complete_trusted_inventory_and_mode(self):
+        with self.assertRaises(runtime.ExecutionDenied): runtime.validate_parallelism(self.profile,2)
+        self.enable_mpi_fixture()
+        original=json.loads(json.dumps(self.profile))
+        for ranks in (True,0,9,1.5):
+            with self.assertRaises(runtime.ExecutionDenied): runtime.validate_parallelism(self.profile,ranks)
+        for field,value in [('kind','ssh'),('launcher_relative','work/mpiexec.hydra'),
+                            ('pmi_proxy_relative','other/hydra_pmi_proxy'),('max_ranks',True),('max_ranks',9)]:
+            profile=json.loads(json.dumps(original));profile['runtime_options']['mpi_launcher'][field]=value
+            with self.subTest(field=field),self.assertRaises(runtime.ExecutionDenied): runtime.mpi_profile(profile)
+        for mode in (None,[],{}):
+            profile=json.loads(json.dumps(original));profile['runtime_options']['mpi_launcher']=mode
+            with self.assertRaises(runtime.ExecutionDenied): runtime.mpi_profile(profile)
+        del self.profile['runtime_files']['bin/hydra_pmi_proxy']
+        with self.assertRaises(runtime.ExecutionDenied): runtime.verify_runtime_tree(self.profile)
+
+    def test_four_rank_execution_uses_one_intent_and_rechecks_allocation(self):
+        self.enable_mpi_fixture()
+        manifest=json.loads((self.case/'manifest.json').read_bytes());manifest['resources']['cores']=4
+        data=runtime.canonical(manifest);self.digest=runtime.digest(data)
+        (self.case/'manifest.json').chmod(0o600)
+        self.private(self.case/'manifest.json',data)
+        stage=json.loads((self.case/'stage.json').read_bytes());stage['manifest_sha256']=self.digest
+        (self.case/'stage.json').chmod(0o600)
+        self.private(self.case/'stage.json',runtime.canonical(stage))
+        self.payload.update(manifest_sha256=self.digest,profile_sha256=runtime.digest(self.profile_bytes),
+                            resources=manifest['resources'])
+        self.private(self.control/(REQUEST+'.json'),runtime.canonical(signed(self.payload)))
+        stack,popen=self.guards()
+        with stack,patch.object(runtime,'cgroup_cpu_set',return_value={0,2,4,6}), \
+             patch.object(runtime.os,'sched_getaffinity',return_value={0,2,4,6}), \
+             patch.object(runtime.subprocess,'run',return_value=subprocess.CompletedProcess(
+                 [],0,self.allocation(NumCPUs='4').encode(),b'')):
+            result=runtime.execute(self.profile_path,REQUEST,self.digest)
+            self.assertEqual(result['scientific_status'],'not_evaluated')
+            self.assertEqual(popen.call_count,1)
+            record=json.loads((self.case/'execution-intent.json').read_bytes())
+            self.assertEqual(record['ranks'],4)
+            self.assertEqual(record['cpu_ids'],[0,2,4,6])
+            with self.assertRaises(FileExistsError): runtime.execute(self.profile_path,REQUEST,self.digest)
+            self.assertEqual(popen.call_count,1)
+
+    def test_mutable_affinity_cannot_replace_the_kernel_cpu_ceiling(self):
+        stack,popen=self.guards()
+        with stack,patch.object(runtime,'cgroup_cpu_set',return_value={0,1}):
+            with self.assertRaisesRegex(runtime.ExecutionDenied,'CPU cgroup'):
+                runtime.execute(self.profile_path,REQUEST,self.digest)
+            popen.assert_not_called()
 
     def test_engine_environment_uses_only_inventory_and_fixed_single_process_options(self):
         profile={**self.profile, 'runtime_files':{'lib/libsynthetic.so':H, 'lib64/libother.so':H},

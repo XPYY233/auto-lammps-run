@@ -61,12 +61,14 @@ class ExistingAuthorization:
 
 
 class CandidateExecution:
-    def __init__(self, tasks, ledger, snapshots, staging, submission, following, authorization, environment):
+    def __init__(self, tasks, ledger, snapshots, staging, submission, following, authorization, environment,
+                 *, runtime_profile_path=None):
         self.tasks,self.ledger=tasks,ledger
         self.history=CandidateHistory(tasks)
         self.snapshots=private_directory(snapshots)
         self.staging,self.submission,self.following=staging,submission,following
         self.authorization,self.environment=authorization,environment
+        self.runtime_profile_path=runtime_profile_path
         if any(service.ledger.path!=ledger.path for service in (staging,submission,following)):
             raise ValueError('Execution stages must share the same ledger')
         endpoints=(staging.client.endpoint,submission.scheduler.endpoint,following.analysis.collector.endpoint)
@@ -99,8 +101,15 @@ class CandidateExecution:
         if identity['role']!='agent' or identity['task']!=inputs['condition_record_sha256']:
             raise Conflict('Evaluation must pre-register this research task as agent work')
         resources=Resources(**manifest['resources'])
-        if resources.cores!=1 or resources.wall_seconds%60 or resources.memory_bytes%(1024*1024):
-            raise CandidateError('Candidate resources are unsupported by the configured single-core runtime')
+        if resources.wall_seconds%60 or resources.memory_bytes%(1024*1024):
+            raise CandidateError('Candidate resources require whole-minute time and whole-MiB memory')
+        profile={}
+        if self.runtime_profile_path is not None:
+            raw=runtime.read_regular(self.runtime_profile_path,1000000,private=True)
+            if sha256(raw)!=self.authorization.pins['profile_sha256']:
+                raise Conflict('Runtime capacity differs from the pinned deployment profile')
+            profile=json.loads(raw)
+        runtime.validate_parallelism(profile,resources.cores)
         # The key is owned by the controller; callers cannot rename an attempt.
         key='candidate_'+job['id']
         row=self.ledger.reserve(evaluation,key,digest,resources)
