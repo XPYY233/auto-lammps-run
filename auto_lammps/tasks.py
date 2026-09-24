@@ -134,7 +134,10 @@ class TaskStore:
                        'event TEXT NOT NULL, at TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(task_id, revision))')
             db.execute('CREATE TABLE IF NOT EXISTS frozen (task_id TEXT PRIMARY KEY REFERENCES tasks(id), '
                        'sha256 TEXT NOT NULL, document TEXT NOT NULL)')
-            for table in ('revisions', 'frozen'):
+            db.execute('CREATE TABLE IF NOT EXISTS reference_intents (id TEXT PRIMARY KEY, '
+                       'task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL, '
+                       'operation_sha256 TEXT NOT NULL, at TEXT NOT NULL, document TEXT NOT NULL)')
+            for table in ('revisions', 'frozen', 'reference_intents'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable task evidence'); END")
@@ -291,6 +294,62 @@ class TaskStore:
                                       revision=doc['revision']+1)
             return self._write(db, doc, 'conditions_generated')
 
+    def save_reference_intent(self, identifier, revision, request_id, context, operation):
+        """Trusted reference service only; preserve source bytes before model I/O."""
+        if (not isinstance(request_id, str) or not re.fullmatch('[a-f0-9]{32}', request_id)
+                or operation != sha256(canonical(context)) or request_id != operation[:32]
+                or context.get('task_id') != identifier):
+            raise TaskError('参考整理意图身份不一致')
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            if doc['mode'] != 'reproduction':
+                raise TaskError('参考整理仅适用于文献任务')
+            existing = db.execute('SELECT operation_sha256,document FROM reference_intents WHERE id=?',
+                                  (request_id,)).fetchone()
+            if existing:
+                if existing['operation_sha256'] != operation or existing['document'] != canonical(context).decode():
+                    raise TaskError('参考整理意图不能替换')
+                return
+            if db.execute('SELECT count(*) FROM reference_intents WHERE task_id=?', (identifier,)).fetchone()[0] >= 16:
+                raise TaskError('此任务参考整理意图已达上限')
+            db.execute('INSERT INTO reference_intents VALUES (?,?,?,?,?,?)',
+                       (request_id, identifier, revision, operation, datetime.now(timezone.utc).isoformat(),
+                        canonical(context).decode()))
+
+    def import_generated_reference(self, identifier, revision, request_id, context, operation, completion):
+        from .reference_generation import validate_reference
+        if (not isinstance(completion, dict) or set(completion) != {'value', 'request_id', 'receipt'}
+                or completion['request_id'] != request_id or not isinstance(completion['receipt'], dict)
+                or completion['receipt'].get('state') != 'completed'
+                or completion['receipt'].get('output_sha256') != sha256(canonical(completion['value']))
+                or completion['receipt'].get('request_sha256') != context['request_sha256']
+                or operation != sha256(canonical(context)) or request_id != operation[:32]):
+            raise TaskError('参考模型回执与意图不一致')
+        choices, results, questions, sources = validate_reference(context['sources'], completion['value'])
+        with self.transaction() as db:
+            intent = db.execute('SELECT task_id,document,operation_sha256 FROM reference_intents WHERE id=?',
+                                (request_id,)).fetchone()
+            if (intent is None or intent['task_id'] != identifier or intent['operation_sha256'] != operation
+                    or intent['document'] != canonical(context).decode()):
+                raise TaskError('缺少相符的参考来源意图')
+            doc = self._read(db, identifier)
+            if request_id in doc.get('reference_batches', {}):
+                return {**doc, 'issues': issues(doc)}
+            doc = self._editable(db, identifier, revision)
+            if doc['mode'] != 'reproduction':
+                raise TaskError('参考结果不能进入普通科研任务')
+            for entry in choices:
+                existing = [{k: v for k, v in c.items() if k != 'id'} for c in doc['fields'][entry['field']]['candidates']]
+                if entry['candidate'] not in existing:
+                    append_condition(doc, entry['field'], entry['candidate'])
+            doc.setdefault('reference_batches', {})[request_id] = dict(
+                operation_sha256=operation, sources=sources, exports=context['exports'],
+                sources_sha256=sha256(canonical(sources)), reported_results=results, questions=questions,
+                response=completion['value'], receipt=completion['receipt'], revision=doc['revision'] + 1,
+                automatic_semantic_verification='not_performed', reference_qualified=False,
+                runtime_actor='independent_api', execution_authorized=False)
+            return self._write(db, doc, 'reference_evidence_generated')
+
     def freeze(self, identifier, revision):
         with self.transaction() as db:
             doc = self._read(db, identifier)
@@ -306,6 +365,8 @@ class TaskStore:
                 contract['literature_sources'] = doc['literature_sources']
             if doc.get('generated_batches'):
                 contract['generated_batches'] = doc['generated_batches']
+            if doc.get('reference_batches'):
+                contract['reference_batches'] = doc['reference_batches']
             content = canonical(contract)
             digest = sha256(content)
             db.execute('INSERT INTO frozen VALUES (?,?,?)', (doc['id'], digest, content.decode()))

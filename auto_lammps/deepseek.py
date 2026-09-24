@@ -197,6 +197,18 @@ class ModelCalls:
                     for row in db.execute('SELECT c.id,c.request_sha256,c.at,r.document FROM calls c '
                                           'LEFT JOIN receipts r ON c.id=r.id ORDER BY c.at,c.id')]
 
+    def lookup(self, identifier):
+        """Read an existing intent/receipt without spending or sending again."""
+        if not isinstance(identifier, str) or not re.fullmatch('[a-f0-9]{32}', identifier):
+            raise ModelError('invalid_request_id')
+        with self.transaction() as db:
+            row = db.execute('SELECT c.request_sha256,r.document FROM calls c '
+                             'LEFT JOIN receipts r ON c.id=r.id WHERE c.id=?', (identifier,)).fetchone()
+        if row is None:
+            return None
+        return dict(request_id=identifier, request_sha256=row[0],
+                    receipt=json.loads(row[1]) if row[1] else None)
+
 
 def parse_completion(content):
     data = strict_json(content)

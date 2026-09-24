@@ -55,6 +55,9 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 参考端已有保留来源的作者输入路径适配，见 [参考输入适配](docs/REFERENCE_PATHS.md)。
 仅做静态准备，尚无合格参考结果；进入 B 前将先向用户报告策略并取得确认。
 
+参考端另有独立 API 驱动的条件/论文结果草稿服务，见 [自动证据整理](docs/REFERENCE_EVIDENCE.md)。
+已完成合成响应下的来源校验、保存与恢复；尚未接通真实 API 或文献自动化验收。
+
 ## 开发与部署
 
 - [目标与三周路线](docs/GOALS.md) · [进度入口](docs/PROGRESS.md)
