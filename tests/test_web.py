@@ -9,6 +9,7 @@ from auto_lammps.tasks import TaskStore
 from auto_lammps.web import create_app
 from test_tasks import evidence
 from test_literature import export_csv
+from test_task_packages import frozen_task
 
 ORIGIN='http://127.0.0.1:8765'
 HEADERS={'Origin':ORIGIN,'X-Task-Review':'1'}
@@ -93,3 +94,20 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post(url,json=data,headers=HEADERS).status_code,409)
         for route,payload in (('/api/literature/preview',{'csv_text':content}), (url,data)):
             self.assertEqual(self.client.post(route,json=payload,headers={'Origin':'https://example.test','X-Task-Review':'1'}).status_code,403)
+
+    def test_separate_package_downloads_remain_local_operator_drafts(self):
+        doc = frozen_task(self.store)
+        base = f"/api/tasks/{doc['id']}/packages/"
+        execution = self.client.get(base+'execution')
+        reference = self.client.get(base+'reference')
+        self.assertEqual(execution.status_code, 200, execution.text)
+        self.assertEqual(reference.status_code, 200, reference.text)
+        self.assertNotIn('PRIVATE_', execution.text)
+        self.assertIn('PRIVATE_PROMPT_CANARY', reference.text)
+        self.assertEqual(execution.json()['release_status'], 'operator_review_required')
+        self.assertIn('execution-task-draft.json', execution.headers['content-disposition'])
+        self.assertEqual(execution.headers['cache-control'], 'no-store')
+        self.assertEqual(self.client.get(base+'answers').status_code, 404)
+        self.assertEqual(self.client.get(base+'reference', headers={'Host': 'untrusted.example'}).status_code, 403)
+        unfinished = self.create()
+        self.assertEqual(self.client.get(f"/api/tasks/{unfinished['id']}/packages/execution").status_code, 422)

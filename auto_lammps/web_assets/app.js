@@ -149,6 +149,9 @@ function render() {
   $('#freeze').disabled = !!current.issues.length;
   $('#export').hidden = !frozen;
   $('#export').href = `/api/tasks/${current.id}/export`;
+  $('#package-exports').hidden = !frozen;
+  $('#export-execution').href = `/api/tasks/${current.id}/packages/execution`;
+  $('#export-reference').href = `/api/tasks/${current.id}/packages/reference`;
   $('#freeze-heading').textContent = frozen ? '这份条件已锁定，修订证据已保留。' : '保存这份确定的研究条件';
   $('#freeze-note').textContent = frozen ? '可导出本人的条件审阅记录。它不是主 Agent 的隔离任务包，也不授权执行计算。' : `还有 ${current.issues.length} 项需要处理。冻结后不可覆盖；不会自动生成脚本或提交计算。`;
 }

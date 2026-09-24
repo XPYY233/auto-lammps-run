@@ -201,6 +201,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None):
         return Response(store.export(identifier), media_type='application/json',
                         headers={'Content-Disposition': 'attachment; filename="confirmed-conditions.json"'})
 
+    @app.get('/api/tasks/{identifier}/packages/{kind}')
+    def export_package(identifier: str, kind: str):
+        filenames = {'execution': 'execution-task-draft.json', 'reference': 'reference-preparation.json'}
+        if kind not in filenames:
+            return JSONResponse({'detail': '资料类型不存在'}, status_code=404)
+        return Response(store.export_packages(identifier)[kind], media_type='application/json',
+                        headers={'Content-Disposition': f'attachment; filename="{filenames[kind]}"'})
+
     return app
 
 

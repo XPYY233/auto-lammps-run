@@ -293,3 +293,8 @@ class TaskStore:
         with self.transaction() as db:
             self._read(db, identifier)
             return [dict(row) for row in db.execute('SELECT revision,event,at FROM revisions WHERE task_id=? ORDER BY revision', (identifier,))]
+
+    def export_packages(self, identifier):
+        from .task_packages import split_condition_record
+        # export verifies the immutable record's digest before projection.
+        return split_condition_record(self.export(identifier))
