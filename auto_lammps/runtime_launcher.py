@@ -5,7 +5,7 @@ A private controller signs request grants; neither key nor grants are mounted
 inside the sandbox. Tests use synthetic data and never invoke a physics engine.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes
 import errno
 from datetime import datetime, timezone
@@ -20,6 +20,7 @@ import resource
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -492,6 +493,7 @@ def execute(profile_path, request_id, manifest_sha256):
         # the same request, even if a previous process died before its final receipt.
         write_once(case/'execution-intent.json',dict(request_id=request_id,job_id=job_id,manifest_sha256=manifest_sha256,
             profile_sha256=digest(profile_data),grant_sha256=digest(canonical(grant)),argv_sha256=digest(canonical(argv)),
+            outputs=outputs,
             at=datetime.now(timezone.utc).isoformat()))
         output = case/'output'
         output.mkdir(mode=0o700,exist_ok=False)
@@ -524,11 +526,147 @@ def execute(profile_path, request_id, manifest_sha256):
     return result
 
 
+def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream):
+    """Read-only framed export for the trusted controller after final accounting.
+
+    Never executes inputs, invokes a scheduler, or reads the private grant key.
+    The caller must establish terminal scheduler state; a launcher receipt alone
+    does not prove that allocation accounting has finished.
+    """
+    if not re.fullmatch(r'[a-f0-9]{32}', request_id) or not re.fullmatch(r'[1-9][0-9]{0,19}', job_id):
+        raise ExecutionDenied('Invalid collection identity')
+    hash_value(manifest_sha256)
+    profile = json.loads(read_regular(profile_path, 1000000, private=True))
+    validate_deployment_paths(profile)
+    if root_path != profile['requests_root']:
+        raise ExecutionDenied('Wrong collection root')
+    case = absolute(root_path)/request_id
+    fd = directory(case, private=True)
+    os.close(fd)
+    manifest_data = read_regular(case/'manifest.json', 1000000)
+    if digest(manifest_data) != manifest_sha256:
+        raise ExecutionDenied('Collection belongs to another input')
+    budget = json.loads(manifest_data)['resources']['storage_bytes']
+    if type(budget) is not int or budget <= 0:
+        raise ExecutionDenied('Invalid collection byte bound')
+    controls = {}
+    for name in ('execution-intent.json', 'execution-result.json', 'scheduler-result.json'):
+        try:
+            controls[name] = read_regular(case/name, 200000 if name == 'scheduler-result.json' else 16384)
+        except FileNotFoundError:
+            pass
+    intent = json.loads(controls.get('execution-intent.json', b'null'))
+    result = json.loads(controls.get('execution-result.json', b'null'))
+    accepted = json.loads(controls.get('scheduler-result.json', b'null'))
+    if intent is not None:
+        if (intent.get('request_id') != request_id or intent.get('manifest_sha256') != manifest_sha256
+                or intent.get('job_id') != job_id):
+            raise ExecutionDenied('Wrong execution intent')
+        outputs = intent.get('outputs')
+        # This also rejects legacy intents without a declared output list.
+        validate_outputs(outputs, storage_bytes=budget, input_bytes=0)
+    else:
+        if (not isinstance(accepted, dict) or accepted.get('state') != 'accepted'
+                or accepted.get('request_id') != request_id or accepted.get('job_id') != job_id
+                or accepted.get('manifest_sha256') != manifest_sha256):
+            raise ExecutionDenied('No matching remote execution or acceptance identity')
+        outputs = []
+    if result is not None and (intent is None or result.get('request_id') != request_id
+            or result.get('job_id') != job_id or type(result.get('returncode')) is not int
+            or type(result.get('timed_out')) is not bool or result.get('scientific_status') != 'not_evaluated'):
+        raise ExecutionDenied('Invalid execution result')
+    header = dict(schema_version=1, request_id=request_id, manifest_sha256=manifest_sha256, job_id=job_id,
+                  execution=dict(state='finished' if result else 'incomplete',
+                                 returncode=result['returncode'] if result else None,
+                                 timed_out=result['timed_out'] if result else None),
+                  scientific_status='not_evaluated', missing_outputs=[], files=[])
+    names = [name for name in ('execution-intent.json', 'execution-result.json') if name in controls]
+    names += ['scheduler.stdout', 'scheduler.stderr'] + ['output/'+name for name in outputs]
+    total = 0
+    with ExitStack() as stack:
+        opened = []
+        for name in names:
+            path = case/name
+            try:
+                parent = directory(path.parent)
+                try:
+                    fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                finally:
+                    os.close(parent)
+            except FileNotFoundError:
+                if name.startswith('output/'):
+                    header['missing_outputs'].append(name)
+                elif name in controls:
+                    raise ExecutionDenied('Execution receipt disappeared')
+                continue
+            handle = stack.enter_context(os.fdopen(fd, 'rb'))
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > budget-total):
+                raise ExecutionDenied('Unsafe or oversized output')
+            checksum = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                block = handle.read(min(remaining, 65536))
+                if not block:
+                    raise ExecutionDenied('Output truncated during collection')
+                checksum.update(block)
+                remaining -= len(block)
+            after = os.fstat(fd)
+            if handle.read(1) or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ExecutionDenied('Output changed during collection')
+            if name in controls and checksum.hexdigest() != digest(controls[name]):
+                raise ExecutionDenied('Execution receipt changed')
+            total += before.st_size
+            header['files'].append(dict(path=name, size=before.st_size, sha256=checksum.hexdigest()))
+            opened.append((handle, before))
+        data = canonical(header)
+        if len(data) > 65536:
+            raise ExecutionDenied('Collection header too large')
+        stream.write(struct.pack('!I', len(data))+data)
+        for (handle, before), item in zip(opened, header['files']):
+            handle.seek(0)
+            checksum = hashlib.sha256()
+            remaining = item['size']
+            while remaining:
+                block = handle.read(min(remaining, 65536))
+                if not block:
+                    raise ExecutionDenied('Output truncated during transfer')
+                checksum.update(block)
+                stream.write(block)
+                remaining -= len(block)
+            after = os.fstat(handle.fileno())
+            if handle.read(1) or checksum.hexdigest() != item['sha256'] or (
+                    before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ExecutionDenied('Output changed during transfer')
+        stream.flush()
+    return header
+
+
 def main():
     parser=argparse.ArgumentParser(description='Approved, single-process compute-node execution only.')
     parser.add_argument('--request-id',required=True)
     parser.add_argument('--manifest-sha256',required=True)
+    parser.add_argument('--collect', action='store_true', help='Read existing outputs only; never execute')
+    parser.add_argument('--job-id')
+    parser.add_argument('--root')
     args=parser.parse_args()
+    if args.collect:
+        if not args.job_id or not args.root:
+            parser.error('Collection requires the accounted job identity and configured root')
+        signal.alarm(60)
+        try:
+            collect(Path(__file__).resolve().parent/'runtime.json', args.request_id,
+                    args.manifest_sha256, args.job_id, args.root, sys.stdout.buffer)
+        except Exception as exc:
+            print(json.dumps({'state':'collection_failed','error_type':type(exc).__name__}), file=sys.stderr)
+            return 1
+        finally:
+            signal.alarm(0)
+        return 0
+    if args.job_id or args.root:
+        parser.error('Collection arguments cannot be used for execution')
     try:
         result=execute(Path(__file__).resolve().parent/'runtime.json',args.request_id,args.manifest_sha256)
     except Exception as exc:
