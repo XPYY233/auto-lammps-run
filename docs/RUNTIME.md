@@ -93,6 +93,9 @@ v1 从进程成员关系定位 `memory` 控制器，读取 `memory.limit_in_byte
 
 已发现指定入口的 bwrap 帮助不含 `--disable-userns` 与 `--clearenv`。实现使用其已列出的 `--seccomp FD`，通过 libseccomp 编译过滤器，禁止 unshare/setns 与携带 CLONE_NEWUSER 的 clone，并对 clone3 返回 ENOSYS。无需新版两个选项；过滤器不可用则拒绝。其他 ABI 尚不支持。此过滤器专门约束嵌套 namespace，不是所有系统调用的白名单。
 
+Issue #61 增加可选的 [固定容量输出卷](OUTPUT_VOLUME.md)，使声明输出共享容量，保留原有
+逐文件可写挂载；回收时只读重开持久镜像。未配置时仍使用下面的平均单文件限制。
+
 独占 execution-intent 防止同请求重启执行。墙钟超时终止进程组；RLIMIT_AS、RLIMIT_FSIZE 和已核实的内存 cgroup 限制资源。输出名有限，单文件大小分摊声明的逻辑存储空间，预留调度流和收据空间。进程退出始终保持 scientific_status=not_evaluated，必须另做输出与科学验收。
 
 Issue #33 将批准输出名保存到执行意图，供只读 `--collect` 入口使用。该入口不调用引擎或

@@ -64,8 +64,12 @@ def directory(path, *, private=False):
     path = absolute(str(path))
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in path.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        parts = path.parts[1:]
+        for index, part in enumerate(parts):
+            # Shared HPC ancestors may allow traversal but prohibit listing.
+            # Keep the final descriptor readable for fsync and file operations.
+            access = os.O_RDONLY if index == len(parts)-1 else getattr(os, 'O_PATH', os.O_RDONLY)
+            child = os.open(part, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
         info = os.fstat(fd)
@@ -251,6 +255,176 @@ def validate_outputs(outputs, *, storage_bytes, input_bytes):
     if per_file <= 0:
         raise ExecutionDenied('Insufficient reserved output space')
     return per_file
+
+
+def volume_allocation(profile, *, storage_bytes, input_bytes):
+    """Reserve the entire backing image, including its filesystem metadata.
+
+    Scheduler/controller files remain outside the image. This is not a claim
+    that the whole host filesystem or every project copy has a physical quota.
+    """
+    config = profile.get('output_volume')
+    if config is None:
+        return None
+    fields = {'kind', 'max_image_bytes', 'mkfs_path', 'mkfs_sha256',
+              'fuse2fs_path', 'fuse2fs_sha256', 'fusermount_path',
+              'fusermount_sha256', 'helper_directory'}
+    if (not isinstance(config, dict) or set(config) != fields or config['kind'] != 'ext2-fuse'
+            or type(config['max_image_bytes']) is not int
+            or not 8*1024*1024 <= config['max_image_bytes'] <= 256*1024**3
+            or type(storage_bytes) is not int or type(input_bytes) is not int
+            or storage_bytes <= 0 or input_bytes < 0):
+        raise ExecutionDenied('Invalid output volume declaration')
+    for prefix in ('mkfs', 'fuse2fs', 'fusermount'):
+        absolute(config[prefix+'_path'])
+        hash_value(config[prefix+'_sha256'])
+    absolute(config['helper_directory'])
+    # Leave space for two bounded controller/scheduler streams and receipts;
+    # deployment must still enforce/account those external allocations.
+    available = storage_bytes-input_bytes-262144
+    image_bytes = min(config['max_image_bytes'], available-2*65536)
+    image_bytes = image_bytes//4096*4096
+    if image_bytes < 8*1024*1024:
+        raise ExecutionDenied('Insufficient space for a bounded output image')
+    return dict(kind='ext2-fuse', image_bytes=image_bytes)
+
+
+def verify_volume_tools(profile):
+    config = profile['output_volume']
+    for prefix in ('mkfs', 'fuse2fs', 'fusermount'):
+        path = absolute(config[prefix+'_path'])
+        requests = absolute(profile['requests_root'])
+        if path == requests or requests in path.parents:
+            raise ExecutionDenied('Storage tools must be outside submitted files')
+        if digest(read_regular(path, 64*1024*1024)) != hash_value(config[prefix+'_sha256']):
+            raise ExecutionDenied('Storage tool version mismatch')
+    helper = absolute(config['helper_directory'])
+    requests = absolute(profile['requests_root'])
+    if helper == requests or requests in helper.parents:
+        raise ExecutionDenied('Storage helper directory must be outside requests')
+    fd = directory(helper, private=True)
+    try:
+        # libfuse 2 falls back to PATH after its compiled-in fusermount path.
+        if os.readlink('fusermount', dir_fd=fd) != config['fusermount_path']:
+            raise ExecutionDenied('Unverified FUSE mount helper')
+    finally:
+        os.close(fd)
+    for path in (Path('/bin/fusermount'), Path('/usr/bin/fusermount')):
+        if path.exists() and path.resolve() != Path(config['fusermount_path']).resolve():
+            raise ExecutionDenied('Unpinned default FUSE mount helper')
+    return config
+
+
+def verify_volume_mount(mount, image, image_bytes, *, readonly):
+    """Check the actual mount, not just a successful helper exit status."""
+    matches = []
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 10 or '-' not in fields:
+            continue
+        # The volume backend rejects paths needing mountinfo escape decoding.
+        if fields[4] != str(mount):
+            continue
+        separator = fields.index('-')
+        matches.append(fields)
+        if (fields[separator+1] != 'fuse.ext4' or fields[separator+2] != str(image)
+                or ('ro' in fields[5].split(',')) != readonly
+                or f'user_id={os.getuid()}' not in fields[separator+3].split(',')):
+            raise ExecutionDenied('Output mount identity or mode mismatch')
+    if len(matches) != 1:
+        raise ExecutionDenied('Missing or ambiguous output mount')
+    info = os.statvfs(mount)
+    if not 0 < info.f_blocks*info.f_frsize <= image_bytes:
+        raise ExecutionDenied('Output filesystem exceeds reserved image capacity')
+
+
+@contextmanager
+def mounted_output_volume(profile, case, allocation, *, readonly=False):
+    """A fixed image survives daemon exit; collection remounts it read-only.
+
+    No helper or image is writable or executable by the model. Only declared
+    files inside this volume are subsequently bind-mounted into the engine.
+    """
+    config = verify_volume_tools(profile)
+    image, mount = case/'output-volume.ext2', case/'output'
+    capacity = allocation['image_bytes']
+    if (type(capacity) is not int or not 8*1024*1024 <= capacity <= config['max_image_bytes']
+            or capacity % 4096 or re.search(r'[\s\\]', str(case))):
+        raise ExecutionDenied('Invalid frozen image capacity')
+    if os.path.ismount(mount):
+        raise ExecutionDenied('Output directory is already mounted; reconcile first')
+    if not readonly:
+        mount.mkdir(mode=0o700, exist_ok=False)
+        descriptor = os.open(image, os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
+        try:
+            os.ftruncate(descriptor, capacity)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    fd = directory(mount, private=True)
+    os.close(fd)
+    if any(mount.iterdir()):
+        raise ExecutionDenied('Output mountpoint must be empty')
+    descriptor = os.open(image, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.getuid() or before.st_mode & 0o077
+                or before.st_size != capacity):
+            raise ExecutionDenied('Invalid bounded output image')
+    finally:
+        os.close(descriptor)
+    environment = {'PATH': config['helper_directory']+':/usr/bin:/bin', 'LC_ALL': 'C'}
+    def helper_limits():
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (capacity, capacity))
+        resource.setrlimit(resource.RLIMIT_AS, (512*1024*1024, 512*1024*1024))
+    if not readonly:
+        result = subprocess.run([config['mkfs_path'], '-t', 'ext2', '-F', '-q', '-b', '4096', '-m', '0', str(image)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=False, env=environment, preexec_fn=helper_limits)
+        if result.returncode != 0:
+            raise ExecutionDenied('Output image formatting failed')
+    # fuse2fs consumes "ro" itself; -r also reaches libfuse so the kernel
+    # mount is read-only, in addition to the backing-image descriptor.
+    process = subprocess.Popen([config['fuse2fs_path'], '-f', *(['-r'] if readonly else []), '-o',
+        ('ro' if readonly else 'rw')+',fakeroot', str(image), str(mount)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, start_new_session=True, env=environment, preexec_fn=helper_limits)
+    try:
+        deadline = time.monotonic()+5
+        while not os.path.ismount(mount) and process.poll() is None and time.monotonic()<deadline:
+            time.sleep(.02)
+        verify_volume_mount(mount, image, capacity, readonly=readonly)
+        if process.poll() is not None:
+            raise ExecutionDenied('Output filesystem process ended')
+        if not readonly:
+            os.chmod(mount, 0o700)
+        yield mount
+    finally:
+        try:
+            if os.path.ismount(mount):
+                result = subprocess.run([config['fusermount_path'], '-u', str(mount)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=environment, timeout=5, check=False)
+                if result.returncode != 0:
+                    raise ExecutionDenied('Output filesystem unmount failed')
+        finally:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+        if os.path.ismount(mount):
+            raise ExecutionDenied('Output mount remains; operator reconciliation required')
+        if process.returncode != 0:
+            raise ExecutionDenied('Output filesystem did not exit cleanly')
+        after = image.stat(follow_symlinks=False)
+        if (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, capacity):
+            raise ExecutionDenied('Output image identity or size changed')
+        if readonly and (after.st_mtime_ns, after.st_ctime_ns) != (before.st_mtime_ns, before.st_ctime_ns):
+            raise ExecutionDenied('Read-only output image changed during collection')
 
 
 def cpu_set(value):
@@ -598,17 +772,23 @@ def execute(profile_path, request_id, manifest_sha256):
         input_bytes += len(read_regular(case/'job.sh',1000000))
     outputs = grant['outputs']
     per_file = validate_outputs(outputs,storage_bytes=resources['storage_bytes'],input_bytes=input_bytes)
-    with seccomp_fd(profile) as filter_descriptor:
+    allocation = volume_allocation(profile, storage_bytes=resources['storage_bytes'], input_bytes=input_bytes)
+    if allocation:
+        per_file = allocation['image_bytes']
+    with seccomp_fd(profile) as filter_descriptor, ExitStack() as output_stack:
         argv = sandbox_command(profile,case=case,outputs=outputs,entrypoint=manifest['entrypoint'],
                                filter_fd=filter_descriptor,cores=resources['cores'],cpu_ids=cpus)
         # Exclusive intent is also a restart/requeue gate. Never execute twice from
         # the same request, even if a previous process died before its final receipt.
         write_once(case/'execution-intent.json',dict(request_id=request_id,job_id=job_id,manifest_sha256=manifest_sha256,
             profile_sha256=digest(profile_data),grant_sha256=digest(canonical(grant)),argv_sha256=digest(canonical(argv)),
-            outputs=outputs, ranks=resources['cores'], cpu_ids=sorted(cpus),
+            outputs=outputs, ranks=resources['cores'], cpu_ids=sorted(cpus), output_storage=allocation,
             at=datetime.now(timezone.utc).isoformat()))
         output = case/'output'
-        output.mkdir(mode=0o700,exist_ok=False)
+        if allocation:
+            output_stack.enter_context(mounted_output_volume(profile, case, allocation))
+        else:
+            output.mkdir(mode=0o700,exist_ok=False)
         for name in outputs:
             fd = os.open(output/name,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
             os.close(fd)
@@ -696,6 +876,19 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
     names += ['scheduler.stdout', 'scheduler.stderr'] + ['output/'+name for name in outputs]
     total = 0
     with ExitStack() as stack:
+        allocation = intent.get('output_storage') if intent else None
+        if allocation:
+            if intent.get('profile_sha256') != digest(read_regular(profile_path, 1000000, private=True)):
+                raise ExecutionDenied('Output volume profile changed since execution')
+            manifest = json.loads(manifest_data)
+            input_bytes = len(manifest_data)+sum(item['size'] for item in manifest['files'])
+            if (case/'job.sh').exists():
+                input_bytes += len(read_regular(case/'job.sh', 1000000))
+            if allocation != volume_allocation(profile, storage_bytes=budget, input_bytes=input_bytes):
+                raise ExecutionDenied('Output volume allocation does not match frozen resources')
+            stack.enter_context(mounted_output_volume(profile, case, allocation, readonly=True))
+        elif intent and profile.get('output_volume') is not None:
+            raise ExecutionDenied('Missing output volume receipt')
         opened = []
         for name in names:
             path = case/name

@@ -23,7 +23,7 @@ ROOT_ALLOWANCE = 65536
 ROLES = {'lammps_input', 'structure', 'potential', 'analysis_spec'}
 RESERVED = {'manifest.json', 'allocation.json', 'stage.json', 'receipt.json', 'job.sh', 'output',
             'execution-intent.json', 'execution-result.json', 'scheduler.stdout', 'scheduler.stderr',
-            'scheduler-intent.json', 'scheduler-result.json'}
+            'scheduler-intent.json', 'scheduler-result.json', 'output-volume.ext2'}
 
 
 class StageError(ValueError):
@@ -109,8 +109,9 @@ def approved_root(path):
         raise StageError('Unsafe root')
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in parts:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        for index, part in enumerate(parts):
+            access = os.O_RDONLY if index == len(parts)-1 else getattr(os, 'O_PATH', os.O_RDONLY)
+            child = os.open(part, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
             try:
