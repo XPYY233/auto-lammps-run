@@ -1,15 +1,19 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auto-LAMMPS · 任务条件</title><link rel="stylesheet" href="/assets/app.css"><script defer src="/assets/app.js"></script></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auto-LAMMPS · 研究工作台</title><link rel="stylesheet" href="/assets/app.css"><script defer src="/assets/app.js"></script></head>
 <body>
-<header><a href="/" class="brand">AUTO<span> / </span>LAMMPS</a><span class="edition">研究工作台 · 本机</span><span class="connection">条件准备阶段</span></header>
-<div class="workspace"><aside><div class="aside-title">我的任务 <span id="task-count">0</span></div><button id="new-task" class="primary">＋ 新建任务</button><nav id="task-list" aria-label="任务列表"></nav><div class="aside-note">先明确条件，再开始计算。<br>当前版本不调用模型、不提交作业。</div></aside>
+<header><a href="/" class="brand">Auto-LAMMPS</a><span class="edition">研究工作台 · 本机</span><span class="connection">条件准备阶段</span></header>
+<div class="workspace"><aside><button id="show-papers" class="quiet">复现文献与历史</button><div class="aside-title">我的任务 <span id="task-count">0</span></div><button id="new-task" class="primary">＋ 新建任务</button><nav id="task-list" aria-label="任务列表"></nav><div class="aside-note">先明确条件，再开始计算。<br>当前版本不调用模型、不提交作业。</div></aside>
 <main>
 <div id="message" role="status" aria-live="polite" hidden></div>
-<section id="welcome"><p class="eyebrow">01 / DEFINE THE QUESTION</p><h1>从一个清楚的问题开始。</h1><p class="intro">写下研究目标，逐项核对条件与来源。缺失的信息会保留为空；不同证据会一起保留。</p>
-<form id="create-form"><label>任务名称<input name="title" required maxlength="160" placeholder="给这项研究起一个简短的名字"></label><label>研究模式<select name="mode"><option value="reproduction">文献复现</option><option value="research">开放研究</option></select></label><label class="wide">用自己的话描述任务<textarea name="prompt" required maxlength="12000" rows="6" placeholder="希望研究什么材料、复现哪些物理量？已知哪些条件，哪些还需要查证？"></textarea></label><p class="form-note wide">支持按“温度：300 K”这样的独立行整理已知条件；其他描述保留原文，缺项需补充。此版本不调用模型。</p><button class="primary" type="submit">保存并整理条件 <span aria-hidden="true">→</span></button></form></section>
-<section id="task-view" hidden><div class="task-top"><div><p class="eyebrow">TASK / CONDITIONS</p><h1 id="task-title"></h1></div><span id="task-status" class="badge"></span></div><p id="task-meta" class="subtle"></p><details class="request"><summary>原始任务描述</summary><p id="task-prompt"></p></details>
-<div class="overview"><div><strong id="confirmed-count">0 / 20</strong><span>已确认条件</span></div><div><strong id="conflict-count">0</strong><span>待解决矛盾</span></div><div><strong>未提交</strong><span>计算状态</span></div></div>
+<section id="papers-view" hidden><h1>复现文献清单</h1><p class="intro">查看选定范围、条件修订和每次计算记录。候选文章单独列出。</p>
+<div id="paper-filters" class="paper-filters" role="group" aria-label="复现状态筛选"></div><p id="paper-updated" class="subtle"></p><div id="paper-list"></div>
+<details id="candidate-section" open><summary id="candidate-heading">候选文章</summary><div id="candidate-list"></div></details>
+<p class="form-note">正式评测默认最多两次提交，次数按每个评测分别核算。冻结条件和作业结束都不等于复现通过；当前独立评分尚未接入，不产生“已复现”记录。</p></section>
+<section id="welcome"><h1>新建研究任务</h1><p class="intro">写下研究目标，逐项核对条件与来源。缺失的信息会保留为空；不同证据会一起保留。</p>
+<form id="create-form"><label>任务名称<input name="title" required maxlength="160" placeholder="给这项研究起一个简短的名字"></label><label>研究模式<select name="mode"><option value="reproduction">文献复现</option><option value="research">开放研究</option></select></label><label class="wide">用自己的话描述任务<textarea name="prompt" required maxlength="12000" rows="6" placeholder="希望研究什么材料、复现哪些物理量？已知哪些条件，哪些还需要查证？"></textarea></label><p class="form-note wide">支持按“温度：300 K”这样的独立行整理已知条件；其他描述保留原文，缺项需补充。此版本不调用模型。</p><button class="primary" type="submit">保存并整理条件</button></form></section>
+<section id="task-view" hidden><div class="task-top"><div><h1 id="task-title"></h1></div><span id="task-status" class="badge"></span></div><p id="task-meta" class="subtle"></p><details class="request"><summary>原始任务描述</summary><p id="task-prompt"></p></details>
+<div class="overview"><div><strong id="confirmed-count">0 / 20</strong><span>已确认条件</span></div><div><strong id="conflict-count">0</strong><span>待解决矛盾</span></div><div><strong>条件审阅</strong><span>计算记录见文献与历史</span></div></div>
 <div class="section-heading"><p>已有文献工作台的单条证据导出？</p><button id="import-literature" class="quiet">从文献导入条件</button></div>
 <div class="section-heading"><h2>逐项核对</h2><p>确认条件仅锁定研究说明，不代表科学检查通过。</p></div>
 <div id="conditions"></div>
@@ -32,5 +36,5 @@
 <p class="form-note">方法分类由操作者声明，尚未验证。原文与结果上下文仅留在本人的审阅资料中；不会生成主 Agent 任务包。</p>
 <button id="save-literature" class="primary" type="submit">加入待确认条件</button></div>
 </form></dialog>
-<footer>Auto-LAMMPS <span>可追溯的条件，是可复现计算的起点。</span></footer>
+<footer>Auto-LAMMPS <span>开发版 · 计算与独立核验尚未接通</span></footer>
 </body></html>

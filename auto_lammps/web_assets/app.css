@@ -1,14 +1,14 @@
 :root {
-  --ink:#15362e;
-  --muted:#65736c;
-  --paper:#f7f8f3;
-  --line:#dce2d9;
-  --green:#215c48;
-  --wash:#e9eee4;
-  --amber:#886020;
-  --red:#a83b31;
+  --ink:#242424;
+  --muted:#646464;
+  --paper:#ffffff;
+  --line:#e5e5e5;
+  --green:#303030;
+  --wash:#f3f3f3;
+  --amber:#805813;
+  --red:#b42318;
   --white:#fff;
-   font-family:"Avenir Next","PingFang SC","Noto Sans CJK SC",sans-serif;
+   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;
   color:var(--ink);
   background:var(--paper);
   font-size:14px
@@ -33,31 +33,31 @@ button:disabled {
   cursor:not-allowed
 }
 button:focus-visible,a:focus-visible,summary:focus-visible {
-  outline:3px solid #82ad5a;
+  outline:3px solid #5284af;
   outline-offset:3px
 }
 input:focus,textarea:focus,select:focus {
-  outline:2px solid #5b876d;
+  outline:2px solid #5284af;
   outline-offset:2px
 }
 header {
-  height:78px;
+  height:64px;
   display:flex;
   align-items:center;
-  padding:0 38px;
+  padding:0 28px;
   border-bottom:1px solid var(--line);
   gap:24px;
   background:var(--white)
 }
 .brand {
   font-size:19px;
-  letter-spacing:2px;
+  letter-spacing:0;
   font-weight:650;
   text-decoration:none;
   color:var(--ink)
 }
 .brand span {
-  color:#a0b394
+  color:#777777
 }
 .edition {
   color:var(--muted);
@@ -74,17 +74,18 @@ header {
   display:inline-block;
   width:7px;
   height:7px;
-  background:#759062;
+  background:#737373;
   border-radius:50%;
   margin-right:9px
 }
 .workspace {
   display:grid;
   grid-template-columns:244px minmax(0,1fr);
-  min-height:calc(100vh - 138px)
+  min-height:calc(100vh - 124px)
 }
 aside {
-  padding:34px 22px;
+  padding:26px 18px;
+  background:#f7f7f8;
   border-right:1px solid var(--line);
   display:flex;
   flex-direction:column
@@ -104,7 +105,7 @@ aside {
   background:var(--green);
   color:white;
   padding:12px 20px;
-  border-radius:5px;
+  border-radius:8px;
   text-decoration:none;
   display:inline-flex;
   justify-content:center;
@@ -113,12 +114,12 @@ aside {
   font-weight:550
 }
 .primary:hover {
-  background:#174331
+  background:#111111
 }
 .quiet {
   padding:8px 12px;
   border:1px solid var(--line);
-  border-radius:4px;
+  border-radius:8px;
   background:transparent;
   color:var(--ink)
 }
@@ -134,7 +135,7 @@ nav button {
   text-align:left;
   border:0;
   background:transparent;
-  border-radius:4px;
+  border-radius:8px;
   padding:14px 10px;
   color:var(--ink);
   margin:4px 0;
@@ -159,14 +160,14 @@ nav small {
 }
 main {
   width:100%;
-  max-width:1220px;
-  padding:52px 6%;
-  margin:auto
+  max-width:1100px;
+  padding:42px 5%;
+  margin:0 auto
 }
 h1 {
-  font-size:clamp(27px,3.2vw,40px);
+  font-size:clamp(25px,2.6vw,32px);
   font-weight:550;
-  letter-spacing:-1px;
+  letter-spacing:-.5px;
   margin:12px 0 16px;
   line-height:1.4
 }
@@ -178,7 +179,7 @@ h2 {
 .eyebrow {
   font-size:10px;
   color:var(--green);
-  letter-spacing:2px;
+  letter-spacing:0;
   font-weight:600
 }
 .intro {
@@ -192,11 +193,11 @@ h2 {
   padding:32px;
   background:var(--white);
   border:1px solid var(--line);
-  border-top:3px solid var(--green);
+
   display:grid;
   grid-template-columns:2fr 1fr;
   gap:24px;
-  border-radius:4px
+  border-radius:8px
 }
 label {
   display:flex;
@@ -206,9 +207,9 @@ label {
   line-height:1.5
 }
 input,select,textarea {
-  border:1px solid #cdd6cb;
-  border-radius:4px;
-  background:#fcfdfb;
+  border:1px solid #d9d9d9;
+  border-radius:8px;
+  background:#ffffff;
   padding:12px;
   color:var(--ink);
   width:100%;
@@ -219,7 +220,7 @@ textarea {
   line-height:1.7
 }
 input::placeholder,textarea::placeholder {
-  color:#89988f
+  color:#767676
 }
 select {
   height:46px
@@ -273,9 +274,9 @@ select {
 }
 .request {
   margin:26px 0;
-  background:#edf1e8;
+  background:#f7f7f7;
   padding:15px 18px;
-  border-radius:4px
+  border-radius:8px
 }
 .request p {
   white-space:pre-wrap;
@@ -293,7 +294,7 @@ summary {
   border:1px solid var(--line);
   background:var(--white);
   margin:30px 0 42px;
-  border-radius:4px
+  border-radius:8px
 }
 .overview div {
   padding:20px 24px;
@@ -342,7 +343,7 @@ summary {
 .field-number {
   font-size:10px;
   font-family:monospace;
-  color:#8a998e;
+  color:#777777;
   margin-right:6px
 }
 .field-actions {
@@ -354,7 +355,7 @@ summary {
   padding:14px 16px;
   background:var(--white);
   border:1px solid var(--line);
-  border-radius:4px;
+  border-radius:8px;
   margin-bottom:10px
 }
 .candidate.selected {
@@ -379,7 +380,7 @@ summary {
   font-size:11px
 }
 .missing-text {
-  color:#89958e;
+  color:#777777;
   font-size:12px;
   padding-top:4px
 }
@@ -395,8 +396,8 @@ summary {
   gap:20px;
   background:var(--wash);
   padding:26px;
-  border:1px solid #d3ddcc;
-  border-radius:5px;
+  border:1px solid #dedede;
+  border-radius:8px;
   margin-top:30px
 }
 .freeze-panel h2 {
@@ -423,9 +424,9 @@ summary {
   position:sticky;
   top:14px;
   padding:14px 18px;
-  background:#e3ecd9;
-  border:1px solid #9bb18c;
-  border-radius:4px;
+  background:#f1f6f3;
+  border:1px solid #b3c9bd;
+  border-radius:8px;
   z-index:3;
   line-height:1.7;
   margin-bottom:20px
@@ -445,7 +446,7 @@ dialog {
   overflow:auto
 }
 dialog::backdrop {
-  background:#12291f66
+  background:#00000055
 }
 dialog form {
   display:flex;
@@ -476,7 +477,7 @@ footer {
   display:flex;
   gap:26px;
   align-items:center;
-  padding:0 38px;
+  padding:0 28px;
   border-top:1px solid var(--line);
   font-size:10px;
   letter-spacing:1px;
@@ -558,36 +559,38 @@ footer {
 }
 
 }
-@media(prefers-reduced-motion:no-preference) {
-  main {
-  animation:arrive .3s ease-out
-}
-@keyframes arrive {
-  from {
-  opacity:0;
-  transform:translateY(5px)
-}
-to {
-  opacity:1;
-  transform:none
-}
-
-}
-
-}
-
-
 .dialog-error {
   margin:0;
   padding:12px;
   border:1px solid #c69b84;
   background:#f8eee9;
   color:#874a32;
-  border-radius:4px;
+  border-radius:8px;
   line-height:1.6
 }
 
-.source-context { margin:16px 0; padding:14px; background:#f1f3ec; max-height:320px; overflow:auto; overflow-wrap:anywhere; }
+.source-context { margin:16px 0; padding:14px; background:#f5f5f5; max-height:320px; overflow:auto; overflow-wrap:anywhere; }
 .source-context p, .candidate details p { white-space:pre-wrap; overflow-wrap:anywhere; }
 .check-label { display:flex; align-items:flex-start; gap:10px; line-height:1.6; }
 .check-label input { width:auto; flex-shrink:0; margin-top:6px; }
+.paper-filters { display:flex; gap:10px; flex-wrap:wrap; margin:24px 0 12px; }
+.paper-card { padding:24px; margin:18px 0; background:var(--white); border:1px solid var(--line); border-radius:10px; overflow-wrap:anywhere; }
+.paper-card-top { display:flex; align-items:flex-start; gap:20px; justify-content:space-between; }
+.paper-card-top a { color:var(--ink); font-size:19px; font-weight:600; line-height:1.5; }
+.paper-card-top .badge { flex-shrink:0; }
+.paper-note { border-left:3px solid #d4b37d; padding-left:12px; line-height:1.7; }
+.paper-history { margin-top:18px; border-top:1px solid var(--line); padding-top:16px; }
+.paper-history li { line-height:1.8; }
+.paper-task-link { display:flex; gap:12px; align-items:end; margin-top:16px; }
+.paper-empty { padding:30px; background:var(--wash); }
+.request-record { padding:12px; margin:12px 0; border:1px solid var(--line); }
+#show-papers { margin-bottom:30px; text-align:left; }
+#candidate-section { margin-top:30px; }
+@media(max-width:700px) { .paper-card-top { flex-direction:column; gap:8px; } .paper-task-link { flex-direction:column; align-items:stretch; } }
+
+#show-papers[aria-current="page"] { background:#e9e9eb; font-weight:600; }
+.paper-filters .primary { padding:8px 14px; }
+.paper-card-top a { text-decoration:none; }
+.paper-card-top a:hover { text-decoration:underline; }
+.paper-card p { line-height:1.8; }
+.badge.confirmed { color:#256147; background:#edf6f0; }
