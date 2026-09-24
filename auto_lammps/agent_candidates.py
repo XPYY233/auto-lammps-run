@@ -13,8 +13,9 @@ from .deepseek import ModelError
 from .ledger import Resources
 from .manifest import canonical, freeze, private_directory, sha256
 from .structures import build_structure, geometry_runtime, validate_structure
+from .analysis import adapter_identity, validate_plan
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -111,7 +112,7 @@ def validate_proposal(value, *, max_atoms):
     if not isinstance(value['potential_pin'], str) or not re.fullmatch('[a-f0-9]{64}', value['potential_pin']):
         raise CandidateError('Select an exact supplied potential pin')
     analysis = value['analysis']
-    if not isinstance(analysis, dict) or set(analysis) != {'quantity', 'method', 'files'}:
+    if not isinstance(analysis, dict) or set(analysis) not in ({'quantity', 'method', 'files'}, {'quantity', 'method', 'files', 'plan'}):
         raise CandidateError('Explicit analysis quantity, method and files are required')
     for key in ('quantity', 'method'):
         _text(analysis[key], 4000)
@@ -120,6 +121,8 @@ def validate_proposal(value, *, max_atoms):
             or any(not isinstance(x, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', x)
                    or x in RESERVED_OUTPUTS for x in files) or len(set(files)) != len(files)):
         raise CandidateError('Analysis output names must be distinct flat filenames')
+    if 'plan' in analysis:
+        validate_plan(analysis['plan'],files)
     return validate_body(value['workflow'], files)
 
 
@@ -150,7 +153,17 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
         'One ASCII command per line; no continuation. Supported commands: ' + ', '.join(sorted(COMMANDS)) + '. '
         'Supported fix styles: ' + ', '.join(sorted(FIX_STYLES)) + '. Supported compute styles: '
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
-        'analysis is {quantity,method,files}; method describes analysis, not executable Python. '
+        'analysis is {quantity,method,files,plan}; method describes analysis, not executable Python. '
+        'plan is {tables,operations}. Each table is {file,columns:[{name,unit},...]}. Supported units: '
+        '1, step, K, bar, atm, Pa, MPa, GPa, eV, kcal/mol, angstrom, angstrom^2, nm, nm^2, ps, fs, g/cm^3. '
+        'Each numeric table must start with exactly "# columns: <space-separated names>" and '
+        '"# units: <space-separated units>", then finite numeric rows with those columns. '
+        'Use print or fix ave/time scalar title1/title2 to write these headers. '
+        'Each operation is {id,method,file,x,y,window:[min,max]}; method is summary, last, or linear_fit. '
+        'x selects the inclusive predeclared window; y is the quantity to analyze. linear_fit requires '
+        'at least three samples and variable x. Do not choose windows after seeing results or silently '
+        'change units or scientific methods. Use clarification questions for missing analysis conditions '
+        'or unsupported analysis; never substitute numeric-table analysis for required structural analysis. '
         'Write every analysis file to /output/<flat_filename>; list its basename in analysis.files. '
         'Do not use stdout.txt, stderr.txt or log.lammps as analysis outputs. '
         'The result is an unverified proposal, not permission to submit. Never assert scientific success.'
@@ -206,7 +219,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
               'read_data structure.data', *binding.commands]
     script = ('\n'.join(header) + '\n' + proposal['workflow'] + '\n').encode('ascii')
     analysis = {'proposal': proposal['analysis'], 'outputs': sorted(RESERVED_OUTPUTS) + proposal['analysis']['files'],
-                'implementation_status': 'not_implemented'}
+                'implementation_status': 'numeric_tables_v1' if 'plan' in proposal['analysis'] else 'not_implemented',
+                'adapter_identity': adapter_identity() if 'plan' in proposal['analysis'] else None}
     generation = {'schema_version': 1, 'status': 'candidate_prepared_review_required',
                   'request_id': request_id, 'input': context, 'proposal': proposal,
                   'model_receipt': completion['receipt'], 'geometry_receipt': geometry.receipt,

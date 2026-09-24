@@ -465,6 +465,55 @@ class Ledger:
                 raise Conflict('Scheduler evidence changed during collection')
             self._event(db, request_id, 'output_fetch_finished', payload)
 
+    def begin_output_analysis(self, request_id, manifest_sha256, collection_sha256, adapter_sha256, storage_scope_sha256):
+        for value in (manifest_sha256,collection_sha256,adapter_sha256,storage_scope_sha256):_digest(value)
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            if row['state']!='completed' or not row['accounted'] or row['manifest_sha256']!=manifest_sha256:
+                raise Conflict('Analysis requires the matching completed, accounted request')
+            receipts=[json.loads(r[0]) for r in db.execute(
+                "SELECT payload FROM events WHERE request_id=? AND kind='output_fetch_finished'",(request_id,))]
+            if not any(r['collected'] and r['evidence_sha256']==collection_sha256 for r in receipts):
+                raise Conflict('Analysis requires a recorded collection receipt')
+            base=dict(request_id=request_id,job_id=row['job_id'],manifest_sha256=manifest_sha256,
+                      collection_sha256=collection_sha256,adapter_sha256=adapter_sha256,
+                      storage_scope_sha256=storage_scope_sha256)
+            analysis_id=hashlib.sha256(_json(base).encode()).hexdigest()
+            previous=[json.loads(r[0]) for r in db.execute(
+                "SELECT payload FROM events WHERE request_id=? AND kind='analysis_reserved'",(request_id,))]
+            for saved in previous:
+                if saved['analysis_id']==analysis_id:return saved
+            campaign=db.execute('SELECT campaign FROM evaluations WHERE id=?',(row['evaluation'],)).fetchone()[0]
+            policy=json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?',(campaign,)).fetchone()[0])
+            rows=db.execute('SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?',
+                            (campaign,)).fetchall()
+            if any(r['state']=='reconcile_required' for r in rows):
+                raise Conflict('Campaign contains an unresolved scheduler conflict')
+            if sum(r['charge_storage_bytes'] for r in rows)+65536>policy['total_storage_bytes']:
+                raise LimitExceeded('Campaign storage cannot hold an analysis report')
+            context=dict(base,analysis_id=analysis_id,storage_bytes=65536)
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+65536 WHERE id=?',(request_id,))
+            self._event(db,request_id,'analysis_reserved',context)
+            return context
+
+    def finish_output_analysis(self, request_id, analysis_id, evidence_sha256):
+        _digest(analysis_id);_digest(evidence_sha256)
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            events=[(r['kind'],json.loads(r['payload'])) for r in db.execute(
+                "SELECT kind,payload FROM events WHERE request_id=? AND kind IN ('analysis_reserved','analysis_saved')",
+                (request_id,))]
+            start=next((p for kind,p in events if kind=='analysis_reserved' and p['analysis_id']==analysis_id),None)
+            if start is None:raise Conflict('No reserved analysis identity')
+            if row['state']!='completed' or not row['accounted'] or row['job_id']!=start['job_id']:
+                raise Conflict('Scheduler evidence changed before analysis publication')
+            payload=dict(analysis_id=analysis_id,evidence_sha256=evidence_sha256)
+            previous=next((p for kind,p in events if kind=='analysis_saved' and p['analysis_id']==analysis_id),None)
+            if previous is not None:
+                if previous!=payload:raise Conflict('Cannot replace an analysis report')
+                return
+            self._event(db,request_id,'analysis_saved',payload)
+
     def evaluation_snapshot(self, evaluation: str):
         """Read an evaluation consistently without exporting raw private payloads."""
         db = self._connect()
