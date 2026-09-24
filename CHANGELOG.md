@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Issue #51: explicit non-cubic cell/basis geometry in the same candidate service. Preserves supplied restricted-triclinic axes, all nonzero tilts, basis/replication order and defect indices; rejects missing, overlapping or numerically degenerate inputs before allocation. Candidate protocol version 3 records the new contract. Synthetic geometry/service checks only; no reference input reconstruction or physical execution.
+
 - Issue #49: pinned standalone MEAM resources enter the existing potential adapter and candidate preparation history. Preserves original library/parameter/license bytes and independent library-index/atom-type order; blocks malformed or unsupported resources and missing declared packages. Existing SNAP pins stay unchanged. Static and synthetic validation only; no API or physical execution.
 
 - PR 3c: explicit reference-service web configuration, reported evidence with citations, request history and recovery without a new model call. Synthetic route/browser validation only. Records the clarified first-week Codex-led P-A-B validation, second-week independent API adoption, and required human-facing workflow redesign after the first P-A-B run.

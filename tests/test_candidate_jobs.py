@@ -89,7 +89,10 @@ class CandidateJobTests(unittest.TestCase):
 
     def test_meam_resource_reaches_prepared_history_and_download_without_execution(self):
         import test_meam_potentials as meam
+        from copy import deepcopy
+        from test_structures import EXPLICIT
         f = self.fixture
+        f.value['structure'] = deepcopy(EXPLICIT)
         source = f.root / 'source'
         (source / meam.FILES['library']).write_bytes(meam.LIBRARY)
         (source / meam.FILES['parameters']).write_bytes(meam.PARAMETERS)
@@ -108,6 +111,8 @@ class CandidateJobTests(unittest.TestCase):
         receipt = json.loads(self.service.file(self.doc['id'], 'generation.json'))
         self.assertFalse(receipt['execution_authorized'])
         self.assertEqual(receipt['potential_receipt']['library_index_elements'], ['Cu', 'Ni'])
+        self.assertEqual(receipt['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
+        self.assertEqual(receipt['geometry_receipt']['cell_angstrom'], EXPLICIT['cell_angstrom'])
         self.assertEqual(f.transport.call_count, 1)
         restarted = self.make_service()
         self.assertEqual(self.enqueue(restarted)['id'], final['id'])
