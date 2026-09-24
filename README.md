@@ -11,7 +11,7 @@
 需要 Python 3.11+、运行中的 Zotero 及其本地 API。本地文献与控制工具仅使用 Python 标准库；未部署的 Linux 启动器另外依赖 Bubblewrap/libseccomp。
 
 ```sh
-python3 -m pip install -e '.[web,test]'
+python3 -m pip install -e '.[web,test,geometry]'
 python3 -m unittest discover -s tests -v
 python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-private/discovery.json"
 ```
@@ -29,6 +29,8 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 科研计算不要求论文。管理员配置独立模型与调用额度后，可自动整理自然语言中的条件并显示原文依据和缺项；模型配置与实际验证边界见 [DeepSeek 条件整理](docs/MODEL_RUNTIME.md)。
 
 私人势函数目录及首个领域适配操作已支持固定 SNAP 资源与静态调用检查，见 [势函数资源](docs/POTENTIALS.md)。尚未接入主 Agent 自动选择或实际计算，已收集不代表已验证。
+
+候选方案生成已连接模型接口、ASE 几何准备、势函数绑定和输入快照，见 [Agent 候选方案](docs/AGENT_CANDIDATES.md)。目前使用合成模型响应验证软件串联，真实模型能力、网页接入与 HPC 执行尚未验证。ASE 仅用于建模和文件读写，不在本机做物理计算。
 
 “复现文献与历史”提供候选与已选清单、条件版本及已有账本次数；见 [历史记录边界](docs/PAPER_HISTORY.md)。当前独立评分尚未接入，不产生已复现记录。[第一周逐项核对](docs/WEEK1_AUDIT.md)列出实际完成与未完成要求。
 

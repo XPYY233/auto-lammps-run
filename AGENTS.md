@@ -16,7 +16,7 @@
 - No copying existing code until provenance and license obligations are checked.
 - No claim of blind isolation from directories or prompts alone: enforce identities,
   mounts, tools and network allowlists before any formal evaluation.
-- Install optional web/test dependencies before the full suite: `python3 -m pip install -e '.[web,test]'`.
+- Install optional web/test/geometry dependencies before the full suite: `python3 -m pip install -e '.[web,test,geometry]'`.
 - Offline checks: `python3 -m unittest discover -s tests -v` and
   `python3 scripts/check_public_tree.py`. No simulation or paid API in CI.
 - Specifications: docs/GOALS.md, ARCHITECTURE.md, EVALUATION.md, SECURITY.md,

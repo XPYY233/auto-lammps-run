@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [project.optional-dependencies]
 web = ["fastapi==0.141.1", "uvicorn==0.52.0"]
 test = ["httpx==0.28.1"]
+geometry = ["ase==3.29.0"]
 
 [build-system]
 requires = ["setuptools>=77"]
