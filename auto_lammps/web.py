@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
+from .papers import PaperStore
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -108,7 +109,12 @@ class LiteratureImport(Revision):
     classification_basis: str
 
 
-def create_app(store: TaskStore, *, port=8765):
+class LinkPaperTask(Revision):
+    task_id: str
+
+
+def create_app(store: TaskStore, *, port=8765, papers=None):
+    papers = PaperStore(store) if papers is None else papers
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalBoundary, authority=f'127.0.0.1:{port}')
 
@@ -133,6 +139,22 @@ def create_app(store: TaskStore, *, port=8765):
     @app.get('/api/schema')
     def schema():
         return {'fields': FIELDS, 'model_calls_enabled': False, 'execution_enabled': False}
+
+    @app.get('/api/papers')
+    def paper_list():
+        return papers.list()
+
+    @app.get('/api/papers/{identifier}')
+    def paper_get(identifier: str):
+        return papers.get(identifier)
+
+    @app.post('/api/papers/{identifier}/select')
+    def paper_select(identifier: str, data: Revision):
+        return papers.select(identifier, data.revision)
+
+    @app.post('/api/papers/{identifier}/tasks')
+    def paper_task(identifier: str, data: LinkPaperTask):
+        return papers.link_task(identifier, data.revision, data.task_id)
 
     @app.get('/api/tasks')
     def tasks():
@@ -186,12 +208,18 @@ def main():
     parser = argparse.ArgumentParser(description='Local task conditions; no simulation or model execution.')
     parser.add_argument('--data-directory', required=True)
     parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
     import uvicorn
     store = TaskStore(Path(args.data_directory)/'tasks.sqlite')
-    uvicorn.run(create_app(store, port=args.port), host='127.0.0.1', port=args.port,
+    ledger = None
+    if args.ledger:
+        from .ledger import Ledger
+        if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
+        ledger = Ledger(Path(args.ledger))
+    uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

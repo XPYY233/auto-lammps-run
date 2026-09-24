@@ -414,6 +414,26 @@ class Ledger:
         with self._transaction() as db:
             return self._request(db, request_id)
 
+    def evaluation_snapshot(self, evaluation: str):
+        """Read an evaluation consistently without exporting raw private payloads."""
+        db = self._connect()
+        try:
+            db.execute('BEGIN')
+            row = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+            if row is None:
+                raise LedgerError('Unregistered evaluation')
+            requests = []
+            for request in db.execute('SELECT * FROM requests WHERE evaluation=? ORDER BY rowid', (evaluation,)):
+                events = [dict(seq=e['seq'], kind=e['kind'], at=e['at']) for e in db.execute(
+                    'SELECT seq,kind,at FROM events WHERE request_id=? ORDER BY seq', (request['id'],))]
+                requests.append({key: request[key] for key in ('id','state','job_id','dispatch_claimed',
+                    'accounted','actual_core_seconds','charge_core_seconds')} | {'events': events})
+            return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=row['max_attempts'],
+                        reserved_attempts=len(requests), dispatch_claims=sum(r['dispatch_claimed'] for r in requests),
+                        remaining_attempts=max(0,row['max_attempts']-len(requests)), requests=requests)
+        finally:
+            db.close()
+
     def events(self, request_id: str):
         with self._transaction() as db:
             return [dict(r) for r in db.execute("SELECT * FROM events WHERE request_id=? ORDER BY seq", (request_id,))]

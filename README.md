@@ -24,6 +24,8 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 浏览器访问 `http://127.0.0.1:8785/`。可以保存需求、核对条件、解决冲突并冻结导出；支持预览文献工作台 CSV 并明确导入输入条件，仍不执行模拟。说明见 [TASKS.md](docs/TASKS.md) 与 [文献导入](docs/LITERATURE_IMPORT.md)。
 
+“复现文献与历史”提供候选与已选清单、条件版本及已有账本次数；见 [历史记录边界](docs/PAPER_HISTORY.md)。当前独立评分尚未接入，不产生已复现记录。[第一周逐项核对](docs/WEEK1_AUDIT.md)列出实际完成与未完成要求。
+
 ## 开发与部署
 
 - [目标与三周路线](docs/GOALS.md) · [进度入口](docs/PROGRESS.md)
