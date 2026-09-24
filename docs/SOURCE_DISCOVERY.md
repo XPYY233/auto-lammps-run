@@ -42,3 +42,8 @@ python3 -m auto_lammps.source_discovery \
 题目与 DOI 均匹配的仓库只有一项时，控制入口现在自动调用 [MEAM 资源准备](POTENTIAL_ACQUISITION.md)，
 将势函数文件和调用要求记入网页与文献历史。多个匹配仓库不自动选一个，缺少匹配不猜测来源。
 这仍不等于论文上传后已经全自动启动检索，也未启用真实模拟。
+
+资源位置更新：`--hpc-policy /private/reference-resources-policy.json` 将唯一匹配的仓库
+交给超算作者源码/势函数准备入口；不提供该配置时只检索元数据，并返回
+`resource_state=hpc_policy_required`，不在本机下载模型。配置与恢复规则见
+[HPC 资源准备](POTENTIAL_ACQUISITION.md)。`--engine-policy` 仍单独指定引擎版本和预算。

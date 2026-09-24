@@ -586,6 +586,13 @@ function paperCard(p,statuses,availableTasks) {
     if (r.state==='partial') resources.append(node('p','本轮获取有未完成项，失败记录已保留。'));
     card.append(resources);
   }
+  if (p.reference_resources) {
+    const r=p.reference_resources;
+    const resources=node('section',undefined,'paper-note'); resources.append(node('h4','超算参考资料'));
+    resources.append(node('p',r.state==='unknown'?'准备状态待核实，暂不重复启动。':r.source_complete?`作者仓库的 ${r.files.length} 个文件已在超算获取并校验。`:'本轮参考资料未完整获取，已保留失败记录。'));
+    resources.append(node('p','作者原始文件已保留；尚未运行参考计算。'));
+    card.append(resources);
+  }
   if (p.engine_preparation) {
     const r=p.engine_preparation;
     const environment=node('section',undefined,'paper-note'); environment.append(node('h4','计算环境准备'));
@@ -602,7 +609,7 @@ function paperCard(p,statuses,availableTasks) {
   }
   const details=node('details',undefined,'paper-history'); details.dataset.paperHistory=p.id; details.append(node('summary','历史记录与提交次数'));
   const timeline=node('ol');
-  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':e.event.startsWith('engine_source_prepared:')?({'failed':'计算环境准备失败','source_ready':'超算源码准备完成','unknown':'计算环境准备待核实'}[e.event.split(':').at(-1)]||'准备计算环境'):paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
+  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':e.event.startsWith('reference_resources_prepared:')?({'finished':'超算参考资料准备完成','partial':'超算参考资料准备有未完成项','unknown':'超算参考资料准备待核实'}[e.event.split(':').at(-1)]||'准备超算参考资料'):e.event.startsWith('engine_source_prepared:')?({'failed':'计算环境准备失败','source_ready':'超算源码准备完成','unknown':'计算环境准备待核实'}[e.event.split(':').at(-1)]||'准备计算环境'):paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
   details.append(timeline);
   for (const task of p.tasks) {
     const button=node('button','查看条件：'+task.title,'quiet'); button.onclick=()=>action(()=>openTask(task.id)); details.append(button);
