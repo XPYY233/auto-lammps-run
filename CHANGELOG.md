@@ -14,3 +14,4 @@
 - PR 1e: ledger-bound SSH submission, private grant and batch binding, durable remote one-shot dispatch, and a Linux compute-node launcher with fixed runtime inventory, declared output mounts and libseccomp namespace filtering. Synthetic tests only; real deployment and scientific acceptance remain pending.
 
 - PR 2: persistent condition review with explicit-line extraction, provenance, retained conflicts, optimistic revisions and immutable operator exports. Added a loopback FastAPI workbench and real browser acceptance using marked synthetic records; no automatic physics interpretation, model call or target execution.
+- PR 2b: bounded literature CSV preview and atomic input-condition import, with source snapshots, explicit item-level method classification, retained conflicts and browser review. Result columns are excluded from input mapping; full operator records may contain targets and are not Agent packages. No target execution.

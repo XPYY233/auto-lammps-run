@@ -22,7 +22,7 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-private/workbench" --port 8785
 ```
 
-浏览器访问 `http://127.0.0.1:8785/`。可以保存需求、核对条件、解决冲突并冻结导出；仍不执行模拟。完整说明见 [TASKS.md](docs/TASKS.md)。
+浏览器访问 `http://127.0.0.1:8785/`。可以保存需求、核对条件、解决冲突并冻结导出；支持预览文献工作台 CSV 并明确导入输入条件，仍不执行模拟。说明见 [TASKS.md](docs/TASKS.md) 与 [文献导入](docs/LITERATURE_IMPORT.md)。
 
 ## 开发与部署
 

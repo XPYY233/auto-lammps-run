@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
+from .literature import preview_csv
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -93,6 +94,20 @@ class ConfirmConditions(Revision):
     fields: list[str]
 
 
+class LiteraturePreview(Input):
+    csv_text: str
+
+
+class LiteratureImport(Revision):
+    csv_text: str
+    source_sha256: str
+    column: str
+    field: str
+    evidence_role: str
+    method_class: str
+    classification_basis: str
+
+
 def create_app(store: TaskStore, *, port=8765):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalBoundary, authority=f'127.0.0.1:{port}')
@@ -122,6 +137,14 @@ def create_app(store: TaskStore, *, port=8765):
     @app.get('/api/tasks')
     def tasks():
         return {'tasks': store.list()}
+
+    @app.post('/api/literature/preview')
+    def preview(data: LiteraturePreview):
+        return preview_csv(data.csv_text)
+
+    @app.post('/api/tasks/{identifier}/literature')
+    def import_literature(identifier: str, data: LiteratureImport):
+        return store.import_literature(identifier, data.revision, **data.model_dump(exclude={'revision'}))
 
     @app.post('/api/tasks', status_code=201)
     def create(data: NewTask):

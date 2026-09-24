@@ -27,6 +27,8 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 ## 导出与执行边界
 
+现已提供[文献 CSV 条件导入](LITERATURE_IMPORT.md)：预览原文、明确映射输入列及方法分类，保存来源摘要与未确认条件。结果列不自动进入任务，导入冲突仍需逐项处理。
+
 `conditions_frozen` 只表示用户确认的审阅记录已锁定。导出包含原始描述、全部候选、来源、选择理由与确认状态，并明确 `scientific_validation=not_performed`、`execution_authorized=false`。`record_sha256` 校验这份审阅记录；它不是正式评测任务身份，不应直接用于账本注册或重置提交额度。
 
 这份导出仅给受信操作者审阅，**不是主 Agent 任务包**：作者代码位置及其他来源仍可能暴露目标信息。主 Agent 包与独立参考/评分资料的分离、实际系统权限隔离、科学参数类型化、结构与势函数兼容检查和执行许可仍需独立实现。网页没有 shell、SSH、模型或提交端点，冻结不会产生任何计算。
