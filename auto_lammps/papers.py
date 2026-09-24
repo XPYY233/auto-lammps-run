@@ -164,6 +164,30 @@ class PaperStore:
             self._write(db, doc, 'source_search_completed:'+search_id)
         return self.get(identifier)
 
+    def record_potential_acquisition(self, identifier, report):
+        """Reference controller records collection; grants no use or score approval."""
+        if (not isinstance(report, dict) or report.get('schema_version') != 1
+                or report.get('state') not in {'finished', 'partial'}
+                or any(report.get(k) is not False for k in
+                       ('scientific_validation', 'engine_verified', 'catalog_admitted', 'execution_authorized'))
+                or not isinstance(report.get('files'), list) or not isinstance(report.get('bindings'), list)
+                or len(canonical(report)) > 150000):
+            raise TaskError('势函数获取记录不完整')
+        acquisition_id = task_id(report.get('id'))
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            candidates = doc.get('source_discovery', {}).get('candidates', [])
+            if not any(c.get('association') == 'doi_and_title' and
+                       c.get('repository') == report.get('repository') and
+                       c.get('commit') == report.get('commit') for c in candidates):
+                raise TaskError('势函数来源与已核对的论文仓库不一致')
+            if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?',
+                          (identifier, 'potential_acquired:'+acquisition_id)).fetchone():
+                return self._read(db, identifier)
+            doc['potential_acquisition'] = report
+            self._write(db, doc, 'potential_acquired:'+acquisition_id)
+        return self.get(identifier)
+
     def list(self):
         with self.tasks.transaction() as db:
             ids=[r[0] for r in db.execute('SELECT id FROM papers ORDER BY rowid DESC')]

@@ -169,12 +169,15 @@ def inspect_snap(coefficients, parameters, elements):
             'blockers': sorted(blockers)}
 
 
-def inspect_meam(library, parameters, elements):
+def inspect_meam(library, parameters, elements, *, version=2):
     """Conservative C++ MEAM format screen, not physical validation.
 
     Metadata elements fixes the parameter index order; library row order and
     LAMMPS atom type order are independent. Original bytes are never rewritten.
     """
+    if version not in {1, 2}:
+        raise PotentialError('Unsupported MEAM inspection version')
+    warnings = []
     if len(elements) > 8:
         raise PotentialError('MEAM binding supports at most eight selected elements')
     try:
@@ -210,9 +213,11 @@ def inspect_meam(library, parameters, elements):
             continue
         if row[1] not in lattices:
             blockers.add('unsupported_library_lattice:' + row[1])
-        if (values[0] <= 0 or not values[1].is_integer() or not 1 <= values[1] <= 118
+        if (values[0] <= 0 or not values[1].is_integer() or not (1 if version == 1 else 0) <= values[1] <= 118
                 or values[2] <= 0 or values[8] <= 0 or values[15] <= 0):
             raise PotentialError('Invalid MEAM library coordination, atomic number, mass, length or density')
+        if version == 2 and values[1] == 0:
+            warnings.append('zero_atomic_number:' + row[0])
         if values[11] != 1:
             blockers.add('library_t0_must_be_one:' + row[0])
         if values[16] not in {0, 1, 3, 4, -5}:
@@ -227,7 +232,8 @@ def inspect_meam(library, parameters, elements):
     flags = {key: {0, 1} for key in ('augt1', 'mixture_ref_t', 'emb_lin_neg', 'bkgd_dyn', 'nn2', 'zbl')}
     flags.update(ialloy={0, 1, 2}, erose_form={0, 1, 2})
     assignments = {}
-    for raw in parameter_text.splitlines():
+    assignment_history = []
+    for line_number, raw in enumerate(parameter_text.splitlines(), 1):
         line = raw.split('#', 1)[0].strip()
         if not line:
             continue
@@ -240,7 +246,11 @@ def inspect_meam(library, parameters, elements):
             raise PotentialError('MEAM parameter index outside selected library order')
         identity = key + ('(' + ','.join(map(str, indices)) + ')' if indices else '')
         if identity in assignments:
-            raise PotentialError('Duplicate MEAM parameter assignment')
+            if version == 1:
+                raise PotentialError('Duplicate MEAM parameter assignment')
+            assignment_history.append({'parameter': identity, 'line': line_number,
+                                       'previous': assignments[identity], 'value': value})
+            warnings.append('parameter_reassigned:' + identity)
         if key not in arities:
             blockers.add('unsupported_parameter:' + key)
         elif len(indices) != arities[key]:
@@ -259,21 +269,24 @@ def inspect_meam(library, parameters, elements):
             if key in {'rc', 'delr', 'rho0', 're', 'gsmooth_factor'} and numeric <= 0:
                 raise PotentialError('MEAM length or density parameter must be positive')
         assignments[identity] = value
-        if len(assignments) > 2048:
+        if len(assignments) + len(assignment_history) > 2048:
             raise PotentialError('Too many MEAM parameter assignments')
     if not assignments:
         raise PotentialError('An explicit nonempty MEAM parameter file is required')
-    return {'screen': 'meam_static_v1', 'elements': list(elements),
-            'library_entries': selected, 'parameters': assignments, 'blockers': sorted(blockers)}
+    result = {'screen': 'meam_static_v' + str(version), 'elements': list(elements),
+              'library_entries': selected, 'parameters': assignments, 'blockers': sorted(blockers)}
+    if version == 2:
+        result.update(warnings=sorted(set(warnings)), reassignments=assignment_history)
+    return result
 
 
 def _roles(metadata):
     return {'library' if metadata['format'] == 'meam' else 'coefficients', 'parameters', 'license'}
 
 
-def _inspect(content, metadata):
+def _inspect(content, metadata, *, meam_version=2):
     if metadata['format'] == 'meam':
-        return inspect_meam(content['library'], content['parameters'], metadata['elements'])
+        return inspect_meam(content['library'], content['parameters'], metadata['elements'], version=meam_version)
     return inspect_snap(content['coefficients'], content['parameters'], metadata['elements'])
 
 
@@ -356,7 +369,8 @@ class PotentialCatalog:
                 content[role] = data
             if set(os.listdir(root)) != expected:
                 raise PotentialError('Undeclared files in potential resource')
-        if _inspect(content, metadata) != record['inspection']:
+        legacy = metadata['format'] == 'meam' and record['inspection'].get('screen') == 'meam_static_v1'
+        if _inspect(content, metadata, meam_version=1 if legacy else 2) != record['inspection']:
             raise PotentialError('Potential inspection mismatch')
         return record, content
 
@@ -393,7 +407,7 @@ class PotentialAdapter:
 
     def compatibility_policy(self):
         return {'rule': SNAP_DIAGONAL_RULE, 'pins': sorted(self.legacy_snap_pins),
-                'software_sha256': self.software_sha256}
+                'software_sha256': self.software_sha256, 'meam_inspection_version': 2}
 
     def _parameters(self, pin, record, content):
         inspection = record['inspection']
@@ -440,7 +454,8 @@ class PotentialAdapter:
             except PotentialError:
                 continue
             models.append({'pin': pin, 'format': meta['format'], 'elements': meta['elements'],
-                           'units': meta['units'], 'applicability': meta['applicability']})
+                           'units': meta['units'], 'applicability': meta['applicability'],
+                           'warnings': record['inspection'].get('warnings', [])})
         return models
 
     def resolve_potential(self, pin, *, type_elements, units):
@@ -489,6 +504,7 @@ class PotentialAdapter:
             receipt['compatibility_conversion'] = conversion
         if meta['format'] == 'meam':
             receipt['library_index_elements'] = list(meta['elements'])
+            receipt['potential_warnings'] = record['inspection'].get('warnings', [])
         return PotentialBinding(pin, files, commands, receipt)
 
 

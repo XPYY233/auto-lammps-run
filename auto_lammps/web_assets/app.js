@@ -560,6 +560,32 @@ function paperCard(p,statuses,availableTasks) {
     if (!p.source_discovery.candidates.length) sources.append(node('p','本轮未取得可核查的仓库信息。'));
     card.append(sources);
   }
+  if (p.potential_acquisition) {
+    const r=p.potential_acquisition;
+    const resources=node('section',undefined,'paper-note'); resources.append(node('h4','势函数准备'));
+    resources.append(node('p',`已获取 ${r.files.length} 个势函数文件 · 找到 ${r.bindings.length} 组调用配置`));
+    for (const f of r.files) {
+      const link=node('a',f.path); link.href=f.source_url; link.target='_blank'; link.rel='noopener noreferrer';
+      resources.append(link,node('small',` · ${f.size} 字节 · SHA256 ${f.sha256}`));
+      resources.append(node('br'));
+    }
+    for (const b of r.bindings) {
+      resources.append(node('p',`${b.input_path} · MEAM · 元素索引 ${b.elements.join('、')} · 原子类型 ${b.type_elements.join('、')}`));
+      resources.append(node('p',b.static_status==='checked'?'文件格式已检查，科学适用性尚未验证。':'文件检查发现待处理项，原文件已保留。'));
+      if (b.inspection?.warnings?.length) {
+        const notes=node('div'); notes.append(node('p',`保留 ${b.inspection.warnings.length} 项参数提示：`));
+        for (const warning of b.inspection.warnings) {
+          if (warning.startsWith('zero_atomic_number:')) notes.append(node('p',`${warning.split(':')[1]} 的库文件原子序号为 0，原值保留。`));
+        }
+        for (const item of b.inspection.reassignments||[]) notes.append(node('p',`${item.parameter} 在第 ${item.line} 行再次赋值：${item.previous} → ${item.value}。文件顺序保持不变。`));
+        resources.append(notes);
+      }
+    }
+    resources.append(node('p',r.license_status==='text_found_scope_unverified'?'已保存许可文本，适用范围待核实。':'所检查的目录未发现许可文件，未授权重新分发。'));
+    resources.append(node('p','计算环境尚未验证，未启动模拟。'));
+    if (r.state==='partial') resources.append(node('p','本轮获取有未完成项，失败记录已保留。'));
+    card.append(resources);
+  }
   if (p.selection==='candidate') {
     const select=node('button','加入复现计划','quiet');
     select.setAttribute('aria-label','选定文献：'+p.title);
@@ -568,7 +594,7 @@ function paperCard(p,statuses,availableTasks) {
   }
   const details=node('details',undefined,'paper-history'); details.dataset.paperHistory=p.id; details.append(node('summary','历史记录与提交次数'));
   const timeline=node('ol');
-  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
+  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
   details.append(timeline);
   for (const task of p.tasks) {
     const button=node('button','查看条件：'+task.title,'quiet'); button.onclick=()=>action(()=>openTask(task.id)); details.append(button);

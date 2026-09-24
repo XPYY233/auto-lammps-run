@@ -38,3 +38,7 @@ python3 -m auto_lammps.source_discovery \
 
 接口依据：[GitHub REST 仓库内容](https://docs.github.com/en/rest/repos/contents)、
 [GitHub CLI API](https://cli.github.com/manual/gh_api)。全部 CI 测试使用合成响应。
+
+题目与 DOI 均匹配的仓库只有一项时，控制入口现在自动调用 [MEAM 资源准备](POTENTIAL_ACQUISITION.md)，
+将势函数文件和调用要求记入网页与文献历史。多个匹配仓库不自动选一个，缺少匹配不猜测来源。
+这仍不等于论文上传后已经全自动启动检索，也未启用真实模拟。
