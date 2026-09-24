@@ -142,7 +142,27 @@ class PaperStore:
                           history=history,evaluations=evaluations,
                           tasks=[dict(id=t['id'],title=t['title'],status=t['status'],revision=t['revision'],
                                       history=self.tasks.history(t['id'])) for t in tasks],
-                          score_publication_available=False,execution_authorized=False)
+                    score_publication_available=False,execution_authorized=False)
+
+    def record_source_search(self, identifier, report):
+        """Trusted reference controller only; never accept browser-written results."""
+        if (not isinstance(report, dict) or report.get('schema_version') != 1
+                or report.get('state') not in {'finished', 'partial'}
+                or report.get('scientific_validation') is not False
+                or report.get('author_identity_verified') is not False
+                or len(canonical(report)) > 60000):
+            raise TaskError('源码检索记录不完整')
+        search_id = task_id(report.get('id'))
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            if report.get('doi') != doc['doi'] or report.get('title') != doc['title']:
+                raise TaskError('源码检索与论文身份不一致')
+            if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?',
+                          (identifier, 'source_search_completed:'+search_id)).fetchone():
+                return self._read(db, identifier)
+            doc['source_discovery'] = report
+            self._write(db, doc, 'source_search_completed:'+search_id)
+        return self.get(identifier)
 
     def list(self):
         with self.tasks.transaction() as db:

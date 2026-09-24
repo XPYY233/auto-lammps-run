@@ -55,6 +55,8 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 冻结后可自动导出计算任务草稿和独立参考准备资料，见 [资料导出](docs/TASK_PACKAGES.md)。仅完成字段分离；条件内容与允许资源尚需核验，不能将草稿直接用于正式评测。
 
+参考端已提供基于题目与 DOI 的 [源码检索](docs/SOURCE_DISCOVERY.md)，核查固定版本 README 并将结果显示在文献历史中。当前由管理员入口调用，尚未自动串联论文导入。
+
 参考端已有保留来源的作者输入路径适配，见 [参考输入适配](docs/REFERENCE_PATHS.md)。
 仅做静态准备，尚无合格参考结果；进入 B 前将先向用户报告策略并取得确认。
 

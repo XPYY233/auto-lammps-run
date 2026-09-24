@@ -523,6 +523,7 @@ async function showPapers() {
 }
 async function refreshPapers() {
   const expanded=new Set([...document.querySelectorAll('[data-paper-history][open]')].map(d=>d.dataset.paperHistory));
+  const expandedSources=new Set([...document.querySelectorAll('[data-paper-source][open]')].map(d=>d.dataset.paperSource));
   const result=await api('/api/papers');
   const availableTasks=(await api('/api/tasks')).tasks.filter(t=>t.mode==='reproduction');
   $('#paper-filters').replaceChildren();
@@ -540,6 +541,7 @@ async function refreshPapers() {
   for (const p of result.papers.filter(p=>p.selection==='candidate')) $('#candidate-list').append(paperCard(p,result.statuses,availableTasks));
   $('#candidate-heading').textContent=`候选文章 · 尚未选定 ${result.candidate_count}`;
   for (const d of document.querySelectorAll('[data-paper-history]')) d.open=expanded.has(d.dataset.paperHistory);
+  for (const d of document.querySelectorAll('[data-paper-source]')) d.open=expandedSources.has(d.dataset.paperSource);
   $('#paper-updated').textContent='最近读取：'+new Date().toLocaleString('zh-CN')+' · 仅在此页面每 15 秒读取记录';
 }
 function paperCard(p,statuses,availableTasks) {
@@ -548,6 +550,16 @@ function paperCard(p,statuses,availableTasks) {
   const link=node('a',p.title); link.href=p.doi_url; link.target='_blank'; link.rel='noopener noreferrer';
   top.append(link,node('span',p.selection==='candidate'?'候选 · 尚未选定':statuses[p.status],'badge '+(p.status==='reproduced'?'confirmed':'pending')));
   card.append(top,node('p','DOI '+p.doi,'subtle'),node('p','拟复现范围：'+p.scope),node('p',p.note,'paper-note'),node('p',p.stage,'subtle'));
+  if (p.source_discovery) {
+    const sources=node('details'); sources.dataset.paperSource=p.id; sources.append(node('summary','论文源码检索'));
+    sources.append(node('p',p.source_discovery.state==='partial'?'检索有未完成项，不能据此判定没有源码。':'已完成本轮有限检索，未覆盖全部仓库。','subtle'));
+    for (const c of p.source_discovery.candidates) {
+      const source=node('a',c.repository); source.href=c.url; source.target='_blank'; source.rel='noopener noreferrer';
+      sources.append(source,node('p',(c.association==='doi_and_title'?'README 题目与 DOI 相符':'关联尚未确认')+' · 尚未验证作者身份或复现结果'),node('small','源码版本 '+c.commit+' · 许可 '+(c.license_spdx||'未声明')));
+    }
+    if (!p.source_discovery.candidates.length) sources.append(node('p','本轮未取得可核查的仓库信息。'));
+    card.append(sources);
+  }
   if (p.selection==='candidate') {
     const select=node('button','加入复现计划','quiet');
     select.setAttribute('aria-label','选定文献：'+p.title);
@@ -556,7 +568,7 @@ function paperCard(p,statuses,availableTasks) {
   }
   const details=node('details',undefined,'paper-history'); details.dataset.paperHistory=p.id; details.append(node('summary','历史记录与提交次数'));
   const timeline=node('ol');
-  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
+  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
   details.append(timeline);
   for (const task of p.tasks) {
     const button=node('button','查看条件：'+task.title,'quiet'); button.onclick=()=>action(()=>openTask(task.id)); details.append(button);
