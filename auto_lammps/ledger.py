@@ -414,6 +414,57 @@ class Ledger:
         with self._transaction() as db:
             return self._request(db, request_id)
 
+    def begin_output_fetch(self, request_id: str):
+        """Reserve another local copy, including failed partial transfers.
+
+        No execution attempt is reserved or dispatched here. Old copy charges
+        remain until a separately audited retention policy can reclaim them.
+        """
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if row['state'] not in JOB_TERMINAL or not row['accounted'] or not row['job_id']:
+                raise Conflict('Output collection requires terminal, accounted scheduler evidence')
+            campaign = db.execute('SELECT campaign FROM evaluations WHERE id=?', (row['evaluation'],)).fetchone()[0]
+            policy = json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?', (campaign,)).fetchone()[0])
+            rows = db.execute('SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?',
+                              (campaign,)).fetchall()
+            if any(r['state'] == 'reconcile_required' for r in rows):
+                raise Conflict('Campaign contains an unresolved scheduler conflict')
+            payload_bytes = json.loads(row['resources'])['storage_bytes']
+            reservation = payload_bytes + 262144  # Header, private intent, stderr and final receipt.
+            if sum(r['charge_storage_bytes'] for r in rows) + reservation > policy['total_storage_bytes']:
+                raise LimitExceeded('Campaign storage cannot hold another output copy')
+            context = dict(ticket=uuid.uuid4().hex, request_id=request_id, job_id=row['job_id'],
+                           manifest_sha256=row['manifest_sha256'], scheduler_state=row['state'],
+                           payload_bytes=payload_bytes, storage_bytes=reservation)
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+? WHERE id=?',
+                       (reservation, request_id))
+            self._event(db, request_id, 'output_fetch_started', context)
+            return context
+
+    def finish_output_fetch(self, request_id: str, ticket: str, *, collected: bool, evidence_sha256: str):
+        _digest(evidence_sha256)
+        if not isinstance(ticket, str) or not re.fullmatch(r'[a-f0-9]{32}', ticket) or type(collected) is not bool:
+            raise ValueError('Invalid output collection receipt')
+        payload = dict(ticket=ticket, collected=collected, evidence_sha256=evidence_sha256)
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            events = [(e['kind'], json.loads(e['payload'])) for e in db.execute(
+                "SELECT kind,payload FROM events WHERE request_id=? AND kind IN ('output_fetch_started','output_fetch_finished')",
+                (request_id,))]
+            start = next((p for kind,p in events if kind == 'output_fetch_started' and p['ticket'] == ticket), None)
+            old = next((p for kind,p in events if kind == 'output_fetch_finished' and p['ticket'] == ticket), None)
+            if start is None:
+                raise Conflict('No reserved collection intent')
+            if old is not None:
+                if old != payload:
+                    raise Conflict('Cannot change an output collection receipt')
+                return
+            if collected and (row['state'] != start['scheduler_state'] or not row['accounted']
+                              or row['job_id'] != start['job_id']):
+                raise Conflict('Scheduler evidence changed during collection')
+            self._event(db, request_id, 'output_fetch_finished', payload)
+
     def evaluation_snapshot(self, evaluation: str):
         """Read an evaluation consistently without exporting raw private payloads."""
         db = self._connect()

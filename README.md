@@ -32,6 +32,9 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 候选方案生成已连接模型接口、ASE 几何准备、势函数绑定和输入快照，见 [Agent 候选方案](docs/AGENT_CANDIDATES.md)。网页与阶段历史已通过独立合成验收，见 [准备记录](docs/CANDIDATE_HISTORY.md)；真实模型能力与 HPC 执行尚未验证。ASE 仅用于建模和文件读写，不在本机做物理计算。
 
+受信控制端可回收已结束且完成核算的作业输出，校验文件并把下载副本纳入存储预算，见
+[结果回收](docs/OUTPUTS.md)。目前通过合成本地传输验证，尚未接通真实 HPC、自动分析或网页结果页。
+
 “复现文献与历史”提供候选与已选清单、条件版本及已有账本次数；见 [历史记录边界](docs/PAPER_HISTORY.md)。当前独立评分尚未接入，不产生已复现记录。[第一周逐项核对](docs/WEEK1_AUDIT.md)列出实际完成与未完成要求。
 
 冻结后可自动导出计算任务草稿和独立参考准备资料，见 [资料导出](docs/TASK_PACKAGES.md)。仅完成字段分离；条件内容与允许资源尚需核验，不能将草稿直接用于正式评测。
