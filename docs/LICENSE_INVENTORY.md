@@ -12,6 +12,7 @@
 | ICAMS/lammps-user-pace | GitHub 许可证识别为 NOASSERTION | 逐文件核查未完成，不再分发 |
 | PACE Zenodo 4734036 | 数据与势函数文件可见 | 具体授权需再核，不镜像 |
 | ANI-Al | 模型和数据仓库可见 | 运行依赖和许可待核，不镜像 |
+| materialsvirtuallab/mlearn | 固定提交 10c427a5480c6281c15c64efaf869b03be04818f；根 LICENSE 为 BSD-3-Clause，版权 Materials Virtual Lab 2019 | 仅私人资源库保存原始 Cu SNAP 模型及许可证；无作者工作流代码复制，无公开再分发；见 POTENTIALS.md |
 | FastAPI 0.141.1 / Uvicorn 0.52.0 / HTTPX 0.28.1 | PyPI 元数据分别为 MIT / BSD-3-Clause / BSD-3-Clause；HTTPX 仅测试使用 | 通过官方包安装，不内嵌第三方源码；发行前继续核查完整传递依赖 |
 | Bubblewrap / libseccomp | 仅调用系统安装版本的程序/API，无源码或二进制内嵌；部署版本、依赖及许可证仍需固定审计 | 不随原创代码重新许可，不打包分发 |
 | LAMMPS、OVITO、PyMuPDF/ASE | 尚未作为本项目运行依赖安装或打包 | 接入前单独核对版本及许可，不套用项目原创许可 |
