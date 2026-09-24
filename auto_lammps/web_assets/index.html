@@ -27,6 +27,12 @@
 <p class="form-note">次数按每轮评测分别核算。刷新只读取已有记录，不提交计算或重新分析。科学结论尚待核验。</p>
 </section>
 <div class="section-heading"><p>已有文献工作台的单条证据导出？</p><button id="import-literature" class="quiet">从文献导入条件</button></div>
+<section id="reference-panel" class="preparation-panel" aria-labelledby="reference-heading" hidden>
+<div class="section-heading"><h2 id="reference-heading">论文证据</h2><button id="refresh-reference" class="quiet">刷新文献记录</button></div>
+<p id="reference-status" class="subtle"></p><div id="reference-results"></div>
+<details class="history"><summary>文献整理历史</summary><ol id="reference-history"></ol></details>
+<p class="form-note">这里是论文报告的结果，尚未核验科学含义，也不是本系统计算结果。文献整理不计为 HPC 提交。</p>
+</section>
 <div class="section-heading"><h2>逐项核对</h2><p>确认条件仅锁定研究说明，不代表科学检查通过。</p></div>
 <div class="section-heading"><p id="generation-note"></p><button id="generate-conditions" class="quiet">整理需求中的条件</button></div><div id="generation-questions"></div>
 <div id="conditions"></div>
@@ -44,6 +50,7 @@
 <p>选择文献工作台导出的单条 CSV（最多 64 KiB），或粘贴其完整文本。导入不会确认条件。</p>
 <label>文献证据文件<input id="literature-file" type="file" accept=".csv,text/csv"></label>
 <label>CSV 原文<textarea id="literature-csv" rows="3" required></textarea></label><button id="preview-literature" type="button" class="quiet">预览来源</button>
+<div id="reference-generation-controls" hidden><p id="reference-generation-note" class="form-note"></p><button id="generate-reference" type="button" class="primary">整理文献证据</button></div>
 <div id="literature-preview" hidden><div id="literature-context" class="source-context"></div>
 <div class="form-row"><label>取用的来源列<select id="literature-column" required></select></label><label>填入哪个条件<select id="literature-field" required></select></label></div>
 <p id="literature-value" class="source-context"></p>

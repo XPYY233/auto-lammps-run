@@ -298,12 +298,19 @@ class TaskStore:
         """Trusted reference service only; preserve source bytes before model I/O."""
         if (not isinstance(request_id, str) or not re.fullmatch('[a-f0-9]{32}', request_id)
                 or operation != sha256(canonical(context)) or request_id != operation[:32]
-                or context.get('task_id') != identifier):
+                or context.get('task_id') != identifier
+                or not isinstance(context.get('accounting_sha256'), str)
+                or not re.fullmatch('[a-f0-9]{64}', context['accounting_sha256'])):
             raise TaskError('参考整理意图身份不一致')
         with self.transaction() as db:
             doc = self._editable(db, identifier, revision)
             if doc['mode'] != 'reproduction':
                 raise TaskError('参考整理仅适用于文献任务')
+            for row in db.execute('SELECT document FROM reference_intents WHERE task_id=?', (identifier,)):
+                previous = json.loads(row['document'])
+                if (previous['request_sha256'] == context['request_sha256']
+                        and previous.get('accounting_sha256') != context.get('accounting_sha256')):
+                    raise TaskError('参考模型记账配置与已有请求不同，请核对原记录；未发送新请求')
             existing = db.execute('SELECT operation_sha256,document FROM reference_intents WHERE id=?',
                                   (request_id,)).fetchone()
             if existing:
@@ -315,6 +322,27 @@ class TaskStore:
             db.execute('INSERT INTO reference_intents VALUES (?,?,?,?,?,?)',
                        (request_id, identifier, revision, operation, datetime.now(timezone.utc).isoformat(),
                         canonical(context).decode()))
+
+    def reference_requests(self, identifier):
+        """Operator-only request metadata, without source text or model output."""
+        with self.transaction() as db:
+            doc = self._read(db, identifier)
+            if doc['mode'] != 'reproduction':
+                raise TaskError('普通科研没有文献参考请求')
+            rows = db.execute('SELECT id,revision,at,document FROM reference_intents WHERE task_id=? '
+                              'ORDER BY at,id', (identifier,)).fetchall()
+        return [dict(request_id=row['id'], revision=row['revision'], at=row['at'],
+                     accounting_sha256=json.loads(row['document']).get('accounting_sha256'),
+                     imported=row['id'] in doc.get('reference_batches', {})) for row in rows]
+
+    def reference_intent(self, identifier, request_id):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            row = db.execute('SELECT document,operation_sha256 FROM reference_intents WHERE task_id=? AND id=?',
+                             (identifier, request_id)).fetchone()
+        if row is None:
+            raise KeyError('这项任务没有对应的文献整理记录')
+        return json.loads(row['document']), row['operation_sha256']
 
     def import_generated_reference(self, identifier, revision, request_id, context, operation, completion):
         from .reference_generation import validate_reference

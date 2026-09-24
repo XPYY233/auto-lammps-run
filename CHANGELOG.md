@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 3c: explicit reference-service web configuration, reported evidence with citations, request history and recovery without a new model call. Synthetic route/browser validation only. Records the clarified first-week Codex-led P-A-B validation, second-week independent API adoption, and required human-facing workflow redesign after the first P-A-B run.
+
 - PR 3b: internal reference-side runtime model service for sourced condition and reported-result drafts from workbench exports. Preserves sources before I/O, imports atomically, isolates result fields from execution drafts, and recovers saved completions without another request. Quote checks are not scientific verification; synthetic transport tests only, with no real API or computation enabled.
 
 - PR 6: reference-side literal include expansion and declared file-path adaptation, preserving originals, source hashes, line origins and every path change. Distinguishes initial inputs from written state, rejects unsupported control flow, and enters the existing frozen-input contract. Synthetic tests and private static template preparation only; no physical execution or scientific equivalence claim. B now explicitly awaits the user's review of its strategy.

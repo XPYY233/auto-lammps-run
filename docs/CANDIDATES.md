@@ -5,7 +5,7 @@
 | 候选 | 已验证资源 | 入选障碍与建议 |
 |---|---|---|
 | [Ultra-fast interpretable machine-learning potentials](https://doi.org/10.1038/s41524-023-01092-7) | [作者仓库](https://github.com/uf3/uf3)，固定 bc3279d9f986bd0b1f3720764af5196d989bea40；熔点 LAMMPS 脚本及 UF2 表文件存在 | 优先继续审计：论文方法与当前脚本在系统规模、时间步和采样阶段存在实质差异，不能直接称原文复现 |
-| [PACE and application to copper and silicon](https://doi.org/10.1038/s41524-021-00559-9) | [作者实现](https://github.com/ICAMS/lammps-user-pace)，固定 99aa6e685cce24c24f81ce35b241d1b480d1ad05；[Zenodo 数据](https://zenodo.org/records/4734036)列出 Cu/Si 势函数及 Cu 数据 | 铜的结构性质可作为低成本范围候选，但已发布资源尚不足以证明目标图表的完整作者流程可直接运行 |
+| [Performant implementation of the atomic cluster expansion (PACE) and application to copper and silicon](https://doi.org/10.1038/s41524-021-00559-9) | [作者实现](https://github.com/ICAMS/lammps-user-pace)，固定 99aa6e685cce24c24f81ce35b241d1b480d1ad05；[Zenodo 数据](https://zenodo.org/records/4734036)列出 Cu/Si 势函数及 Cu 数据 | 铜的结构性质可作为低成本范围候选，但已发布资源尚不足以证明目标图表的完整作者流程可直接运行 |
 | [Automated discovery of a robust interatomic potential for aluminum](https://doi.org/10.1038/s41467-021-21376-0) | [ANI-Al 仓库](https://github.com/atomistic-ml/ani-al)，固定 5db4cf050d129ffc3530aacb75d5b4cfb0f41780；模型和数据存在 | NeuroChem 与 LAMMPS 集成及目标脚本未核实，暂不选为首篇 |
 
 建议的第一任务范围（待解决矛盾后确认）：UF2 钨两相共存熔点任务，包含完整初始化、两相制备、NPH 生产、末段温度统计及相共存检查；覆盖一个有物理意义的外推验证任务。不包括全论文模型训练、全势函数横向性能、硅或声子结果。结果是否直接来自 LAMMPS 逐项判断；作者 tungsten_properties notebook 使用独立 UFCalculator，不能整页算入 LAMMPS 目标。当前不批准运行，亦未将任何候选标为合格参考。

@@ -5,6 +5,7 @@ The browser cannot configure model budgets, credentials or scheduler access.
 import argparse
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,6 +17,7 @@ from .literature import preview_csv
 from .papers import PaperStore
 from .deepseek import DeepSeekClient, ModelCalls, ModelError
 from .condition_generation import generate_condition_draft
+from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError
@@ -124,7 +126,12 @@ class LinkPaperTask(Revision):
     task_id: str
 
 
-def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None):
+class ReferenceDraft(Revision):
+    csv_texts: list[str] = Field(min_length=1, max_length=8)
+
+
+def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
+               reference_model_client=None):
     papers = PaperStore(store) if papers is None else papers
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
@@ -159,6 +166,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             'model_key_missing_or_invalid': '运行模型尚未完成服务端配置。',
             'incomplete_generation': '模型回答不完整，未导入条件。请求记录已保留。',
             'input_too_large': '需求文本超出当前模型输入限制，未发出请求。',
+            'reference_request_requires_attention': '已有整理请求尚无可恢复的完成回执，请核对记录；不会重复调用。',
         }
         return JSONResponse({'detail': explanations.get(str(exc), '模型整理未完成，未自动重试。请求记录已保留。')}, status_code=422)
 
@@ -183,8 +191,10 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/schema')
     def schema():
         status = model_client.calls.status() if model_client else None
+        reference_status = reference_model_client.calls.status() if reference_model_client else None
         return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': False,
+                'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else
                     {'enabled': False, 'reason': '方案准备服务尚未配置。'}}
 
@@ -235,6 +245,36 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.post('/api/tasks/{identifier}/literature')
     def import_literature(identifier: str, data: LiteratureImport):
         return store.import_literature(identifier, data.revision, **data.model_dump(exclude={'revision'}))
+
+    @app.post('/api/tasks/{identifier}/reference-evidence')
+    def reference_generate(identifier: str, data: ReferenceDraft):
+        if reference_model_client is None:
+            return JSONResponse({'detail': '文献自动整理尚未配置。已有资料与历史不会改变。'}, status_code=422)
+        return generate_reference_draft(reference_model_client, store, identifier, data.revision, data.csv_texts)
+
+    @app.get('/api/tasks/{identifier}/reference-evidence')
+    def reference_history(identifier: str):
+        requests = store.reference_requests(identifier)
+        binding = accounting_binding(reference_model_client) if reference_model_client else None
+        for item in requests:
+            record_binding = item.pop('accounting_sha256')
+            same_accounting = binding is not None and record_binding == binding
+            record = reference_model_client.calls.lookup(item['request_id']) if same_accounting else None
+            receipt = record['receipt'] if record else None
+            state = 'saved' if item['imported'] else (receipt['state'] if receipt else 'unresolved')
+            item['state'] = state
+            item['label'] = {'saved':'证据草稿已保存', 'completed':'模型已返回，草稿尚未导入',
+                             'unknown':'模型请求状态不明', 'not_sent':'模型请求未发出',
+                             'rejected':'模型服务拒绝请求', 'response_invalid':'模型返回格式无效',
+                             'unresolved':'尚无可核对的完成记录'}.get(state, '整理状态待核对')
+        return {'requests': requests, 'configured': reference_model_client is not None,
+                'execution_authorized': False}
+
+    @app.post('/api/tasks/{identifier}/reference-evidence/{request_id}/recover')
+    def reference_recover(identifier: str, request_id: str, data: Revision):
+        if reference_model_client is None:
+            return JSONResponse({'detail': '请先恢复原文献整理服务配置；不会发出模型请求。'}, status_code=422)
+        return recover_reference_draft(reference_model_client, store, identifier, data.revision, request_id)
 
     @app.post('/api/tasks', status_code=201)
     def create(data: NewTask):
@@ -316,6 +356,7 @@ def main():
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
     parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
+    parser.add_argument('--reference-model-ledger', help='Explicit existing reference-side model policy; no automatic enablement')
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
@@ -330,6 +371,8 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
+    reference_model_client = (DeepSeekClient(ModelCalls.open_existing(args.reference_model_ledger),
+        key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
     results_reader=None
     if args.collections_directory or args.reports_directory:
@@ -352,7 +395,8 @@ def main():
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
                     snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
     uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger), model_client=model_client,
-                          candidate_service=candidate_service,results_reader=results_reader), host='127.0.0.1', port=args.port,
+                          candidate_service=candidate_service,results_reader=results_reader,
+                          reference_model_client=reference_model_client), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 
