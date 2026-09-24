@@ -20,7 +20,7 @@ EVENTS={'reserved':'预留计算资源','dispatch_intent':'发起计算提交','
         'reconciliation_finished':'保存调度核对','reconciliation_conflict':'调度记录存在矛盾',
         'scheduler_observation_conflict':'调度记录存在矛盾','cancel_intent':'请求取消',
         'cancelled_before_dispatch':'提交前已取消','following_registered':'开始自动跟进',
-        'following_poll':'预留调度查询与记录空间'}
+        'following_poll':'预留调度查询与记录空间','execution_authorized':'核对已有执行许可'}
 FOLLOWING={'waiting':'等待计算进展','collecting':'自动回收结果','analyzing':'自动分析结果',
            'analyzed':'自动分析已完成','analysis_failed':'自动分析未完成',
            'diagnostics_saved':'失败计算的诊断已保存','attention':'自动跟进需要核对'}
