@@ -16,6 +16,7 @@ PR 1e 是可审查的实现，尚未部署或完成真实计算验收。没有�
 
 - `submission.json` 固定 `runtime_path`、`runtime_sha256`、`sbatch_path`、`sbatch_sha256`。
 - 启动器相邻的 `runtime.json` 固定互不包含的 `requests_root`、`control_root`、`runtime_tree`；固定 `runtime_files` 清单、`engine_relative`、bwrap/scontrol 的路径及摘要、libseccomp 共享库的真实路径及摘要。
+- 可选 `runtime_options` 仅接受 `library_directories` 和 `mpi_transport`。前者最多 8 个互不重复的运行树相对目录，每个目录必须有清单中的直接文件；禁止路径穿越、绝对路径及被 work/output/proc/dev/tmp 挂载覆盖的目录。后者仅支持 `none`（默认）或 `intel-shm`。整个配置受许可的 profile 摘要约束，修改后旧许可失效。
 - 控制目录中 `grant.key` 是独立的 32 字节私钥；请求许可包含 payload 与 HMAC-SHA256。payload 绑定 request_id、manifest/profile 摘要、到期时间、资源、输出名、批准/任务/评分/静态检查摘要、已审查提交及 batch_sha256。
 - 许可签名端尚未提供。签名仅证明受信控制端签发了这些字段，不自动证明 GitHub 审查、科学条件、评分或静态检查已经完成。不得根据摘要格式正确就自动签发许可。
 - 共享库及启动器不是 Agent 上传的文件。管理员应保证部署目录及所有祖先不可被非受信身份替换，并核实软件的依赖和许可。
@@ -24,7 +25,14 @@ PR 1e 是可审查的实现，尚未部署或完成真实计算验收。没有�
 
 启动器只接受 Linux x86-64、单节点单核、单进程入口。批准的最多 8 核并不意味着此版本已实现 MPI；请求多核会拒绝，不自动改科学任务。必须存在匹配请求、用户、节点、CPU、时限且重启数为零的真实 RUNNING 分配；CPU affinity 和 cgroup 硬内存上限必须不超过批准资源。环境变量本身不构成分配证明。
 
-运行树使用逐文件摘要清单，输入只读；只允许预先声明的少量输出文件可写。Bubblewrap 建立隔离 namespace、断开外部网络、移除 capabilities、创建新会话；不挂载控制目录、宿主 home、凭据或全系统软件目录。子进程环境只有固定 PATH/LC_ALL，随后设置固定 HOME；不继承控制端环境。
+运行树使用逐文件摘要清单，输入只读；只允许预先声明的少量输出文件可写。Bubblewrap 建立隔离 namespace、断开外部网络、移除 capabilities、创建新会话；不挂载控制目录、宿主 home、凭据或全系统软件目录。子进程不继承控制端环境；沙箱设置固定 PATH、LC_ALL、HOME，并将 OpenMP/MKL 线程数固定为 1。
+
+Issue #31 为已安装引擎增加受控环境声明。例如合成配置
+`"runtime_options": {"library_directories": ["lib"], "mpi_transport": "intel-shm"}`
+只生成沙箱内 `/lib` 的库搜索路径和 `I_MPI_FABRICS=shm`，不导入模块环境或
+`LAMMPS_POTENTIALS`。它支持单个 MPI 链接程序的初始化，不提供 mpirun、多进程计算、
+额外挂载或可写临时目录。目录中的全部文件仍需运行树摘要检查；库搜索路径存在不证明
+动态加载插件齐全，帮助查询通过也不证明目标计算所需依赖齐全。
 
 Issue #29 增加 cgroup v1 内存控制器支持。统一层级继续读取当前组及祖先的 `memory.max`；
 v1 从进程成员关系定位 `memory` 控制器，读取 `memory.limit_in_bytes` 和 `memory.stat` 中的
@@ -35,9 +43,21 @@ v1 从进程成员关系定位 `memory` 控制器，读取 `memory.limit_in_byte
 不使用 usage、soft limit 或环境变量证明限制，也不写入或调整任何 cgroup 配置。
 
 2026-09-24 的登录端只读核验确认存在旧层级及 Slurm cgroup 约束配置；这不能代替计算节点
-真实分配中的内存、CPU、namespace 和存储约束验收。已检查的四个常用引擎模块均不含 SNAP，
-其中一个 MPI 版本的帮助查询先因通信初始化失败；仅对帮助查询使用文档允许的共享内存通信后
-成功，原始失败保留。未把该环境选项加入生产启动器或声称完整运行树可用。
+真实分配中的内存、CPU、namespace 和存储约束验收。最初四个常用引擎模块不含 SNAP；后续
+扩展核验全部 15 个已列模块，13 个帮助查询成功，其中 3 个包含 SNAP。另两个未完成能力
+核验，不能标记为“不支持”。已固定一个 2023 年引擎候选及其解析到的依赖摘要；它们合计
+约 227 MiB，不包含尚未证明齐全的动态插件，也不代表项目所有副本的存储成本。
+
+该候选在登录端完成一次隔离的 `-help -log none` 查询：仅绑定已核验的引擎/库，根目录只读，
+外部网络隔离，使用当前 namespace 过滤器，没有目标输入或可写临时目录。不是生产启动器
+端到端验收，也不是计算节点分配或科学计算验证。原始 MPI 初始化失败、一次依赖摘要检查
+失败和解释器缺接口失败均保留；依赖摘要检查后续通过，但首次失败没有定位到具体文件。
+
+默认 Python 虽满足版本要求，却未提供 `os.memfd_create`；显式选择的系统 Python 经核验
+支持该接口，隔离帮助查询成功。部署必须固定解释器绝对路径并检查实际功能，不能仅检查
+版本号或依赖模块 PATH。软件源码版本还需与安装构建来源核对；对应
+[2023 年 SNAP 文档](https://github.com/lammps/lammps/blob/ff96eb2e84a5638f8d18afb87f997256894ab34c/doc/src/pair_snap.rst)
+支持先前的静态参数转换依据，但不证明安装二进制源码一致或数值等价。
 
 已发现指定入口的 bwrap 帮助不含 `--disable-userns` 与 `--clearenv`。实现使用其已列出的 `--seccomp FD`，通过 libseccomp 编译过滤器，禁止 unshare/setns 与携带 CLONE_NEWUSER 的 clone，并对 clone3 返回 ENOSYS。无需新版两个选项；过滤器不可用则拒绝。其他 ABI 尚不支持。此过滤器专门约束嵌套 namespace，不是所有系统调用的白名单。
 
