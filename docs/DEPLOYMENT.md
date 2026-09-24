@@ -18,4 +18,4 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 
 已增加受信管理员的一次作业恢复命令，见 [RECOVERY.md](RECOVERY.md)。该命令读取现有账本并查询调度器，不启动持续在线服务、不运行模型或物理引擎。
 
-受限上传接收程序、资源脚本及配置边界见 [STAGING.md](STAGING.md)。尚未在真实集群安装接收端，不提供可直接运行目标计算的部署命令；计算节点隔离启动器和物理存储配额仍需实现与验证。
+受限上传接收程序、资源脚本及配置边界见 [STAGING.md](STAGING.md)。尚未在真实集群安装接收端，不提供可直接运行目标计算的部署命令；提交与计算节点隔离启动器代码见 [RUNTIME.md](RUNTIME.md)，尚未安装验证；物理存储强制限制仍未落实。

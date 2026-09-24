@@ -2,11 +2,11 @@
 
 面向课题组自行部署的文献复现工作台。目标流程：文献条件提取 → 作者参考运行 → 独立 Agent 生成 → HPC 提交 → 分析 → 独立科学比较。
 
-**当前为开发基础，不是已完成的复现产品。** 已实现只读 Zotero 文献发现、持久提交账本、输入快照、受控 Slurm 只读查询、事务恢复与受限上传代码。账本仅完成离线验证，指定入口的空作业查询已实测。生产提交、网页、模型连接器和独立评分尚未实现。没有目标模拟结果。
+**当前为开发基础，不是已完成的复现产品。** 已实现只读 Zotero 文献发现、持久提交账本、输入快照、受控 Slurm 只读查询、事务恢复与受限上传、受信提交及计算节点启动器代码。账本与执行代码仅完成离线验证，指定入口的空作业查询已实测。真实计算部署、网页、模型连接器和独立评分尚未完成。没有目标模拟结果。
 
 ## 现在可以运行
 
-需要 Python 3.11+、运行中的 Zotero 及其本地 API。当前工具仅使用 Python 标准库。
+需要 Python 3.11+、运行中的 Zotero 及其本地 API。本地文献与控制工具仅使用 Python 标准库；未部署的 Linux 启动器另外依赖 Bubblewrap/libseccomp。
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -19,7 +19,7 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 
 - [目标与三周路线](docs/GOALS.md) · [进度入口](docs/PROGRESS.md)
 - [现状审计](docs/AUDIT.md) · [开发候选](docs/CANDIDATES.md)
-- [提交账本](docs/LEDGER.md) · [输入冻结与只读查询](docs/FROZEN_INPUTS.md) · [作业恢复](docs/RECOVERY.md) · [受限上传](docs/STAGING.md) · [架构决定](docs/ARCHITECTURE.md) · [评测规范](docs/EVALUATION.md)
+- [提交账本](docs/LEDGER.md) · [输入冻结与只读查询](docs/FROZEN_INPUTS.md) · [作业恢复](docs/RECOVERY.md) · [受限上传](docs/STAGING.md) · [提交与启动器](docs/RUNTIME.md) · [架构决定](docs/ARCHITECTURE.md) · [评测规范](docs/EVALUATION.md)
 - [部署](docs/DEPLOYMENT.md) · [安全](docs/SECURITY.md)
 - [依赖与许可](docs/LICENSE_INVENTORY.md) · [变更记录](CHANGELOG.md)
 

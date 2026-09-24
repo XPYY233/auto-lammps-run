@@ -21,7 +21,9 @@ HEADER_LIMIT = 1_000_000
 RECEIPT_ALLOWANCE = 8192
 ROOT_ALLOWANCE = 65536
 ROLES = {'lammps_input', 'structure', 'potential', 'analysis_spec'}
-RESERVED = {'manifest.json', 'allocation.json', 'stage.json', 'receipt.json', 'job.sh', 'output'}
+RESERVED = {'manifest.json', 'allocation.json', 'stage.json', 'receipt.json', 'job.sh', 'output',
+            'execution-intent.json', 'execution-result.json', 'scheduler.stdout', 'scheduler.stderr',
+            'scheduler-intent.json', 'scheduler-result.json'}
 
 
 class StageError(ValueError):

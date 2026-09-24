@@ -100,7 +100,7 @@ class StagingTests(unittest.TestCase):
 
     def test_malicious_manifest_paths_and_metadata(self):
         original = self.snapshot.verify()
-        for path in ('../escape', '/escape', 'output/trajectory', 'job.sh', 'allocation.json', 'a//x', 'a/../x'):
+        for path in ('../escape', '/escape', 'output/trajectory', 'job.sh', 'allocation.json', 'scheduler-intent.json', 'execution-result.json', 'scheduler.stdout', 'a//x', 'a/../x'):
             doc = json.loads(json.dumps(original))
             doc['files'][0]['path'] = path
             doc['entrypoint'] = path
