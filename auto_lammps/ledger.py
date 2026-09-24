@@ -563,6 +563,61 @@ class Ledger:
             return result
         finally:db.close()
 
+    def register_following(self, request_id, config_sha256, *, max_polls, interval_seconds, poll_storage_bytes):
+        """Bind post-dispatch automation policy once; restarting cannot reset it."""
+        _digest(config_sha256)
+        if (type(max_polls) is not int or not 1<=max_polls<=240 or
+                type(interval_seconds) is not int or not 15<=interval_seconds<=3600 or
+                type(poll_storage_bytes) is not int or not 16384<=poll_storage_bytes<=13000000):
+            raise ValueError('Invalid bounded following policy')
+        policy=dict(config_sha256=config_sha256,max_polls=max_polls,interval_seconds=interval_seconds,
+                    poll_storage_bytes=poll_storage_bytes)
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            if not row['dispatch_claimed'] or row['state'] in {'rejected','cancelled_before_dispatch'}:
+                raise Conflict('Only an existing dispatched job may be followed')
+            prior=db.execute("SELECT payload FROM events WHERE request_id=? AND kind='following_registered'",
+                             (request_id,)).fetchone()
+            if prior:
+                if json.loads(prior[0])!=policy:raise Conflict('Following policy cannot change silently')
+            else:self._event(db,request_id,'following_registered',policy)
+
+    def claim_following_poll(self, request_id):
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            saved=db.execute("SELECT payload FROM events WHERE request_id=? AND kind='following_registered'",
+                             (request_id,)).fetchone()
+            if saved is None:raise Conflict('No following policy')
+            policy=json.loads(saved[0])
+            polls=db.execute("SELECT at FROM events WHERE request_id=? AND kind='following_poll' ORDER BY seq",
+                             (request_id,)).fetchall()
+            if len(polls)>=policy['max_polls']:raise LimitExceeded('Following poll allowance exhausted')
+            if polls and time.time()<polls[-1]['at']+policy['interval_seconds']:return False
+            campaign=db.execute('SELECT campaign FROM evaluations WHERE id=?',(row['evaluation'],)).fetchone()[0]
+            budget=json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?',(campaign,)).fetchone()[0])
+            used=db.execute('SELECT sum(r.charge_storage_bytes) FROM requests r JOIN evaluations e ON r.evaluation=e.id '
+                            'WHERE e.campaign=?',(campaign,)).fetchone()[0]
+            if used+policy['poll_storage_bytes']>budget['total_storage_bytes']:
+                raise LimitExceeded('Campaign storage cannot hold more scheduler receipts')
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+? WHERE id=?',
+                       (policy['poll_storage_bytes'],request_id))
+            self._event(db,request_id,'following_poll',dict(number=len(polls)+1,storage_bytes=policy['poll_storage_bytes']))
+            return True
+
+    def following_progress(self, request_id, state, reason=''):
+        if state not in {'waiting','collecting','analyzing','analyzed','analysis_failed','diagnostics_saved','attention'}:
+            raise ValueError('Invalid following state')
+        if not isinstance(reason,str) or not re.fullmatch(r'[a-z_]{0,80}',reason):
+            raise ValueError('Progress reasons must be fixed codes, not raw diagnostics')
+        payload=dict(state=state,reason=reason)
+        with self._transaction() as db:
+            self._request(db,request_id)
+            previous=db.execute("SELECT payload FROM events WHERE request_id=? AND kind='following_progress' ORDER BY seq DESC LIMIT 1",
+                                (request_id,)).fetchone()
+            if previous is None or json.loads(previous[0])!=payload:
+                self._event(db,request_id,'following_progress',payload)
+        return payload
+
     def recoverable(self):
         with self._transaction() as db:
             placeholders = ",".join("?" for _ in ACTIVE)

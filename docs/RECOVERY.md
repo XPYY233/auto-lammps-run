@@ -4,7 +4,8 @@
 
 ## 使用入口
 
-这是受信管理员的一次恢复操作，不是后台守护服务，也不是主 Agent 的任意 SSH 工具：
+默认是受信管理员的一次恢复操作，不是主 Agent 的任意 SSH 工具。可选的有界持续跟进
+以及查询存储记账见 [FOLLOWING.md](FOLLOWING.md)；以下不带该配置的入口仍只执行一次：
 
 ```sh
 python3 -m auto_lammps.worker \
