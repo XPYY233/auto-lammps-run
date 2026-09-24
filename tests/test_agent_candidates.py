@@ -45,6 +45,19 @@ class AgentCandidateTests(unittest.TestCase):
         return generate_candidate_draft(self.client, self.adapter, task_text='Synthetic permitted task; no expected answer.',
                                         units='metal', resources=self.resources, store=self.root / 'candidates')
 
+    def test_typed_analysis_plan_is_bound_into_generated_snapshot(self):
+        from test_analysis import PLAN
+        self.value['analysis']={'quantity':'synthetic curve','method':'frozen synthetic arithmetic',
+                                'files':['trajectory.dump'],'plan':deepcopy(PLAN)}
+        self.value['workflow']='run 0\nprint "# columns: strain stress" file /output/trajectory.dump'
+        with patch('subprocess.Popen',side_effect=AssertionError('no engine')):result=self.generate()
+        snapshot=result['snapshot'];manifest=snapshot.verify()
+        raw=(snapshot.path/'analysis.json').read_bytes()
+        from auto_lammps.manifest import sha256
+        self.assertEqual(manifest['provenance']['analysis_sha256'],sha256(raw))
+        self.assertEqual(json.loads(raw)['implementation_status'],'numeric_tables_v1')
+        self.assertEqual(json.loads(raw)['proposal']['plan'],PLAN)
+
     def test_reviewed_legacy_model_enters_agent_and_snapshot_with_conversion_receipt(self):
         metadata = self.catalog.read(self.pin)[0]['metadata']
         original = b'rcutfac 4\ntwojmax 0\nrfac0 0.99363\nrmin0 0\nbzeroflag 0\nquadraticflag 0\ndiagonalstyle 3\n'

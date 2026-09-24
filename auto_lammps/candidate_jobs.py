@@ -109,7 +109,7 @@ class CandidateService:
                   'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
-                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'structures.py', 'potentials.py')}}
+                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'analysis.py', 'structures.py', 'potentials.py')}}
         self.config_sha256 = sha256(canonical(config))
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-preparation')
 
