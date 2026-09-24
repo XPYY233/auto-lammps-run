@@ -31,6 +31,7 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 ```
 
 JSON 字段为 `potential_catalog, allowed_pins, software_sha256, packages, resources, max_atoms`；
+可选 `legacy_snap_pins` 仅供管理员指定经过审查的旧 SNAP 参数转换，详见 [资源适配](POTENTIALS.md)。
 资源字段使用现有 `cores, wall_seconds, memory_bytes, storage_bytes`。
 此配置不创建或提高模型预算，凭据不写入 JSON 或网页；它也不构成计算执行授权。
 后台工作池使用 [FastAPI lifespan](https://fastapi.tiangolo.com/advanced/events/) 管理。

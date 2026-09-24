@@ -314,10 +314,11 @@ def main():
         config_path = Path(args.candidate_config).expanduser()
         with root_descriptor(config_path.parent) as root:
             config = json.loads(read_file(root, config_path.name, 100000))
-        if set(config) != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
+        if set(config) - {'legacy_snap_pins'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
             parser.error('Invalid candidate configuration fields')
         adapter = PotentialAdapter(PotentialCatalog(config['potential_catalog']), allowed_pins=config['allowed_pins'],
-                    software_sha256=config['software_sha256'], packages=config['packages'])
+                    software_sha256=config['software_sha256'], packages=config['packages'],
+                    legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
                     snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
     uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger), model_client=model_client,

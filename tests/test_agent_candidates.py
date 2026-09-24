@@ -45,6 +45,31 @@ class AgentCandidateTests(unittest.TestCase):
         return generate_candidate_draft(self.client, self.adapter, task_text='Synthetic permitted task; no expected answer.',
                                         units='metal', resources=self.resources, store=self.root / 'candidates')
 
+    def test_reviewed_legacy_model_enters_agent_and_snapshot_with_conversion_receipt(self):
+        metadata = self.catalog.read(self.pin)[0]['metadata']
+        original = b'rcutfac 4\ntwojmax 0\nrfac0 0.99363\nrmin0 0\nbzeroflag 0\nquadraticflag 0\ndiagonalstyle 3\n'
+        (self.root / 'source/param').write_bytes(original)
+        pin = self.catalog.import_model(self.root / 'source', metadata=metadata,
+                    files={'coefficients': 'coeff', 'parameters': 'param', 'license': 'LICENSE'})
+        self.adapter = PotentialAdapter(self.catalog, allowed_pins=[pin], software_sha256='b' * 64, packages=['ML-SNAP'])
+        self.value['potential_pin'] = pin
+        with self.assertRaisesRegex(CandidateError, 'No allowlisted'):
+            self.generate()
+        self.transport.assert_not_called()
+        self.adapter = PotentialAdapter(self.catalog, allowed_pins=[pin], software_sha256='b' * 64,
+                                        packages=['ML-SNAP'], legacy_snap_pins=[pin])
+        with patch('subprocess.Popen', side_effect=AssertionError('no physical evaluation')):
+            result = self.generate()
+        result['snapshot'].verify()
+        saved = (result['snapshot'].path / f'potentials/{pin}/model.snapparam').read_bytes()
+        self.assertEqual(saved, original.replace(b'diagonalstyle 3\n', b''))
+        self.assertEqual(self.catalog.read(pin)[1]['parameters'], original)
+        receipt = json.loads((result['snapshot'].path / 'generation.json').read_bytes())['potential_receipt']
+        self.assertIn('compatibility_conversion', receipt)
+        self.assertFalse(receipt['compatibility_conversion']['numerical_equivalence_verified'])
+        self.assertFalse(receipt['execution_authorized'])
+        self.assertEqual(self.transport.call_count, 1)
+
     def test_model_to_geometry_potential_and_immutable_candidate(self):
         with patch('subprocess.Popen', side_effect=AssertionError('no local process execution')):
             result = self.generate()
