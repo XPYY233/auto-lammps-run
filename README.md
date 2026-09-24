@@ -28,7 +28,7 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 科研计算不要求论文。管理员配置独立模型与调用额度后，可自动整理自然语言中的条件并显示原文依据和缺项；模型配置与实际验证边界见 [DeepSeek 条件整理](docs/MODEL_RUNTIME.md)。
 
-私人势函数目录及首个领域适配操作已支持固定 SNAP 资源与静态调用检查，见 [势函数资源](docs/POTENTIALS.md)。已接入候选生成的资源筛选；旧参数转换需管理员逐项指定并保留来源。尚未完成适用性自动选择或实际计算，已收集不代表已验证。
+私人势函数目录已支持固定 SNAP 与 MEAM 资源及静态调用检查，见 [势函数资源](docs/POTENTIALS.md)。已接入候选生成的资源筛选；MEAM 库索引与原子类型顺序分开保留，旧 SNAP 参数转换需管理员逐项指定并保留来源。尚未完成适用性自动选择或实际计算，已收集不代表已验证。
 
 候选方案生成已连接模型接口、ASE 几何准备、势函数绑定和输入快照，见 [Agent 候选方案](docs/AGENT_CANDIDATES.md)。网页与阶段历史已通过独立合成验收，见 [准备记录](docs/CANDIDATE_HISTORY.md)；真实模型能力与 HPC 执行尚未验证。ASE 仅用于建模和文件读写，不在本机做物理计算。
 
