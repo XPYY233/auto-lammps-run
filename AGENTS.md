@@ -8,6 +8,10 @@
   evidence, author reference source, hidden targets and real execution logs.
 - Every target energy/force/minimization/dynamics evaluation is HPC-only through
   the accounted service, including reference runs, run 0 and engine prechecks.
+- Download and retain LAMMPS engine archives, source trees, build directories and
+  simulation working files on the user's configured HPC, not the local computer.
+  Keep the local web/control service and audit metadata separate. Before removing
+  a previously downloaded local artifact, verify its remote size and SHA-256.
 - Do not submit until scope, resource/API limits and scoring rules are approved.
 - Maximum two submissions per formal evaluation; uncertain submission means
   reconcile first. The second attempt cannot see target answers or score differences.

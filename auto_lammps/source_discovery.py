@@ -168,6 +168,7 @@ def main():
     parser.add_argument('--database', type=Path, required=True)
     parser.add_argument('--paper-id', required=True)
     parser.add_argument('--audit-directory', type=Path, required=True)
+    parser.add_argument('--engine-policy', type=Path, help='Trusted release/core/source budget policy')
     args = parser.parse_args()
     from .papers import PaperStore
     from .tasks import TaskStore
@@ -176,7 +177,13 @@ def main():
     report = SourceDiscovery(args.audit_directory).discover(paper['title'], paper['doi'])
     papers.record_source_search(args.paper_id, report)
     from .potential_acquisition import prepare_paper_resources
-    prepare_paper_resources(papers, args.paper_id, args.audit_directory/'potentials')
+    resources = prepare_paper_resources(papers, args.paper_id, args.audit_directory/'potentials')
+    if args.engine_policy and resources.get('bindings'):
+        from .engine_preparation import prepare_paper_engine
+        from .manifest import read_file, root_descriptor
+        with root_descriptor(args.engine_policy.parent) as root:
+            policy = json.loads(read_file(root, args.engine_policy.name, 10000))
+        prepare_paper_engine(papers, args.paper_id, args.audit_directory/'engine', policy)
     print(json.dumps({'state': report['state'], 'candidates': len(report['candidates']),
                       'matched': sum(c['association'] == 'doi_and_title' for c in report['candidates'])}))
 

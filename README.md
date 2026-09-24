@@ -74,3 +74,7 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 第一周由 Codex 负责 P-A-B 真实流程验证；首次跑通后再配置第二周使用的独立 API。第二周及后续软件运行不依赖开发者的 ChatGPT/Codex 登录。所有目标物理计算只能通过记账入口在批准的 HPC 计算节点运行。公开代码不包含论文附件、科研数据库、集群配置、凭据、作者参考源码或隐藏答案。服务默认仅本机/内网可访问。无 LAMMPS 官方背书。
 
 原创部分已获授权采用 Apache-2.0；第三方权利不变，见 [版权说明](COPYRIGHT.md)。
+
+管理员可按固定发布版本和势函数要求在 HPC 准备官方引擎源码，控制端仅保存审计
+记录；见 [计算环境准备](docs/ENGINE_PREPARATION.md)。该步骤不编译、不运行模拟，
+不能据此宣称环境或论文复现已通过。

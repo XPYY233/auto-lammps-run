@@ -188,6 +188,29 @@ class PaperStore:
             self._write(db, doc, 'potential_acquired:'+acquisition_id)
         return self.get(identifier)
 
+    def record_engine_preparation(self, identifier, report):
+        """Source preparation status only, no engine deployment or execution grant."""
+        from .manifest import sha256
+        if (not isinstance(report, dict) or report.get('schema_version') != 1
+                or report.get('state') not in {'source_ready', 'failed', 'unknown'}
+                or report.get('location') != 'hpc'
+                or any(report.get(k) is not False for k in
+                       ('built', 'scientific_validation', 'environment_verified', 'execution_authorized'))
+                or len(canonical(report)) > 20000):
+            raise TaskError('计算环境准备记录不完整')
+        preparation_id = task_id(report.get('id'))
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            model_report = doc.get('potential_acquisition')
+            if not model_report or report.get('requirements', {}).get('model_report_sha256') != sha256(canonical(model_report)):
+                raise TaskError('计算环境要求与当前势函数记录不一致')
+            event = 'engine_source_prepared:'+preparation_id+':'+report['state']
+            if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?', (identifier, event)).fetchone():
+                return self._read(db, identifier)
+            doc['engine_preparation'] = report
+            self._write(db, doc, event)
+        return self.get(identifier)
+
     def list(self):
         with self.tasks.transaction() as db:
             ids=[r[0] for r in db.execute('SELECT id FROM papers ORDER BY rowid DESC')]
