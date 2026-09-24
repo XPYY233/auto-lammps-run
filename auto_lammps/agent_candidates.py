@@ -160,7 +160,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
 
 
 def generate_candidate_draft(client, adapter, *, task_text, units, resources, store, max_atoms=100000,
-                             condition_record_sha256=None):
+                             condition_record_sha256=None, on_stage=None):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -190,6 +190,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'geometry_runtime': runtime, 'condition_record_sha256': condition_record_sha256}
     request_id = sha256(canonical(context))[:32]
+    if on_stage:
+        on_stage('model_requested')
     completion = client.complete_json(request_id, messages)
     if (completion['receipt']['state'] != 'completed'
             or completion['receipt']['output_sha256'] != sha256(canonical(completion['value']))):
@@ -201,6 +203,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                 'request_id': request_id, 'execution_authorized': False}
     if proposal['potential_pin'] not in {x['pin'] for x in compatible}:
         raise CandidateError('Model selected a resource not supplied in this task')
+    if on_stage:
+        on_stage('preparing_files')
     geometry = build_structure(proposal['structure'], units=units, max_atoms=max_atoms)
     binding = adapter.resolve_potential(proposal['potential_pin'],
                                         type_elements=proposal['structure']['type_elements'], units=units)
@@ -233,13 +237,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             'request_id': request_id, 'execution_authorized': False}
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000):
-    """Bridge confirmed ordinary research conditions into the product generator.
-
-    Reference-derived tasks remain operator-only until their separate input and
-    runtime-isolation release has been implemented. That future path must call
-    the same generator, not an author-workflow reproduction implementation.
-    """
+def research_inputs(tasks, identifier, revision):
+    """Project confirmed user research inputs without issuing a model request."""
     task = tasks.get(identifier)
     if task['revision'] != revision or task['status'] != 'conditions_frozen':
         raise CandidateError('Freeze and use the current confirmed task before generation')
@@ -255,8 +254,14 @@ def generate_research_candidate(client, tasks, identifier, revision, adapter, *,
             raise CandidateError('Reference-derived inputs require the separate release workflow')
     from .task_packages import split_condition_record
     draft = json.loads(split_condition_record(frozen)['execution'])
+    return {'task_text': draft['task_text'], 'units': draft['conditions']['units']['value'],
+            'condition_record_sha256': sha256(frozen)}
+
+
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None):
+    """Research bridge; reference tasks still need the separate release/isolation gate."""
+    inputs = research_inputs(tasks, identifier, revision)
     # Only selected confirmed values; no task title, free prompt, discarded
     # alternatives, source context or reference-side export enters the model.
-    return generate_candidate_draft(client, adapter, task_text=draft['task_text'],
-                                    units=draft['conditions']['units']['value'], resources=resources,
-                                    store=store, max_atoms=max_atoms, condition_record_sha256=sha256(frozen))
+    return generate_candidate_draft(client, adapter, **inputs, resources=resources,
+                                    store=store, max_atoms=max_atoms, on_stage=on_stage)

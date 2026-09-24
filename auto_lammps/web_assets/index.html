@@ -14,6 +14,12 @@
 <form id="create-form"><label>任务名称<input name="title" required maxlength="160" placeholder="给这项研究起一个简短的名字"></label><label>研究模式<select name="mode"><option value="research">科研计算</option><option value="reproduction">文献复现测试</option></select></label><label class="wide">用自己的话描述任务<textarea name="prompt" required maxlength="12000" rows="6" placeholder="希望研究什么材料、计算哪些性质？已知哪些条件，哪些还需要确定？"></textarea></label><p id="model-create-note" class="form-note wide">模型尚未启用。需求会先保存；明确标注的条件可按原文整理。</p><button class="primary" type="submit">保存并整理条件</button></form></section>
 <section id="task-view" hidden><div class="task-top"><div><h1 id="task-title"></h1></div><span id="task-status" class="badge"></span></div><p id="task-meta" class="subtle"></p><details class="request"><summary>原始任务描述</summary><p id="task-prompt"></p></details>
 <div class="overview"><div><strong id="confirmed-count">0 / 20</strong><span>已确认条件</span></div><div><strong id="conflict-count">0</strong><span>待解决矛盾</span></div><div><strong>条件审阅</strong><span>计算记录见文献与历史</span></div></div>
+<section id="candidate-panel" class="preparation-panel" hidden aria-labelledby="candidate-heading-title">
+<div class="section-heading"><h2 id="candidate-heading-title">计算方案</h2><button id="prepare-candidate" class="primary">准备计算方案</button></div>
+<p id="candidate-stage" role="status" aria-live="polite"></p><p id="candidate-note" class="subtle"></p>
+<div id="candidate-summary"></div><div id="candidate-downloads" class="actions"></div>
+<p class="form-note">这里只准备方案，不提交计算，也不计入 HPC 提交次数。准备完成后仍需科学核验。</p>
+</section>
 <div class="section-heading"><p>已有文献工作台的单条证据导出？</p><button id="import-literature" class="quiet">从文献导入条件</button></div>
 <div class="section-heading"><h2>逐项核对</h2><p>确认条件仅锁定研究说明，不代表科学检查通过。</p></div>
 <div class="section-heading"><p id="generation-note"></p><button id="generate-conditions" class="quiet">整理需求中的条件</button></div><div id="generation-questions"></div>

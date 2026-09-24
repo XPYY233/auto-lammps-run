@@ -5,6 +5,7 @@ const statuses = {missing:'缺失',unselected:'待选择',conflict:'有矛盾',p
 let schema, current = null, editing = null, resolving = null, busy = false;
 let literaturePreview = null;
 let paperFilter='all';
+let candidateState=null, candidateTask=null, candidatePolling=false;
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
 const literatureColumns = {material:'材料',conditions:'条件',conditions_text:'条件说明'};
 function node(tag, value, className) {
@@ -53,6 +54,7 @@ async function openTask(id) {
   window.scrollTo({top:0});
   await listTasks();
   await renderHistory();
+  await refreshCandidate();
 }
 function showNew() {
   if (busy) return;
@@ -80,6 +82,9 @@ function render() {
   $('#task-title').textContent = current.title;
   $('#task-prompt').textContent = current.prompt;
   const frozen = current.status === 'conditions_frozen';
+  $('#candidate-panel').hidden = !frozen;
+  $('#prepare-candidate').disabled = true;
+  $('#candidate-stage').textContent='正在读取准备记录…';
   $('#import-literature').hidden = frozen;
   $('#task-status').textContent = frozen ? '条件已冻结' : '条件草稿';
   $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
@@ -179,7 +184,9 @@ function render() {
   $('#freeze-note').textContent = frozen ? '可导出本人的条件审阅记录。它不是主 Agent 的隔离任务包，也不授权执行计算。' : `还有 ${current.issues.length} 项需要处理。冻结后不可覆盖；不会自动生成脚本或提交计算。`;
 }
 async function renderHistory() {
-  const {events} = await api(`/api/tasks/${current.id}/history`);
+  const id=current.id;
+  const {events,preparation_events=[]} = await api(`/api/tasks/${id}/history`);
+  if(current?.id!==id) return;
   const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件'};
   $('#history-list').replaceChildren();
   for (const item of events) {
@@ -187,9 +194,12 @@ async function renderHistory() {
     const details = fields ? ' · '+fields.split(',').map(key=>schema.fields[key]||key).join('、') : '';
     $('#history-list').append(node('li',`版本 ${item.revision} · ${labels[kind] || kind}${details} · ${new Date(item.at).toLocaleString('zh-CN')}`));
   }
+  for(const item of preparation_events) {
+    $('#history-list').append(node('li',`方案准备 · ${item.label} · ${new Date(item.at).toLocaleString('zh-CN')}`));
+  }
 }
 async function afterChange(message, field) {
-  render(); await listTasks(); await renderHistory(); notice(message);
+  render(); await listTasks(); await renderHistory(); await refreshCandidate(); notice(message);
   if (field) document.getElementById('condition-'+field).scrollIntoView({block:'nearest'});
 }
 $('#new-task').onclick=showNew;
@@ -244,6 +254,54 @@ async function generateConditions() {
   }
 }
 $('#generate-conditions').onclick=()=>action(generateConditions);
+async function refreshCandidate() {
+  if(!current || current.status!=='conditions_frozen') return;
+  const id=current.id;
+  const {candidate,downloads_enabled}=await api(`/api/tasks/${id}/candidate`);
+  if(current?.id!==id || $('#task-view').hidden) return;
+  candidateState=candidate?.state || null; candidateTask=id;
+  const available=schema.candidate_preparation || {enabled:false,reason:'方案准备服务尚未配置。'};
+  $('#prepare-candidate').hidden=!!candidate || current.mode!=='research';
+  $('#prepare-candidate').disabled=!available.enabled;
+  $('#candidate-stage').textContent=candidate?.label || '尚未准备方案';
+  $('#candidate-note').textContent=candidate ? '更新于 '+new Date(candidate.updated_at).toLocaleString('zh-CN') :
+    current.mode==='reproduction' ? '文献测试任务仍需核对输入发布与访问隔离，暂不生成方案。' :
+    available.enabled ? '根据已确认条件生成结构、势函数调用与计算输入；可关闭页面，稍后查看进度。' : available.reason;
+  const summary=$('#candidate-summary'); summary.replaceChildren(); $('#candidate-downloads').replaceChildren();
+  if(!candidate) return;
+  const result=candidate.result;
+  if(result.summary) summary.append(node('p',result.summary));
+  if(result.message) summary.append(node('p',result.message,'subtle'));
+  if(result.questions?.length) {
+    const list=node('ul');for(const question of result.questions) list.append(node('li',question));summary.append(list);
+  }
+  if(result.geometry) {
+    const g=result.geometry;
+    summary.append(node('p',`${g.atom_count} 个原子 · ${Object.entries(g.composition).map(([element,n])=>element+' '+n).join('，')} · 仅完成几何准备`));
+  }
+  if(result.analysis) summary.append(node('p','拟分析：'+result.analysis.quantity+'。'+result.analysis.method));
+  if(candidate.state==='prepared' && downloads_enabled) {
+    for(const [name,label] of [['in.lammps','计算输入'],['structure.data','初始结构'],['analysis.json','分析说明'],['generation.json','准备记录']]) {
+      const link=node('a',label+' ↓','quiet');link.href=`/api/tasks/${id}/candidate/files/${name}`;
+      $('#candidate-downloads').append(link);
+    }
+  }
+}
+$('#prepare-candidate').onclick=()=>action(async()=>{
+  const id=current.id;
+  $('#prepare-candidate').disabled=true;
+  try { await api(`/api/tasks/${id}/candidate`,{revision:current.revision}); }
+  finally { await refreshModelStatus(); await refreshCandidate(); await renderHistory(); }
+  notice('方案准备已记录，可以稍后返回查看进度。');
+});
+setInterval(async()=>{
+  if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
+     !['queued','running','model_requested','preparing_files'].includes(candidateState)) return;
+  candidatePolling=true;
+  try {await refreshCandidate();await renderHistory();await refreshModelStatus();}
+  catch(error) {notice('暂时无法读取准备进度；不会重新发起模型请求。',true);}
+  finally {candidatePolling=false;}
+},3000);
 function renderSource(container,row) {
   const labels={article_title:'论文',doi:'DOI',source_locator:'原文位置',source_page:'页码',source_excerpt:'原文',caption:'图表注',source_context:'来源上下文',value_text:'结果值（不导入）',unit:'结果单位（不导入）',finding_text:'研究发现（不导入）',method:'方法',methods_text:'方法说明',...literatureColumns};
   for (const [key,label] of Object.entries(labels)) if (row[key]) {
