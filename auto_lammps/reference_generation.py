@@ -1,4 +1,5 @@
 """Runtime-model reference drafts from workbench exports, never a released B input."""
+from dataclasses import asdict
 from .condition_generation import source_bundle, validate_conditions
 from .deepseek import ModelError, request_body
 from .literature import METHODS, preview_csv
@@ -6,6 +7,12 @@ from .manifest import canonical, sha256
 from .tasks import FIELDS, TaskError, text
 
 VERSION = 1
+
+
+def accounting_binding(client):
+    """Bind recovery to its configured accounting location and immutable policy."""
+    return sha256(canonical(dict(path=str(client.calls.path.resolve()), config=asdict(client.calls.config),
+                                 max_requests=client.calls.status()['max_requests'])))
 
 
 def reference_sources(csv_texts):
@@ -126,7 +133,7 @@ def generate_reference_draft(client, store, identifier, revision, csv_texts):
     messages = reference_messages(sources)
     body = request_body(client.calls.config, messages)
     context = dict(version=VERSION, task_id=identifier, sources=sources,
-                   exports=exports, request_sha256=sha256(body))
+                   exports=exports, request_sha256=sha256(body), accounting_sha256=accounting_binding(client))
     operation = sha256(canonical(context))
     request_id = operation[:32]
     if request_id in current.get('reference_batches', {}):
@@ -147,4 +154,19 @@ def generate_reference_draft(client, store, identifier, revision, csv_texts):
             raise ModelError('reference_request_requires_attention')
         completion = dict(request_id=request_id, value=receipt['structured_output'],
                           receipt={k: v for k, v in receipt.items() if k != 'structured_output'})
+    return store.import_generated_reference(identifier, revision, request_id, context, operation, completion)
+
+
+def recover_reference_draft(client, store, identifier, revision, request_id):
+    """Import a stored completion only; never invoke the provider or need a key."""
+    context, operation = store.reference_intent(identifier, request_id)
+    if context.get('accounting_sha256') != accounting_binding(client):
+        raise TaskError('请使用原参考模型记账配置核对；不会发送新请求')
+    previous = client.calls.lookup(request_id)
+    receipt = previous['receipt'] if previous else None
+    if (not receipt or receipt.get('state') != 'completed' or 'structured_output' not in receipt
+            or previous['request_sha256'] != context['request_sha256']):
+        raise ModelError('reference_request_requires_attention')
+    completion = dict(request_id=request_id, value=receipt['structured_output'],
+                      receipt={k: v for k, v in receipt.items() if k != 'structured_output'})
     return store.import_generated_reference(identifier, revision, request_id, context, operation, completion)

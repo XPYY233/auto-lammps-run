@@ -56,7 +56,7 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 仅做静态准备，尚无合格参考结果；进入 B 前将先向用户报告策略并取得确认。
 
 参考端另有独立 API 驱动的条件/论文结果草稿服务，见 [自动证据整理](docs/REFERENCE_EVIDENCE.md)。
-已完成合成响应下的来源校验、保存与恢复；尚未接通真实 API 或文献自动化验收。
+已接入网页的论文证据、引文和整理历史，支持恢复已返回草稿；仅完成合成响应验收，第二周才启用真实 API。当前表单属于开发辅助界面，首次 P-A-B 跑通后须完成面向研究者的流程重做。
 
 ## 开发与部署
 
@@ -66,6 +66,6 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 - [部署](docs/DEPLOYMENT.md) · [安全](docs/SECURITY.md)
 - [依赖与许可](docs/LICENSE_INVENTORY.md) · [变更记录](CHANGELOG.md)
 
-软件运行模型使用独立配置的 API；开发者的 ChatGPT/Codex 登录不作为运行后端。所有目标物理计算只能通过记账入口在批准的 HPC 计算节点运行。公开代码不包含论文附件、科研数据库、集群配置、凭据、作者参考源码或隐藏答案。服务默认仅本机/内网可访问。无 LAMMPS 官方背书。
+第一周由 Codex 负责 P-A-B 真实流程验证；首次跑通后再配置第二周使用的独立 API。第二周及后续软件运行不依赖开发者的 ChatGPT/Codex 登录。所有目标物理计算只能通过记账入口在批准的 HPC 计算节点运行。公开代码不包含论文附件、科研数据库、集群配置、凭据、作者参考源码或隐藏答案。服务默认仅本机/内网可访问。无 LAMMPS 官方背书。
 
 原创部分已获授权采用 Apache-2.0；第三方权利不变，见 [版权说明](COPYRIGHT.md)。

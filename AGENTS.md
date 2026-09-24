@@ -12,7 +12,7 @@
 - Maximum two submissions per formal evaluation; uncertain submission means
   reconcile first. The second attempt cannot see target answers or score differences.
 - Separate scheduler completion, output validity and scientific success.
-- Model runtime uses a separately configured API, never a developer chat account.
+- Week one: Codex is responsible for the real P-A-B workflow validation. Before B, report the strategy and wait for user confirmation. After the first validation succeeds, request API configuration for week two. From week two onward, model runtime uses the separately configured API. Record Codex-assisted validation separately from API automation acceptance.
 - No copying existing code until provenance and license obligations are checked.
 - No claim of blind isolation from directories or prompts alone: enforce identities,
   mounts, tools and network allowlists before any formal evaluation.
