@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 1f: cgroup v1 hard-memory-limit validation alongside v2, using kernel effective hierarchy limits and rejecting invalid membership or unbounded controls. Read-only deployment inventory exposed missing SNAP in checked engine modules; compute-node acceptance remains pending. No target calculation or scheduler submission.
+
 - PR 4e: administrator-selected legacy SNAP parameter binding with immutable originals, conversion receipts and explicit default-value provenance. Shared compatibility checks cover candidate availability and generation; policy changes invalidate queued preparation. Fixed duplicate preparation requests racing with the last model allowance. Static and synthetic verification only; no physical equivalence or execution claim.
 
 - PR 4a: optional server-side DeepSeek JSON condition extraction, durable request limits and quote-checked draft import. Research tasks no longer require a paper; model output remains unconfirmed. Product goals distinguish the scientific service from its literature-based evaluation. Synthetic tests only; no paid model call or target simulation.

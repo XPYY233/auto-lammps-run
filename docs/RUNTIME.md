@@ -22,9 +22,22 @@ PR 1e 是可审查的实现，尚未部署或完成真实计算验收。没有�
 
 ## 执行范围
 
-启动器只接受 Linux x86-64、单节点单核、单进程入口。批准的最多 8 核并不意味着此版本已实现 MPI；请求多核会拒绝，不自动改科学任务。必须存在匹配请求、用户、节点、CPU、时限且重启数为零的真实 RUNNING 分配；CPU affinity 和 cgroup-v2 memory.max 必须不超过批准资源。环境变量本身不构成分配证明。
+启动器只接受 Linux x86-64、单节点单核、单进程入口。批准的最多 8 核并不意味着此版本已实现 MPI；请求多核会拒绝，不自动改科学任务。必须存在匹配请求、用户、节点、CPU、时限且重启数为零的真实 RUNNING 分配；CPU affinity 和 cgroup 硬内存上限必须不超过批准资源。环境变量本身不构成分配证明。
 
 运行树使用逐文件摘要清单，输入只读；只允许预先声明的少量输出文件可写。Bubblewrap 建立隔离 namespace、断开外部网络、移除 capabilities、创建新会话；不挂载控制目录、宿主 home、凭据或全系统软件目录。子进程环境只有固定 PATH/LC_ALL，随后设置固定 HOME；不继承控制端环境。
+
+Issue #29 增加 cgroup v1 内存控制器支持。统一层级继续读取当前组及祖先的 `memory.max`；
+v1 从进程成员关系定位 `memory` 控制器，读取 `memory.limit_in_bytes` 和 `memory.stat` 中的
+`hierarchical_memory_limit`，取实际有效的较小上限。依据 [Linux 内核说明](https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt)，
+后者已经考虑层级开关，不能简单把每个祖先的局部限额当成对子组生效。
+混合层级优先使用实际承载 memory 控制器的 v1，缺失、重复、异常成员路径和无限上限均拒绝。
+只支持统一根目录或根下 `memory` 控制器的宿主布局；其他挂载布局需要单独适配。
+不使用 usage、soft limit 或环境变量证明限制，也不写入或调整任何 cgroup 配置。
+
+2026-09-24 的登录端只读核验确认存在旧层级及 Slurm cgroup 约束配置；这不能代替计算节点
+真实分配中的内存、CPU、namespace 和存储约束验收。已检查的四个常用引擎模块均不含 SNAP，
+其中一个 MPI 版本的帮助查询先因通信初始化失败；仅对帮助查询使用文档允许的共享内存通信后
+成功，原始失败保留。未把该环境选项加入生产启动器或声称完整运行树可用。
 
 已发现指定入口的 bwrap 帮助不含 `--disable-userns` 与 `--clearenv`。实现使用其已列出的 `--seccomp FD`，通过 libseccomp 编译过滤器，禁止 unshare/setns 与携带 CLONE_NEWUSER 的 clone，并对 clone3 返回 ENOSYS。无需新版两个选项；过滤器不可用则拒绝。其他 ABI 尚不支持。此过滤器专门约束嵌套 namespace，不是所有系统调用的白名单。
 

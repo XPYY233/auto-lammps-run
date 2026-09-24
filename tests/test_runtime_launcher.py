@@ -151,6 +151,70 @@ class RuntimeTests(unittest.TestCase):
         proc.write_text('0::/../escape\n')
         with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
 
+    def legacy_memory_fixture(self, own='4096', effective='2048'):
+        mount=self.root/'cgroup-v1'
+        current=mount/'memory/parent/step'
+        current.mkdir(parents=True)
+        (current/'memory.limit_in_bytes').write_text(own)
+        (current/'memory.stat').write_text('rss 999\ncache 0\nhierarchical_memory_limit '+effective+'\n')
+        # A parent's limit must NOT be blindly applied when hierarchy is off.
+        (current.parent/'memory.limit_in_bytes').write_text('1024')
+        (current.parent/'memory.use_hierarchy').write_text('0')
+        proc=self.root/'v1-membership'
+        proc.write_text('3:cpu,cpuacct:/cpu-only\n7:memory:/parent/step\n')
+        return proc,mount,current
+
+    def test_cgroup_v1_uses_effective_hierarchy_not_soft_limit_or_usage(self):
+        proc,mount,current=self.legacy_memory_fixture()
+        (current/'memory.soft_limit_in_bytes').write_text('1')
+        (current/'memory.usage_in_bytes').write_text('1')
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),2048)
+        (current/'memory.stat').write_text('hierarchical_memory_limit 4096\n')
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),4096)
+        (current/'memory.limit_in_bytes').write_text('3072')
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),3072)
+
+    def test_cgroup_v1_unlimited_local_limit_can_inherit_a_finite_ceiling(self):
+        page=os.sysconf('SC_PAGE_SIZE')
+        unlimited=str(((1 << 63)-1)//page*page)
+        proc,mount,current=self.legacy_memory_fixture(own=unlimited,effective='2048')
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),2048)
+        (current/'memory.stat').write_text('hierarchical_memory_limit '+unlimited+'\n')
+        with self.assertRaisesRegex(runtime.ExecutionDenied,'No cgroup memory hard limit'):
+            runtime.cgroup_memory_limit(proc,mount)
+
+    def test_cgroup_hybrid_selects_actual_memory_controller(self):
+        proc,mount,current=self.legacy_memory_fixture()
+        proc.write_text('0::/unified\n7:memory:/parent/step\n')
+        (mount/'unified').mkdir()
+        (mount/'unified/memory.max').write_text('1')
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),2048)
+
+    def test_cgroup_missing_or_ambiguous_membership_and_traversal_are_rejected(self):
+        proc,mount,current=self.legacy_memory_fixture()
+        for content in ('', 'garbage\n', '1:cpu:/parent/step\n', '0:memory:/parent/step\n',
+                        '7:memory:/parent/step\n8:memory:/parent/step\n',
+                        '0::/a\n0::/b\n7:memory:/parent/step\n',
+                        '7:memory:relative\n', '7:memory:/../escape\n', '7:memory://escape\n'):
+            with self.subTest(content=content):
+                proc.write_text(content)
+                with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
+
+    def test_cgroup_v1_requires_valid_hard_limit_and_kernel_hierarchy_stat(self):
+        proc,mount,current=self.legacy_memory_fixture()
+        for content in ('rss 10\n', 'hierarchical_memory_limit max\n', 'hierarchical_memory_limit 0\n',
+                        'hierarchical_memory_limit -1\n', 'hierarchical_memory_limit 100 extra\n',
+                        'hierarchical_memory_limit 100\nhierarchical_memory_limit 200\n'):
+            with self.subTest(content=content):
+                (current/'memory.stat').write_text(content)
+                with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
+        (current/'memory.stat').unlink()
+        with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
+        (current/'memory.stat').write_text('hierarchical_memory_limit 2048\n')
+        for value in ('0','-1','max','nan','3.5'):
+            (current/'memory.limit_in_bytes').write_text(value)
+            with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)
+
     def test_only_declared_outputs_get_writable_mounts(self):
         args=runtime.sandbox_command(self.profile,case=self.case,outputs=OUTPUTS,entrypoint='input.in',filter_fd=42)
         for flag in ('--unshare-user','--unshare-net','--seccomp','--new-session'):

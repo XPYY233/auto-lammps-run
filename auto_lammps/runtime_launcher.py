@@ -170,13 +170,52 @@ def parse_allocation(text, *, request_id, manifest_sha256, job_id, uid, host, re
 
 
 def cgroup_memory_limit(proc_cgroup='/proc/self/cgroup', mount='/sys/fs/cgroup'):
-    """Require an inherited cgroup-v2 hard memory ceiling, not an env assertion."""
+    """Read kernel hard limits, including v1's actual hierarchy semantics.
+
+    Supported host layouts are a unified root or a memory controller at
+    root/memory. No usage, soft-limit or environment value is enforcement.
+    """
     lines = Path(proc_cgroup).read_text().splitlines()
-    memberships = [line[3:] for line in lines if line.startswith('0::')]
-    if len(memberships) != 1 or not memberships[0].startswith('/') or '..' in PurePosixPath(memberships[0]).parts:
-        raise ExecutionDenied('A cgroup-v2 allocation is required')
+    unified, legacy = [], []
+    for line in lines:
+        parts = line.split(':', 2)
+        if len(parts) != 3 or not parts[0].isdecimal():
+            raise ExecutionDenied('Invalid cgroup membership')
+        if parts[:2] == ['0', '']:
+            unified.append(parts[2])
+        elif 'memory' in parts[1].split(','):
+            if parts[0] == '0':
+                raise ExecutionDenied('Invalid legacy memory controller')
+            legacy.append(parts[2])
+    if len(unified) > 1 or len(legacy) > 1 or not (unified or legacy):
+        raise ExecutionDenied('A unique memory cgroup is required')
+    # In a hybrid hierarchy, a controller attached to v1 is not active in v2.
+    membership = (legacy or unified)[0]
+    if (not membership.startswith('/') or membership.startswith('//') or '\x00' in membership
+            or '..' in PurePosixPath(membership).parts):
+        raise ExecutionDenied('Invalid cgroup membership path')
     mount = Path(mount)
-    current = mount / memberships[0].lstrip('/')
+    if legacy:
+        current = mount / 'memory' / membership.lstrip('/')
+        try:
+            own = (current/'memory.limit_in_bytes').read_text().strip()
+            # Kernel-reported effective limit respects memory.use_hierarchy.
+            # Taking every parent's local limit would be incorrect on v1.
+            rows = [line.split() for line in (current/'memory.stat').read_text().splitlines()]
+            effective = [row for row in rows if row and row[0] == 'hierarchical_memory_limit']
+        except OSError as exc:
+            raise ExecutionDenied('Cannot read cgroup-v1 hard memory controls') from exc
+        if (len(effective) != 1 or len(effective[0]) != 2
+                or any(not re.fullmatch(r'[1-9][0-9]*', value) for value in (own, effective[0][1]))):
+            raise ExecutionDenied('Invalid cgroup-v1 hard memory ceiling')
+        limit = min(int(own), int(effective[0][1]))
+        # v1's no-limit value is signed LONG_MAX rounded down to PAGE_SIZE.
+        # The launcher supports Linux x86-64 only; the page size is read live.
+        unlimited = ((1 << 63) - 1) // os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PAGE_SIZE')
+        if limit >= unlimited:
+            raise ExecutionDenied('No cgroup memory hard limit')
+        return limit
+    current = mount / membership.lstrip('/')
     limits = []
     while True:
         # The cgroup-v2 root does not expose memory.max. A non-root
