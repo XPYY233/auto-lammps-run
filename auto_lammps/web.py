@@ -1,4 +1,7 @@
-"""Loopback-only task review application. No model, scheduler or shell endpoint."""
+"""Loopback task application with optional, administrator-configured NLP.
+
+The browser cannot configure model budgets, credentials or scheduler access.
+"""
 import argparse
 from pathlib import Path
 
@@ -9,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
 from .papers import PaperStore
+from .deepseek import DeepSeekClient, ModelCalls, ModelError
+from .condition_generation import generate_condition_draft
+from .manifest import canonical, sha256
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -113,7 +119,7 @@ class LinkPaperTask(Revision):
     task_id: str
 
 
-def create_app(store: TaskStore, *, port=8765, papers=None):
+def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None):
     papers = PaperStore(store) if papers is None else papers
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalBoundary, authority=f'127.0.0.1:{port}')
@@ -125,6 +131,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None):
     @app.exception_handler(KeyError)
     async def not_found(request: Request, exc: KeyError):
         return JSONResponse({'detail': '任务不存在'}, status_code=404)
+
+    @app.exception_handler(ModelError)
+    async def model_error(request: Request, exc: ModelError):
+        explanations = {
+            'model_budget_exhausted': '模型调用额度已用完，未发出新请求。',
+            'request_already_reserved': '这次整理已发起，不会重复调用模型。请刷新查看已有条件。',
+            'model_key_missing_or_invalid': '运行模型尚未完成服务端配置。',
+            'incomplete_generation': '模型回答不完整，未导入条件。请求记录已保留。',
+            'input_too_large': '需求文本超出当前模型输入限制，未发出请求。',
+        }
+        return JSONResponse({'detail': explanations.get(str(exc), '模型整理未完成，未自动重试。请求记录已保留。')}, status_code=422)
 
     @app.get('/')
     def index():
@@ -138,7 +155,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None):
 
     @app.get('/api/schema')
     def schema():
-        return {'fields': FIELDS, 'model_calls_enabled': False, 'execution_enabled': False}
+        status = model_client.calls.status() if model_client else None
+        return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
+                'model_status': status, 'execution_enabled': False}
 
     @app.get('/api/papers')
     def paper_list():
@@ -196,6 +215,18 @@ def create_app(store: TaskStore, *, port=8765, papers=None):
     def freeze(identifier: str, data: Revision):
         return store.freeze(identifier, data.revision)
 
+    @app.post('/api/tasks/{identifier}/generate-conditions')
+    def generate(identifier: str, data: Revision):
+        if model_client is None:
+            return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
+        doc = store.get(identifier)
+        # The public research entry sends only the user's saved request.
+        # Reference documents never enter through a browser-supplied path/URL.
+        sources = [dict(id='user-request', origin='user', locator='用户原始任务描述', text=doc['prompt'])]
+        request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision, sources=sources,
+                                           operation='generate-conditions-v1')))[:32]
+        return generate_condition_draft(model_client, store, identifier, data.revision, sources, request_id)
+
     @app.get('/api/tasks/{identifier}/export')
     def export(identifier: str):
         return Response(store.export(identifier), media_type='application/json',
@@ -217,6 +248,7 @@ def main():
     parser.add_argument('--data-directory', required=True)
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
+    parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
@@ -227,7 +259,8 @@ def main():
         from .ledger import Ledger
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
-    uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger)), host='127.0.0.1', port=args.port,
+    model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
+    uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger), model_client=model_client), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

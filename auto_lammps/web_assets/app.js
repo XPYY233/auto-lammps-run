@@ -55,6 +55,7 @@ async function openTask(id) {
   await renderHistory();
 }
 function showNew() {
+  if (busy) return;
   $('#show-papers').removeAttribute('aria-current');
   current = null;
   history.replaceState(null, '', location.pathname);
@@ -81,13 +82,29 @@ function render() {
   const frozen = current.status === 'conditions_frozen';
   $('#import-literature').hidden = frozen;
   $('#task-status').textContent = frozen ? '条件已冻结' : '条件草稿';
-  $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现' : '开放研究'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
-  const all = Object.values(current.fields);
+  $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
+  const relevant = Object.entries(current.fields).filter(([key])=>key !== 'reference' || current.mode === 'reproduction');
+  const all = relevant.map(([,field])=>field);
   $('#confirmed-count').textContent = `${all.filter(f=>f.confirmed).length} / ${all.length}`;
   $('#conflict-count').textContent = all.filter(f=>conditionStatus(f)==='conflict').length;
+  $('#generate-conditions').hidden = frozen;
+  $('#generate-conditions').disabled = !schema.model_calls_enabled;
+  $('#generation-note').textContent = frozen ? '条件已冻结。' : schema.model_calls_enabled ? '根据原始需求整理条件，保留引用和缺项，不自动确认。' : '模型整理尚未启用或额度已用完。需求和已有条件已保存。';
+  $('#generation-questions').replaceChildren();
+  const batches = Object.values(current.generated_batches || {}).sort((a,b)=>a.revision-b.revision);
+  if (batches.length) {
+    const questions = batches[batches.length-1].questions.filter(q=>conditionStatus(current.fields[q.field]) !== 'confirmed');
+    if (questions.length) {
+      $('#generation-questions').append(node('p','最近整理时发现的待明确事项：'));
+      const list=node('ul');
+      for (const q of questions) list.append(node('li',q.question));
+      $('#generation-questions').append(list);
+    }
+  }
   $('#conditions').replaceChildren();
   let index = 0;
   for (const [key,label] of Object.entries(schema.fields)) {
+    if (key === 'reference' && current.mode === 'research') continue;
     const field = current.fields[key], status = conditionStatus(field);
     const row = node('article',undefined,'condition');
     row.id = 'condition-'+key;
@@ -122,6 +139,12 @@ function render() {
       const card = node('div',undefined,'candidate'+(choice.id===field.selected?' selected':''));
       const value = (choice.applicability === 'not_applicable' ? '不适用：' : '') + choice.value + (choice.unit ? ' '+choice.unit : '');
       card.append(node('p',value),node('small',origins[choice.origin]+(choice.source_locator ? ' · '+choice.source_locator : '')));
+      if (choice.generated_evidence) {
+        const details=node('details');
+        details.append(node('summary','查看整理依据'),node('p',choice.generated_evidence.quote),
+                       node('small','引用已与所给原文核对；科学含义仍需确认。'));
+        card.append(details);
+      }
       if (choice.literature_source) {
         const source = choice.literature_source;
         const snapshot = current.literature_sources?.[source.source_sha256];
@@ -157,7 +180,7 @@ function render() {
 }
 async function renderHistory() {
   const {events} = await api(`/api/tasks/${current.id}/history`);
-  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件'};
+  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件'};
   $('#history-list').replaceChildren();
   for (const item of events) {
     const [kind,fields] = item.event.split(':');
@@ -181,6 +204,7 @@ $('#create-form').onsubmit=(event)=>{
     history.replaceState(null,'','#'+current.id);
     await afterChange('任务已保存。已整理的标签行仍需确认；没有推断其他条件。');
     event.target.reset();
+    if (schema.model_calls_enabled) await generateConditions();
   });
 };
 $('#condition-form').onsubmit=(event)=>{
@@ -202,6 +226,24 @@ $('#freeze').onclick=()=>action(async()=>{
   current=await api(`/api/tasks/${current.id}/freeze`,{revision:current.revision});
   await afterChange('条件已冻结。尚未进行科学检查，也没有提交计算。');
 });
+async function refreshModelStatus() {
+  schema=await api('/api/schema');
+  $('#model-state').textContent=schema.model_calls_enabled ? '模型条件整理已启用；尚不提交作业。' : '模型尚未启用或额度已用完；不提交作业。';
+  $('#model-create-note').textContent=schema.model_calls_enabled ? '保存后将使用 DeepSeek 整理这段需求。仅发送原始描述，不自动提交计算。' : '模型尚未启用或额度已用完。需求会先保存；明确标注的条件可按原文整理。';
+}
+async function generateConditions() {
+  const id=current.id, revision=current.revision;
+  $('#generate-conditions').disabled=true;
+  notice('正在整理需求中的条件，尚未提交计算。');
+  try {
+    current=await api(`/api/tasks/${id}/generate-conditions`,{revision});
+    await afterChange('条件草稿已整理。请核对摘要中的条件与待明确事项。');
+  } finally {
+    await refreshModelStatus();
+    render();
+  }
+}
+$('#generate-conditions').onclick=()=>action(generateConditions);
 function renderSource(container,row) {
   const labels={article_title:'论文',doi:'DOI',source_locator:'原文位置',source_page:'页码',source_excerpt:'原文',caption:'图表注',source_context:'来源上下文',value_text:'结果值（不导入）',unit:'结果单位（不导入）',finding_text:'研究发现（不导入）',method:'方法',methods_text:'方法说明',...literatureColumns};
   for (const [key,label] of Object.entries(labels)) if (row[key]) {
@@ -265,7 +307,7 @@ $('#literature-form').onsubmit=(event)=>{
   });
 };
 action(async()=>{
-  schema=await api('/api/schema');
+  await refreshModelStatus();
   if (location.hash==='#papers') { await listTasks(); await showPapers(); }
   else if (/^#[a-f0-9]{32}$/.test(location.hash)) await openTask(location.hash.slice(1));
   else await listTasks();

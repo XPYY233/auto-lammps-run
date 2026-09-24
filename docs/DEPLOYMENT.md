@@ -1,6 +1,6 @@
 # 部署与配置
 
-当前有文献发现 CLI 和本机任务确认页，尚无完成真实验收的计算 worker 或模型 API 服务。文献 CLI 使用 Python 3.11+ 标准库；网页需安装可选依赖，步骤与边界见 [TASKS.md](TASKS.md)。
+当前有文献发现 CLI、本机任务页和可选 DeepSeek 条件整理代码，尚无完成真实验收的计算 worker 或模型服务。文献 CLI 使用 Python 3.11+ 标准库；网页需安装可选依赖，步骤与边界见 [TASKS.md](TASKS.md) 和 [模型配置](MODEL_RUNTIME.md)。
 
 Zotero 保持运行并启用本地 API；API 不可用时检查客户端设置，不尝试修改或解锁数据库。读取端参照 [Zotero API v3](https://www.zotero.org/support/dev/web_api/v3/basics)。检索仅覆盖已有索引，完整 PDF 覆盖未知。分页检查总量、重复和版本；缺少版本时明确标为 count_only，不声称原子快照。输出是本机私人审计，不可直接发布。
 
