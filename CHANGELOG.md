@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 6: reference-side literal include expansion and declared file-path adaptation, preserving originals, source hashes, line origins and every path change. Distinguishes initial inputs from written state, rejects unsupported control flow, and enters the existing frozen-input contract. Synthetic tests and private static template preparation only; no physical execution or scientific equivalence claim. B now explicitly awaits the user's review of its strategy.
+
 - PR 4f: trusted bridge from prepared research candidates to pre-registered evaluations, exact batch plans, existing signed authorization, staging, once-only dispatch and automatic following. Rechecks authorization after upload and binds its digest before dispatch. Actual file-only adapters tested with synthetic external responses and outputs; no grant issuance or real computation.
 
 - PR 5d: bounded post-dispatch following connects reconciliation, output collection, frozen-plan analysis and task history. Poll allowance/cadence and query storage reservations persist across restarts; failed/partial downloads stop for attention without automatic retransfers. Includes real process-exit and concurrency checks with synthetic inputs; no real model or target computation.
