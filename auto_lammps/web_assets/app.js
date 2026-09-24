@@ -51,10 +51,13 @@ async function openTask(id) {
   current = await api('/api/tasks/'+id);
   history.replaceState(null, '', '#'+id);
   render();
+  $('#results-content').replaceChildren();
+  $('#results-status').textContent='正在读取记录…';
   window.scrollTo({top:0});
   await listTasks();
   await renderHistory();
   await refreshCandidate();
+  await refreshResults();
 }
 function showNew() {
   if (busy) return;
@@ -199,7 +202,7 @@ async function renderHistory() {
   }
 }
 async function afterChange(message, field) {
-  render(); await listTasks(); await renderHistory(); await refreshCandidate(); notice(message);
+  render(); await listTasks(); await renderHistory(); await refreshCandidate(); await refreshResults(); notice(message);
   if (field) document.getElementById('condition-'+field).scrollIntoView({block:'nearest'});
 }
 $('#new-task').onclick=showNew;
@@ -254,6 +257,68 @@ async function generateConditions() {
   }
 }
 $('#generate-conditions').onclick=()=>action(generateConditions);
+const resultMetrics={mean:'均值',sample_std:'样本标准差',min:'最小值',max:'最大值',value:'末行值',x:'末行横坐标',slope:'斜率',intercept:'截距',rmse:'残差均方根',r_squared:'R²'};
+const analysisMethods={summary:'区间统计',last:'区间末行',linear_fit:'线性拟合'};
+function resultReport(report,taskId) {
+  const box=node('article',undefined,'analysis-report');
+  box.append(node('h4',report.label));
+  if(report.status!=='analyzed') {box.append(node('p',report.message));return box;}
+  box.append(node('p',report.quantity));
+  for(const item of report.results) {
+    box.append(node('h5',`${analysisMethods[item.method]||item.method} · ${item.y}`),
+      node('p',`${item.x} 区间：${item.window.join(' 至 ')} · ${item.sample_count} 行数据`,'subtle'));
+    const table=node('table',undefined,'result-table'),head=node('thead'),headRow=node('tr'),body=node('tbody');
+    for(const title of ['指标','数值','单位']) headRow.append(node('th',title));
+    head.append(headRow);table.append(head,body);
+    for(const [key,value] of Object.entries(item.values)) {
+      const row=node('tr');
+      row.append(node('th',resultMetrics[key]||key),node('td',value===null?'未估计':String(value)),node('td',item.value_units[key]||'—'));
+      body.append(row);
+    }
+    box.append(table);
+    const source=node('details',undefined,'result-source');source.append(node('summary','数据来源与选取范围'));
+    const file=report.sources.find(s=>s.file===item.file);
+    source.append(node('p',`文件：${item.file} · 源行：${item.source_line_ranges.map(([a,b])=>a===b?String(a):`${a}–${b}`).join('、')}`));
+    if(file) source.append(node('p',file.columns.map(c=>`${c.name} [${c.unit}]`).join(' · ')),node('p','SHA-256：'+file.sha256,'source-hash'));
+    box.append(source);
+  }
+  for(const note of report.notes) box.append(node('p',note,'form-note'));
+  const link=node('a','下载数值分析报告 ↓','quiet');
+  link.href=`/api/tasks/${taskId}/results/${report.id}/download`;box.append(link);
+  return box;
+}
+async function refreshResults() {
+  if(!current || $('#task-view').hidden) return;
+  const id=current.id;
+  try {
+    const result=await api(`/api/tasks/${id}/results`);
+    if(current?.id!==id || $('#task-view').hidden) return;
+    const content=$('#results-content');content.replaceChildren();
+    $('#results-status').textContent=result.message+' 最近读取：'+new Date().toLocaleTimeString('zh-CN');
+    for(const [index,evaluation] of result.evaluations.entries()) {
+      const group=node('section',undefined,'result-evaluation');
+      group.append(node('h3',`评测 ${index+1} · 已提交 ${evaluation.dispatch_count} / ${evaluation.max_attempts} 次`),
+        node('p',`额度占用 ${evaluation.used_attempts} 次 · 其中 ${evaluation.pending_attempts} 次待提交；失败及提交状态不明的派发仍计数。`,'subtle'));
+      for(const request of evaluation.requests) {
+        const card=node('div',undefined,'request-record');
+        card.append(node('h4',(request.dispatch_ordinal?`第 ${request.dispatch_ordinal} 次提交`:'尚未提交')+' · '+request.state_label),
+          node('p',request.stage+' · '+(request.accounted?'资源已核算':'资源待核算')));
+        for(const report of request.reports) card.append(resultReport(report,id));
+        const history=node('details',undefined,'result-history');history.append(node('summary','运行历史'));
+        const events=node('ol');
+        for(const event of request.history) events.append(node('li',`${new Date(event.at*1000).toLocaleString('zh-CN')} · ${event.label}`));
+        history.append(events,node('p','运行记录：'+request.id,'source-hash'));card.append(history);group.append(card);
+      }
+      content.append(group);
+    }
+  } catch(error) {
+    if(current?.id!==id || $('#task-view').hidden) return;
+    $('#results-content').replaceChildren();
+    $('#results-status').textContent='结果暂不可读。未展示旧结果，请稍后刷新或联系管理员。';
+  }
+}
+$('#refresh-results').onclick=()=>action(refreshResults);
+$('#jump-results').onclick=event=>{event.preventDefault();$('#results-panel').scrollIntoView({block:'start'});};
 async function refreshCandidate() {
   if(!current || current.status!=='conditions_frozen') return;
   const id=current.id;

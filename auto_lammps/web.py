@@ -19,6 +19,7 @@ from .condition_generation import generate_condition_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError
+from .results import ResultsReader
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -123,11 +124,13 @@ class LinkPaperTask(Revision):
     task_id: str
 
 
-def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None):
+def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None):
     papers = PaperStore(store) if papers is None else papers
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
+    if results_reader and results_reader.tasks.path!=store.path:
+        raise ValueError('Results must belong to the same task store')
     @asynccontextmanager
     async def lifespan(app):
         if candidate_service:
@@ -204,6 +207,26 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks')
     def tasks():
         return {'tasks': store.list()}
+
+    @app.get('/api/tasks/{identifier}/results')
+    def task_results(identifier: str):
+        store.get(identifier)
+        if results_reader is None:
+            return dict(configured=False,evaluations=[],scientific_status='not_evaluated',
+                        message='结果服务尚未配置。任务和已有准备记录已保存。')
+        try:return results_reader.task(identifier)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'结果记录暂不可读，请联系管理员核对。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/results/{analysis_id}/download')
+    def task_report(identifier: str, analysis_id: str):
+        store.get(identifier)
+        if results_reader is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:report=results_reader.report(identifier,analysis_id)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'这项任务没有可核验的对应报告。'},status_code=409)
+        return Response(canonical(report),media_type='application/json',
+                        headers={'Content-Disposition':'attachment; filename="analysis-report.json"'})
 
     @app.post('/api/literature/preview')
     def preview(data: LiteraturePreview):
@@ -294,6 +317,8 @@ def main():
     parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
     parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
+    parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
+    parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
@@ -306,6 +331,11 @@ def main():
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
     candidate_service = None
+    results_reader=None
+    if args.collections_directory or args.reports_directory:
+        if not (ledger and args.collections_directory and args.reports_directory):
+            parser.error('Result viewing requires an existing ledger and both artifact directories')
+        results_reader=ResultsReader(store,ledger,args.collections_directory,args.reports_directory)
     if args.candidate_config:
         if model_client is None:
             parser.error('Candidate preparation requires an existing model ledger')
@@ -322,7 +352,7 @@ def main():
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
                     snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
     uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger), model_client=model_client,
-                          candidate_service=candidate_service), host='127.0.0.1', port=args.port,
+                          candidate_service=candidate_service,results_reader=results_reader), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 
