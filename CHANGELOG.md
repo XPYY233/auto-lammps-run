@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 3b: internal reference-side runtime model service for sourced condition and reported-result drafts from workbench exports. Preserves sources before I/O, imports atomically, isolates result fields from execution drafts, and recovers saved completions without another request. Quote checks are not scientific verification; synthetic transport tests only, with no real API or computation enabled.
+
 - PR 6: reference-side literal include expansion and declared file-path adaptation, preserving originals, source hashes, line origins and every path change. Distinguishes initial inputs from written state, rejects unsupported control flow, and enters the existing frozen-input contract. Synthetic tests and private static template preparation only; no physical execution or scientific equivalence claim. B now explicitly awaits the user's review of its strategy.
 
 - PR 4f: trusted bridge from prepared research candidates to pre-registered evaluations, exact batch plans, existing signed authorization, staging, once-only dispatch and automatic following. Rechecks authorization after upload and binds its digest before dispatch. Actual file-only adapters tested with synthetic external responses and outputs; no grant issuance or real computation.
