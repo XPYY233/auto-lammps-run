@@ -586,6 +586,14 @@ function paperCard(p,statuses,availableTasks) {
     if (r.state==='partial') resources.append(node('p','本轮获取有未完成项，失败记录已保留。'));
     card.append(resources);
   }
+  if (p.engine_preparation) {
+    const r=p.engine_preparation;
+    const environment=node('section',undefined,'paper-note'); environment.append(node('h4','计算环境准备'));
+    environment.append(node('p',`LAMMPS ${r.requirements.release} · MEAM · ${r.requirements.cores} 核方案`));
+    environment.append(node('p',r.state==='source_ready'?'官方源码已在超算获取并校验，等待在记账的计算资源内构建。':r.state==='unknown'?'超算准备状态待核实，暂不重复启动。':'本轮源码准备失败，下载及检查记录已保留。'));
+    environment.append(node('p','尚未完成引擎构建或计算节点验证。'));
+    card.append(environment);
+  }
   if (p.selection==='candidate') {
     const select=node('button','加入复现计划','quiet');
     select.setAttribute('aria-label','选定文献：'+p.title);
@@ -594,7 +602,7 @@ function paperCard(p,statuses,availableTasks) {
   }
   const details=node('details',undefined,'paper-history'); details.dataset.paperHistory=p.id; details.append(node('summary','历史记录与提交次数'));
   const timeline=node('ol');
-  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
+  for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':e.event.startsWith('engine_source_prepared:')?({'failed':'计算环境准备失败','source_ready':'超算源码准备完成','unknown':'计算环境准备待核实'}[e.event.split(':').at(-1)]||'准备计算环境'):paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
   details.append(timeline);
   for (const task of p.tasks) {
     const button=node('button','查看条件：'+task.title,'quiet'); button.onclick=()=>action(()=>openTask(task.id)); details.append(button);
