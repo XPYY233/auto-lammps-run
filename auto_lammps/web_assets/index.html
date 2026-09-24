@@ -19,6 +19,10 @@
 <div id="conditions"></div>
 <div class="freeze-panel"><div><h2 id="freeze-heading">保存这份确定的研究条件</h2><p id="freeze-note">补齐或说明不适用的字段，并明确确认后，才能冻结。</p></div><button id="freeze" class="primary">冻结已确认条件</button><a id="export" class="primary" hidden>导出条件记录 ↓</a></div>
 <details class="history"><summary>查看修订记录</summary><ol id="history-list"></ol></details>
+<details id="package-exports" class="history" hidden><summary>计算任务与参考资料</summary>
+<p>已按选定条件自动整理任务文字。计算任务草稿不附原始描述、论文标识、来源记录或未采用的条件；参考资料保留这些信息，供追溯核对。</p>
+<p class="form-note">尚需核对条件文字本身是否含答案，并确认输入资源。草稿不能直接用于正式评测；当前没有参考运行结果。</p>
+<div class="actions"><a id="export-execution" class="quiet">下载计算任务草稿 ↓</a><a id="export-reference" class="quiet">下载参考准备资料 ↓</a></div></details>
 </section>
 </main></div>
 <dialog id="condition-dialog"><form id="condition-form"><div class="dialog-top"><h2 id="condition-title"></h2><button type="button" id="close-dialog" class="quiet" aria-label="关闭条件编辑">×</button></div><p class="dialog-error" role="alert" hidden></p><label>适用性<select name="applicability"><option value="required">需要此条件</option><option value="not_applicable">本任务不适用（需说明原因）</option></select></label><label>条件值 / 不适用原因<textarea name="value" rows="4" required maxlength="4000"></textarea></label><div class="form-row"><label>单位（如适用）<input name="unit" maxlength="80"></label><label>信息来源<select name="origin"><option value="user">用户明确指定</option><option value="paper">论文提供</option><option value="code">作者代码提供</option><option value="proposed">建议，等待确认</option></select></label></div><label>来源位置<input name="source_locator" maxlength="1000" placeholder="论文页码/段落，或固定版本的文件与行号"></label><p class="form-note">填写任务输入，不要把待预测结果或参考答案填作条件。原有证据会保留。</p><button type="submit" class="primary">保存条件证据</button></form></dialog>

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 3a: deterministic execution-task drafts and separate reference-preparation exports with paired hashes, source mapping and local workbench download links. Unreleased drafts only; no semantic answer screening, runtime isolation, model call or simulation claimed.
+
 - PR 2c: private paper register, immutable task/evaluation associations, read-only attempt history and status filters. Added neutral research-workbench styling and a requirement-by-requirement first-week audit. No score publication or actual computation.
 
 - PR 0: audited existing assets; introduced read-only Zotero discovery with pagination consistency checks and private export, synthetic tests, public CI, development rules, candidate screening and staged evaluation specification.
