@@ -10,12 +10,12 @@
 - [PR 1c / #6](https://github.com/XPYY233/auto-lammps-run/pull/6)：分支 feat/pr1c-ledger-reconciliation，基于 PR 1b，继续关联 Issue #3；补齐终态未核算恢复、查询顺序、原子回写和冲突批次阻断。尚无真实计算作业恢复验收。
 - [PR 1d / #7](https://github.com/XPYY233/auto-lammps-run/pull/7)：分支 feat/pr1d-restricted-staging，基于 PR 1c，继续关联 Issue #3；受限流式上传、私人接收程序与资源脚本已完成离线验证，未部署真实上传或提交。
 - [PR 1e / #8](https://github.com/XPYY233/auto-lammps-run/pull/8)：分支 feat/pr1e-runtime-guard，基于 PR 1d；增加受信提交适配器、签名许可校验、一次性远端派发与计算节点隔离启动器。仅合成验证，尚未部署，见 [RUNTIME.md](RUNTIME.md)。
-- PR 2：分支 feat/pr2-task-confirmation，基于 PR 1e；持久条件草稿、来源/冲突核对、逐项确认、不可覆盖冻结及本机 FastAPI 网页，关联 [Issue #9](https://github.com/XPYY233/auto-lammps-run/issues/9)。浏览器已实测保存、冲突、刷新、服务重启、冻结和导出；不执行目标计算，见 [TASKS.md](TASKS.md)。
+- [PR 2 / #10](https://github.com/XPYY233/auto-lammps-run/pull/10)：分支 feat/pr2-task-confirmation，基于 PR 1e；持久条件草稿、来源/冲突核对、逐项确认、不可覆盖冻结及本机 FastAPI 网页，关联 [Issue #9](https://github.com/XPYY233/auto-lammps-run/issues/9)。浏览器已实测保存、冲突、刷新、服务重启、冻结和导出；不执行目标计算，见 [TASKS.md](TASKS.md)。
 - 主分支保护已读回核实：offline-checks、一次审查、管理员同样受约束；没有自称独立审查或绕过保护。当前 PR 由同一账号发起，GitHub 不允许该账号自行批准；已请求用户提供有写权限的审阅者，尚未修改保护。
 
 ## 实际验证
 
-PR 2 本机独立环境 135 项检查中 134 项通过、1 项 Linux 专用过滤器测试明确跳过。此前 Linux CI 在功能提交 385a9a8 上全部 121 项通过，含真实内核过滤器检查（[运行记录](https://github.com/XPYY233/auto-lammps-run/actions/runs/35946789359)）。检查包括多进程争抢最后一次额度/核时/并发、同请求只派发一次、审计失败阻止派发、真正退出 worker 后不重提、接受回执对账、取消、超支及终态矛盾。提交调度器为合成替身，没有目标模拟。新增输入快照、只读查询解析及真实子进程边界测试。
+PR 2 本机独立环境 135 项检查中 134 项通过、1 项 Linux 专用过滤器测试明确跳过；功能提交 ea20183 的 Linux CI 全部 135 项通过（[记录](https://github.com/XPYY233/auto-lammps-run/actions/runs/35948870109)）。此前 Linux CI 在功能提交 385a9a8 上全部 121 项通过，含真实内核过滤器检查（[运行记录](https://github.com/XPYY233/auto-lammps-run/actions/runs/35946789359)）。检查包括多进程争抢最后一次额度/核时/并发、同请求只派发一次、审计失败阻止派发、真正退出 worker 后不重提、接受回执对账、取消、超支及终态矛盾。提交调度器为合成替身，没有目标模拟。新增输入快照、只读查询解析及真实子进程边界测试。
 功能提交 fed8f6a 的 [CI](https://github.com/XPYY233/auto-lammps-run/actions/runs/35886109041) 通过；后续进程退出测试及状态记录由独立提交保存，最终检查以 PR 当前版本为准。
 
 真实 Zotero schema v2 导出通过。一个论文可有多个库条目，因此分别报告条目和 DOI 字符串数并保留重复组，不再使用 unique_papers。数据、条目身份及私人计数只保存在仓库之外，旧导出没有覆盖。
