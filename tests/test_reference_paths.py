@@ -67,7 +67,7 @@ class ReferencePathTests(unittest.TestCase):
 
     def test_control_characters_and_expansion_byte_limit(self):
         for control in (b'\r', b'\v', b'\f', b'\x00', b'\x7f'):
-            self.scripts['sample.in'] = b'clear' + control + b'\n'
+            self.scripts['sample.in'] = b'clear' + control + b'X\n'
             with self.assertRaises(ReferencePathError): self.adapt()
         self.scripts['sample.in'] = b'#' + b'x' * 999_990 + b'\n'
         self.scripts['main.in'] = b'include sample.in\n' * 3
@@ -137,6 +137,106 @@ class ReferencePathTests(unittest.TestCase):
         self.assertIn(body, self.adapt().script)
         self.scripts['sample.in'] = body.replace(b'change_box all x scale 1.0 remap', b'shell echo hello')
         with self.assertRaises(ReferencePathError): self.adapt()
+
+    def tensile_fixture(self):
+        # Independently authored synthetic protocol; never run a physics engine.
+        self.scripts = {'main.in': (
+            b'# synthetic text\r\nread_data initial.data\r\natom_modify map array\r\n'
+            b'compute e all pe/atom\r\ncompute k all ke/atom\r\n'
+            b'compute t all temp\r\ncompute s all stress/atom NULL\r\n'
+            b'compute c all centro/atom 12\r\ncompute r all reduce ave c_s[2]\r\n'
+            b'dump m all custom 17 frame.* id type x y z\r\n'
+            b'minimize 0 1e-7 43 91\r\nundump m\r\n'
+            b'write_data relaxed.data\r\n'
+            b'variable T equal 425\r\nvariable stress atom c_s[2]\r\n'
+            b'fix atoms all ave/atom 1 7 7 v_stress\r\n'
+            b'fix loading all deform 1 y erate 0.002 units box remap x\r\n'
+            b'fix stats all ave/time 2 3 6 c_r file stress.txt\r\n'
+            b'dump a all atom 7 heating.trj\r\nrun 21\r\nundump a\r\n'
+            b'dump m all custom 11 tensile.trj id type x y z c_s[2]\r\n'
+            b'run 33\r\nundump m\r\n')}
+        self.outputs = {'frame.*': 'min.trj', 'relaxed.data': 'relaxed.data',
+                        'stress.txt': 'stress.txt', 'heating.trj': 'heating.trj',
+                        'tensile.trj': 'tensile.trj'}
+
+    def test_tensile_commands_preserved_and_every_change_explained(self):
+        self.tensile_fixture()
+        original = self.scripts['main.in']
+        with self.assertRaisesRegex(ReferencePathError, 'opt-in'):
+            self.adapt(input_files=['initial.data'])
+        result = self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+        self.assertEqual(result.originals['main.in'], original)
+        original_lines = original.replace(b'\r\n', b'\n').decode().splitlines(keepends=True)
+        expected = list(original_lines)
+        for c in result.receipt['changes']:
+            if c['kind'] == 'file_operand':
+                expected[c['line'] - 1] = expected[c['line'] - 1].replace(c['before'], c['after'])
+        self.assertEqual(result.script, ''.join(expected).encode())
+        self.assertEqual(sum(c['kind'] == 'line_ending' for c in result.receipt['changes']), len(expected))
+        layout = [c for c in result.receipt['changes'] if c['kind'] == 'dump_layout']
+        self.assertEqual(len(layout), 1)
+        self.assertEqual(layout[0]['original_pattern'], 'frame.*')
+        self.assertEqual(result.receipt['schema_version'], 2)
+        self.assertEqual(result.receipt['scientific_equivalence'], 'not_verified')
+        self.assertFalse(result.receipt['author_invocation_verified'])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); source = root/'case'; source.mkdir()
+            (source/'main.in').write_bytes(result.script)
+            (source/'initial.data').write_text('Synthetic placeholder; not an engine input')
+            frozen = freeze(source, root/'snapshots',
+                            files={'main.in': 'lammps_input', 'initial.data': 'structure'},
+                            entrypoint='main.in',
+                            resources=Resources(1, 60, 1048576, 1048576),
+                            provenance={k: 'a'*64 for k in ('task_sha256', 'analysis_sha256', 'software_sha256')})
+            self.assertEqual((frozen.path/'main.in').read_bytes(), result.script)
+            frozen.verify()
+
+    def test_dump_format_and_undeclared_file_changes_fail(self):
+        self.tensile_fixture()
+        original = self.scripts['main.in']
+        for old, new in [(b'custom 17', b'custom/gz 17'), (b'custom 17', b'custom ${n}'),
+                         (b'frame.*', b'frame.%'), (b'frame.*', b'../frame.*'),
+                         (b'frame.*', b'frame.**'), (b'frame.*', b'frame.*.bin'),
+                         (b'file stress.txt', b'file missing.txt'),
+                         (b'file stress.txt', b'file ${out}'),
+                         (b'file stress.txt', b'file stress.txt append extra.txt'),
+                         (b'ave/time 2 3 6 c_r', b'ave/time 2 3 6 c_r title1 text'),
+                         (b'all pe/atom', b'all property/atom mol file surprising'),
+                         (b'all atom 7 heating.trj', b'all atom 7 heating.trj x')]:
+            with self.subTest(new=new):
+                self.scripts['main.in'] = original.replace(old, new)
+                with self.assertRaises(ReferencePathError):
+                    self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+        self.scripts['main.in'] = original
+        for ending in ('.bin', '.lammpsbin', '.gz', '.zst', '.zstd'):
+            self.outputs['frame.*'] = 'min'+ending
+            with self.assertRaisesRegex(ReferencePathError, 'uncompressed'):
+                self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+
+    def test_combined_dumps_cannot_change_reset_or_overwrite_semantics(self):
+        self.tensile_fixture()
+        original = self.scripts['main.in']
+        for extra in (b'reset_timestep 0\r\n', b'clear\r\n', b'run 2\r\n',
+                      b'dump m all custom 17 other.trj id type x\r\n',
+                      b'dump_modify m every 1\r\n'):
+            self.scripts['main.in'] = original.replace(b'undump m\r\n', extra + b'undump m\r\n', 1)
+            with self.subTest(extra=extra), self.assertRaises(ReferencePathError):
+                self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+        self.scripts['main.in'] = original.replace(b'minimize 0 1e-7 43 91\r\n', b'')
+        with self.assertRaisesRegex(ReferencePathError, 'exactly one'):
+            self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+        self.scripts['main.in'] = original + b'dump again all custom 17 frame.* id type x\r\nrun 1\r\n'
+        with self.assertRaisesRegex(ReferencePathError, 'reopened'):
+            self.adapt(input_files=['initial.data'], combine_dump_frames=True)
+
+    def test_combined_dump_spans_includes_with_line_provenance(self):
+        self.scripts = {'main.in': b'dump d all atom 4 frames.*\ninclude step.in\nundump d\n',
+                        'step.in': b'run 9\r\n'}
+        self.outputs = {'frames.*': 'frames.trj'}
+        result = self.adapt(input_files=[], combine_dump_frames=True)
+        self.assertIn(b'run 9\nundump d', result.script)
+        self.assertEqual(result.receipt['origins'][1]['source'], 'step.in')
+        self.assertEqual(result.originals['step.in'], b'run 9\r\n')
 
 
 if __name__ == '__main__':
