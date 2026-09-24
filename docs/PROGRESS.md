@@ -2,6 +2,13 @@
 
 更新：2026-09-24。当前为自然语言科研计算服务的开发基础，尚未完成自动计算链路。
 
+Issue #55：参考路径适配增加 CRLF 行尾、逐原子统计、固定间隔文本轨迹与 ave/time 文件输出，
+并显式记录逐帧文件合成多帧轨迹的布局选择。原始作者文件保留，计算条件与运行步数不变。
+选定论文原始入口已完成私人静态差异核对，仍只是准备稿，A/B 均未运行。
+本地 353 项检查中 352 项通过、1 项 Linux 专用检查跳过。实际执行仍缺 MPI、部署和资源核验；
+已证明完整拉伸轨迹的最小文本大小也超过现有平均单文件配额，必须解决，不能缩短作者流程。
+详见 [参考路径与轨迹适配](REFERENCE_PATHS.md)。
+
 Issue #53：用户已指定首篇为 **Effect of alloying element content, temperature, and strain rate
 on the mechanical behavior of NbTiZrMoV high entropy alloy: A molecular dynamics study**，
 DOI [10.1016/j.mtcomm.2024.110071](https://doi.org/10.1016/j.mtcomm.2024.110071)。
