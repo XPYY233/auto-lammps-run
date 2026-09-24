@@ -325,6 +325,40 @@ def seccomp_fd(profile):
             os.close(fd)
 
 
+def engine_environment(profile):
+    """Administrator options, covered by the signed profile; never module env.
+
+    Library lookup stays in inventoried, read-only runtime directories. Mount
+    targets must be excluded because they hide the runtime tree's contents.
+    This only supports one process and does not enable an MPI job launcher.
+    """
+    options = profile.get('runtime_options', {})
+    if not isinstance(options, dict) or set(options) - {'library_directories', 'mpi_transport'}:
+        raise ExecutionDenied('Unsupported engine runtime options')
+    directories = options.get('library_directories', [])
+    if not isinstance(directories, list) or len(directories) > 8:
+        raise ExecutionDenied('Declare bounded runtime library directories')
+    checked = []
+    for name in directories:
+        relative(name)
+        if name.split('/')[0] in {'work', 'output', 'proc', 'dev', 'tmp'} or name in checked:
+            raise ExecutionDenied('Library lookup must not use mutable or mounted directories')
+        inventory = profile.get('runtime_files', {})
+        if not isinstance(inventory, dict) or not any(
+                isinstance(path, str) and str(PurePosixPath(path).parent) == name for path in inventory):
+            raise ExecutionDenied('Library directory has no inventoried files')
+        checked.append(name)
+    transport = options.get('mpi_transport', 'none')
+    if transport not in ('none', 'intel-shm'):
+        raise ExecutionDenied('Unsupported single-process transport')
+    environment = {'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
+    if checked:
+        environment['LD_LIBRARY_PATH'] = ':'.join('/' + name for name in checked)
+    if transport == 'intel-shm':
+        environment['I_MPI_FABRICS'] = 'shm'
+    return environment
+
+
 def sandbox_command(profile, *, case, outputs, entrypoint, filter_fd):
     tree = absolute(profile['runtime_tree'])
     bwrap = absolute(profile['bwrap_path'])
@@ -341,8 +375,11 @@ def sandbox_command(profile, *, case, outputs, entrypoint, filter_fd):
         if '/' in name:
             raise ExecutionDenied('Only flat output mounts are supported')
         args.extend(['--bind',str(case/'output'/name),'/output/'+name])
-    args.extend(['--chdir','/work','--setenv','PATH','/bin','--setenv','HOME','/nonexistent',
-                 '--setenv','LC_ALL','C','--remount-ro','/', '--',engine,
+    environment = {'PATH': '/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C', **engine_environment(profile)}
+    args.extend(['--chdir','/work'])
+    for name, value in environment.items():
+        args.extend(['--setenv', name, value])
+    args.extend(['--remount-ro','/', '--',engine,
                  '-in','/work/'+entrypoint,'-log','/output/log.lammps','-screen','none'])
     return args
 

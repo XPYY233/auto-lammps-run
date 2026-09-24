@@ -238,6 +238,46 @@ class RuntimeTests(unittest.TestCase):
         (self.tree/'link').symlink_to(self.control,target_is_directory=True)
         with self.assertRaises(runtime.ExecutionDenied): runtime.verify_runtime_tree(self.profile)
 
+    def test_engine_environment_uses_only_inventory_and_fixed_single_process_options(self):
+        profile={**self.profile, 'runtime_files':{'lib/libsynthetic.so':H, 'lib64/libother.so':H},
+                 'runtime_options':{'library_directories':['lib','lib64'], 'mpi_transport':'intel-shm'}}
+        with patch.dict(os.environ,{'LD_LIBRARY_PATH':'/private','I_MPI_FABRICS':'ofi',
+                                   'OMP_NUM_THREADS':'8','LAMMPS_POTENTIALS':'/answers'}):
+            args=runtime.sandbox_command(profile,case=self.case,outputs=OUTPUTS,entrypoint='input.in',filter_fd=42)
+        environment={args[i+1]:args[i+2] for i,value in enumerate(args) if value=='--setenv'}
+        self.assertEqual(environment,{'PATH':'/bin','HOME':'/nonexistent','LC_ALL':'C',
+            'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','LD_LIBRARY_PATH':'/lib:/lib64','I_MPI_FABRICS':'shm'})
+        self.assertNotIn('/private',args)
+        self.assertNotIn('/answers',args)
+        self.assertNotIn('--tmpfs',args)
+        self.assertEqual(runtime.engine_environment(self.profile),{'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'})
+
+    def test_engine_environment_rejects_paths_hidden_by_input_and_output_mounts(self):
+        for name in ('work','output','proc','dev','tmp','work/lib','output/lib'):
+            with self.subTest(name=name),self.assertRaises(runtime.ExecutionDenied):
+                runtime.engine_environment({**self.profile,'runtime_files':{name+'/lib.so':H},
+                    'runtime_options':{'library_directories':[name]}})
+
+    def test_engine_environment_rejects_unknown_options_and_uninventoried_paths(self):
+        variants=[None,[],{'LD_PRELOAD':'/lib/custom.so'},{'mpi_transport':'ofi'},
+                  {'mpi_transport':[]},{'library_directories':'lib'},
+                  {'library_directories':['lib']},{'library_directories':['bin','bin']},
+                  {'library_directories':['bin']*9}]
+        variants.extend({'library_directories':[name]} for name in
+                        ('','/lib','../lib','bin/../lib','lib:/work',None,1))
+        for options in variants:
+            with self.subTest(options=options),self.assertRaises(runtime.ExecutionDenied):
+                runtime.engine_environment({**self.profile,'runtime_options':options})
+
+    def test_engine_option_change_requires_new_signed_profile(self):
+        altered={**self.profile,'runtime_options':{'mpi_transport':'intel-shm'}}
+        self.private(self.profile_path,runtime.canonical(altered))
+        stack,popen=self.guards()
+        with stack,self.assertRaisesRegex(runtime.ExecutionDenied,'another request, input or runtime'):
+            runtime.execute(self.profile_path,REQUEST,self.digest)
+        popen.assert_not_called()
+        self.assertFalse((self.case/'execution-intent.json').exists())
+
     def test_full_guard_path_records_once_without_running_engine(self):
         stack,popen=self.guards()
         with stack:
