@@ -253,6 +253,65 @@ def validate_outputs(outputs, *, storage_bytes, input_bytes):
     return per_file
 
 
+def cpu_set(value):
+    """Parse the kernel CPU-list format with bounded ranges and no duplicates."""
+    if not isinstance(value, str) or not value or len(value) > 16384:
+        raise ExecutionDenied('Missing or excessive CPU set')
+    result = set()
+    for part in value.split(','):
+        if not re.fullmatch(r'[0-9]+(?:-[0-9]+)?', part):
+            raise ExecutionDenied('Invalid CPU set')
+        bounds = [int(x) for x in part.split('-')]
+        first, last = bounds[0], bounds[-1]
+        if not 0 <= first <= last <= 65535:
+            raise ExecutionDenied('CPU set range exceeds bounds')
+        added = set(range(first, last + 1))
+        if result & added:
+            raise ExecutionDenied('Overlapping CPU set ranges')
+        result.update(added)
+    return result
+
+
+def cgroup_cpu_set(proc_cgroup='/proc/self/cgroup', mount='/sys/fs/cgroup'):
+    """Read enforced CPU membership, not merely a changeable process affinity."""
+    unified, legacy = [], []
+    for line in Path(proc_cgroup).read_text().splitlines():
+        fields = line.split(':', 2)
+        if len(fields) != 3 or not fields[0].isdecimal():
+            raise ExecutionDenied('Invalid CPU cgroup membership')
+        if fields[:2] == ['0', '']:
+            unified.append(fields[2])
+        elif 'cpuset' in fields[1].split(','):
+            if fields[0] == '0':
+                raise ExecutionDenied('Invalid legacy CPU controller')
+            legacy.append(fields[2])
+    if len(unified) > 1 or len(legacy) > 1 or not (unified or legacy):
+        raise ExecutionDenied('Missing or ambiguous CPU cgroup membership')
+    membership = (legacy or unified)[0]
+    absolute(membership)
+    root = Path(mount)/'cpuset' if legacy else Path(mount)
+    current = root/membership.lstrip('/')
+    effective = current/('cpuset.effective_cpus' if legacy else 'cpuset.cpus.effective')
+    if effective.exists():
+        return cpu_set(effective.read_text().strip())
+    if not legacy:
+        raise ExecutionDenied('Missing effective CPU cgroup set')
+    # Older v1 kernels lack effective_cpus. A child's CPUs are constrained by
+    # every ancestor, so intersect the nonempty configured sets up to the root.
+    effective_cpus = None
+    while True:
+        configured = (current/'cpuset.cpus').read_text().strip()
+        if configured:
+            cpus = cpu_set(configured)
+            effective_cpus = cpus if effective_cpus is None else effective_cpus & cpus
+        if current == root:
+            break
+        current = current.parent
+    if not effective_cpus:
+        raise ExecutionDenied('No enforced CPU cgroup set')
+    return effective_cpus
+
+
 def validate_deployment_paths(profile):
     paths=[absolute(profile[key]) for key in ('requests_root','control_root','runtime_tree')]
     for index,left in enumerate(paths):
@@ -331,10 +390,10 @@ def engine_environment(profile):
 
     Library lookup stays in inventoried, read-only runtime directories. Mount
     targets must be excluded because they hide the runtime tree's contents.
-    This only supports one process and does not enable an MPI job launcher.
+    MPI launch, when explicitly configured, uses a separate pinned declaration.
     """
     options = profile.get('runtime_options', {})
-    if not isinstance(options, dict) or set(options) - {'library_directories', 'mpi_transport'}:
+    if not isinstance(options, dict) or set(options) - {'library_directories', 'mpi_transport', 'mpi_launcher'}:
         raise ExecutionDenied('Unsupported engine runtime options')
     directories = options.get('library_directories', [])
     if not isinstance(directories, list) or len(directories) > 8:
@@ -360,7 +419,45 @@ def engine_environment(profile):
     return environment
 
 
-def sandbox_command(profile, *, case, outputs, entrypoint, filter_fd):
+def mpi_profile(profile):
+    """Only the inventoried Intel Hydra local-fork layout is currently supported."""
+    engine_environment(profile)  # Validate the complete options, including lookup.
+    options = profile.get('runtime_options', {})
+    if 'mpi_launcher' not in options:
+        return None
+    mpi = options['mpi_launcher']
+    fields = {'kind', 'launcher_relative', 'pmi_proxy_relative', 'bootstrap_proxy_relative', 'max_ranks'}
+    if (not isinstance(mpi, dict) or set(mpi) != fields or mpi['kind'] != 'intel-hydra-fork'
+            or type(mpi['max_ranks']) is not int or not 1 <= mpi['max_ranks'] <= 8
+            or options.get('mpi_transport') != 'intel-shm'):
+        raise ExecutionDenied('Invalid bounded local MPI declaration')
+    inventory = profile.get('runtime_files', {})
+    if not isinstance(inventory, dict):
+        raise ExecutionDenied('MPI requires an explicit runtime inventory')
+    parents = set()
+    for field, basename in [('launcher_relative', 'mpiexec.hydra'),
+                            ('pmi_proxy_relative', 'hydra_pmi_proxy'),
+                            ('bootstrap_proxy_relative', 'hydra_bstrap_proxy')]:
+        name = relative(mpi[field])
+        path = PurePosixPath(name)
+        if (path.name != basename or name.split('/')[0] in {'work', 'output', 'proc', 'dev', 'tmp'}
+                or name not in inventory):
+            raise ExecutionDenied('MPI binaries must be explicitly inventoried outside mounted paths')
+        hash_value(inventory[name])
+        parents.add(path.parent)
+    if len(parents) != 1:
+        raise ExecutionDenied('Hydra launcher and proxies must share their inventoried directory')
+    return mpi
+
+
+def validate_parallelism(profile, cores):
+    mpi = mpi_profile(profile)
+    if type(cores) is not int or not 1 <= cores <= (mpi['max_ranks'] if mpi else 1):
+        raise ExecutionDenied('Requested ranks exceed the declared runtime capacity')
+    return mpi
+
+
+def sandbox_command(profile, *, case, outputs, entrypoint, filter_fd, cores=1, cpu_ids=None):
     tree = absolute(profile['runtime_tree'])
     bwrap = absolute(profile['bwrap_path'])
     engine = '/' + relative(profile['engine_relative'])
@@ -377,15 +474,29 @@ def sandbox_command(profile, *, case, outputs, entrypoint, filter_fd):
             raise ExecutionDenied('Only flat output mounts are supported')
         args.extend(['--bind',str(case/'output'/name),'/output/'+name])
     environment = {'PATH': '/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C', **engine_environment(profile)}
+    mpi = validate_parallelism(profile, cores)
+    command = [engine, '-in', '/work/'+entrypoint, '-log', '/output/log.lammps', '-screen', 'none']
+    if mpi:
+        if (not isinstance(cpu_ids, (set, list, tuple)) or len(cpu_ids) != cores
+                or any(type(cpu) is not int or not 0 <= cpu <= 65535 for cpu in cpu_ids)
+                or len(set(cpu_ids)) != cores):
+            raise ExecutionDenied('MPI requires the exact verified CPU set')
+        # Both temporary mounts are RAM-backed and charged to the verified job
+        # memory cgroup. No host scratch, /dev/shm or network is exposed.
+        args.extend(['--tmpfs', '/tmp', '--tmpfs', '/dev/shm'])
+        environment.update(I_MPI_PIN='1', I_MPI_PIN_PROCESSOR_LIST=','.join(map(str, sorted(cpu_ids))),
+                           I_MPI_PIN_RESPECT_CPUSET='1', I_MPI_HYDRA_IFACE='lo', I_MPI_TMPDIR='/tmp')
+        command = ['/'+mpi['launcher_relative'], '-launcher', 'fork', '-hosts', '127.0.0.1',
+                   '-localhost', '127.0.0.1', '-iface', 'lo', '-n', str(cores), *command]
     args.extend(['--chdir','/work'])
     for name, value in environment.items():
         args.extend(['--setenv', name, value])
-    args.extend(['--remount-ro','/', '--',engine,
-                 '-in','/work/'+entrypoint,'-log','/output/log.lammps','-screen','none'])
+    args.extend(['--remount-ro','/', '--', *command])
     return args
 
 
 def verify_runtime_tree(profile):
+    mpi_profile(profile)
     root = absolute(profile['runtime_tree'])
     fd = directory(root)
     os.close(fd)
@@ -454,10 +565,10 @@ def execute(profile_path, request_id, manifest_sha256):
         raise ExecutionDenied('Invalid frozen resource limits')
     if resources != grant['resources'] or manifest['provenance']['task_sha256'] != grant['task_sha256']:
         raise ExecutionDenied('Grant resources/task mismatch')
-    if resources['cores'] != 1:
-        raise ExecutionDenied('Current entry supports a single process; MPI is not enabled')
-    if len(os.sched_getaffinity(0)) > resources['cores']:
-        raise ExecutionDenied('CPU affinity exceeds approved allocation')
+    validate_parallelism(profile, resources['cores'])
+    cpus = cgroup_cpu_set()
+    if len(cpus) != resources['cores'] or set(os.sched_getaffinity(0)) != cpus:
+        raise ExecutionDenied('CPU cgroup and affinity must match the exact approved allocation')
     if cgroup_memory_limit() > resources['memory_bytes']:
         raise ExecutionDenied('Memory cgroup exceeds approved ceiling')
     for prefix in ('bwrap','scontrol'):
@@ -488,12 +599,13 @@ def execute(profile_path, request_id, manifest_sha256):
     outputs = grant['outputs']
     per_file = validate_outputs(outputs,storage_bytes=resources['storage_bytes'],input_bytes=input_bytes)
     with seccomp_fd(profile) as filter_descriptor:
-        argv = sandbox_command(profile,case=case,outputs=outputs,entrypoint=manifest['entrypoint'],filter_fd=filter_descriptor)
+        argv = sandbox_command(profile,case=case,outputs=outputs,entrypoint=manifest['entrypoint'],
+                               filter_fd=filter_descriptor,cores=resources['cores'],cpu_ids=cpus)
         # Exclusive intent is also a restart/requeue gate. Never execute twice from
         # the same request, even if a previous process died before its final receipt.
         write_once(case/'execution-intent.json',dict(request_id=request_id,job_id=job_id,manifest_sha256=manifest_sha256,
             profile_sha256=digest(profile_data),grant_sha256=digest(canonical(grant)),argv_sha256=digest(canonical(argv)),
-            outputs=outputs,
+            outputs=outputs, ranks=resources['cores'], cpu_ids=sorted(cpus),
             at=datetime.now(timezone.utc).isoformat()))
         output = case/'output'
         output.mkdir(mode=0o700,exist_ok=False)
@@ -645,7 +757,7 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
 
 
 def main():
-    parser=argparse.ArgumentParser(description='Approved, single-process compute-node execution only.')
+    parser=argparse.ArgumentParser(description='Approved, single-node compute execution only.')
     parser.add_argument('--request-id',required=True)
     parser.add_argument('--manifest-sha256',required=True)
     parser.add_argument('--collect', action='store_true', help='Read existing outputs only; never execute')
