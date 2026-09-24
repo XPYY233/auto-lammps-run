@@ -22,9 +22,15 @@
 - Specifications: docs/GOALS.md, ARCHITECTURE.md, EVALUATION.md, SECURITY.md,
   DEPLOYMENT.md, AUDIT.md, CANDIDATES.md, LICENSE_INVENTORY.md and PROGRESS.md.
 
-## Mandatory roadmap review
+## Mandatory roadmap and interface review
 
-Before every new work turn, after restoring compacted context, and before revising the plan, open and visually inspect the user-approved technical roadmap at `~/.local/share/auto-lammps-private/requirements/approved-technical-roadmap.png`. Do not rely only on a remembered summary. The image stays private and must not be committed. If it is unavailable, report that rather than claiming to have reviewed it.
+Before every new work turn, after restoring compacted context, and before revising the plan, open and visually inspect both user-approved images:
+- Technical roadmap: `~/.local/share/auto-lammps-private/requirements/approved-technical-roadmap.png`.
+- Product interface: `~/.local/share/auto-lammps-private/requirements/approved-product-interface.png`.
+
+Do not rely only on remembered summaries. Both images stay private and must not be committed. If either is unavailable, report that rather than claiming to have reviewed it.
+
+The interface reference defines a light blue/white research workspace: task navigation and recent history at left; the natural-language request, execution stages and results in the center; task information, submission count, downloads and resources at right. Results expose data, plots, atomic structures, trajectories, reports and logs. Preserve the reproduction register with full titles, DOI links and statuses. All displayed results and completion states require real evidence; illustrated values, resource counts and dates are not run authorizations. Keep the first real P-A-B validation ahead of the full interface redesign.
 
 Then reconcile the roadmap with the latest user corrections, which take precedence:
 - The product is natural-language research computing; paper reproduction is its validation method.
