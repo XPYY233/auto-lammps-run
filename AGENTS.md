@@ -33,6 +33,7 @@ Then reconcile the roadmap with the latest user corrections, which take preceden
 - Report the B strategy and wait for user confirmation before starting B.
 - Target physics runs only through accounted HPC; retain the approved budget, two-submission evaluation limit and full failure history.
 - After the first P-A-B validation, redesign and accept the human-facing flow from a blank page, with no developer backend assistance.
+- Every reproduction paper must show its full published title and verified DOI/link in the web register, reproduction records and relevant progress reports. Distinguish unselected candidates from pending, in-progress and reproduced tasks; do not report a candidate as a completed reproduction.
 - Preserve the domain adapter, verified source test library, potential library, progress feedback, analysis/OVITO, paper status list and history requirements. The picture's illustrative numbers and formulas are not frozen scoring criteria.
 
 Use this check to choose the next action; do not repeat the entire roadmap to the user each turn.
