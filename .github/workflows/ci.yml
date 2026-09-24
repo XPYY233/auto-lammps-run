@@ -11,7 +11,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Standard-library tests
+      - name: Install web and test dependencies
+        run: python3 -m pip install -e '.[web,test]'
+      - name: Offline tests
         run: python3 -m unittest discover -s tests -v
       - name: Public-tree guard
         run: python3 scripts/check_public_tree.py

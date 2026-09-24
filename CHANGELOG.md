@@ -12,3 +12,5 @@
 - PR 1d: reserved one-shot streaming upload, pinned standalone file receiver, aggregate remote logical-byte reservations and deterministic resource scripts. No real upload deployment, isolated runtime launcher or sbatch execution yet.
 
 - PR 1e: ledger-bound SSH submission, private grant and batch binding, durable remote one-shot dispatch, and a Linux compute-node launcher with fixed runtime inventory, declared output mounts and libseccomp namespace filtering. Synthetic tests only; real deployment and scientific acceptance remain pending.
+
+- PR 2: persistent condition review with explicit-line extraction, provenance, retained conflicts, optimistic revisions and immutable operator exports. Added a loopback FastAPI workbench and real browser acceptance using marked synthetic records; no automatic physics interpretation, model call or target execution.

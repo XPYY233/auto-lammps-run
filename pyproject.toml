@@ -1,7 +1,21 @@
 [project]
 name = "auto-lammps-run"
 version = "0.0.1"
-description = "Read-only literature discovery foundation for HPC-only LAMMPS research"
+description = "Literature, task review and accounted HPC execution foundations"
 requires-python = ">=3.11"
 dependencies = []
 license = "Apache-2.0"
+
+[project.optional-dependencies]
+web = ["fastapi==0.141.1", "uvicorn==0.52.0"]
+test = ["httpx==0.28.1"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["auto_lammps*"]
+
+[tool.setuptools.package-data]
+auto_lammps = ["web_assets/*.html", "web_assets/*.css", "web_assets/*.js"]
