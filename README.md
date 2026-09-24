@@ -28,6 +28,8 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 科研计算不要求论文。管理员配置独立模型与调用额度后，可自动整理自然语言中的条件并显示原文依据和缺项；模型配置与实际验证边界见 [DeepSeek 条件整理](docs/MODEL_RUNTIME.md)。
 
+私人势函数目录及首个领域适配操作已支持固定 SNAP 资源与静态调用检查，见 [势函数资源](docs/POTENTIALS.md)。尚未接入主 Agent 自动选择或实际计算，已收集不代表已验证。
+
 “复现文献与历史”提供候选与已选清单、条件版本及已有账本次数；见 [历史记录边界](docs/PAPER_HISTORY.md)。当前独立评分尚未接入，不产生已复现记录。[第一周逐项核对](docs/WEEK1_AUDIT.md)列出实际完成与未完成要求。
 
 冻结后可自动导出计算任务草稿和独立参考准备资料，见 [资料导出](docs/TASK_PACKAGES.md)。仅完成字段分离；条件内容与允许资源尚需核验，不能将草稿直接用于正式评测。
