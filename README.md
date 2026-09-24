@@ -32,6 +32,9 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 
 候选方案生成已连接模型接口、ASE 几何准备、势函数绑定和输入快照，见 [Agent 候选方案](docs/AGENT_CANDIDATES.md)。网页与阶段历史已通过独立合成验收，见 [准备记录](docs/CANDIDATE_HISTORY.md)；真实模型能力与 HPC 执行尚未验证。ASE 仅用于建模和文件读写，不在本机做物理计算。
 
+结构准备支持常规立方晶体及有明确晶胞、元素和基元坐标的非立方结构，保留原子顺序、边界和计算方向。
+该能力已接入同一候选流程；缺失结构信息的自动检索与科学适用性核验仍未完成。
+
 受信控制端可回收已结束且完成核算的作业输出，校验文件并把下载副本纳入存储预算，见
 [结果回收](docs/OUTPUTS.md)。目前通过合成本地传输验证，尚未接通真实 HPC。
 

@@ -15,7 +15,7 @@ from .manifest import canonical, freeze, private_directory, sha256
 from .structures import build_structure, geometry_runtime, validate_structure
 from .analysis import adapter_identity, validate_plan
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -138,10 +138,19 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
         'lattice constants, masses, temperature, strain, seeds, steps or other missing scientific choices. '
         'If a necessary condition is missing or the supported tools cannot express the task, give questions '
         'and set structure, potential_pin, workflow, analysis to null. Do not reduce the scientific scope. '
-        'Otherwise questions is empty. structure has exactly crystal, elements, a_angstrom, repeat, '
+        'Otherwise questions is empty. For conventional cubic builders, structure has exactly crystal, elements, a_angstrom, repeat, '
         'orientation, boundary, vacancies, substitutions, type_elements, masses_amu. crystal is fcc, bcc, '
         'diamond, rocksalt or zincblende; elements contains base species (two for rocksalt/zincblende); '
         'repeat is three positive integers; orientation must be cubic_axes; boundary is three p/f strings. '
+        'For a fully specified non-cubic cell or slab, use crystal=explicit_cell with exactly crystal, '
+        'cell_angstrom, site_elements, scaled_positions, repeat, orientation, boundary, vacancies, '
+        'substitutions, type_elements, masses_amu. Do not include elements or a_angstrom in this variant. '
+        'cell_angstrom is three row vectors [[ax,0,0],[bx,by,0],[cx,cy,cz]] in angstrom with positive '
+        'ax,by,cz; orientation is provided_axes. site_elements has one chemical symbol per supplied '
+        'fractional coordinate in scaled_positions. Each fractional component must lie in [0,1). '
+        'Do not invent a basis, vacuum, termination or crystal orientation. Do not silently rotate, wrap, '
+        'symmetrize, relax or crop a supplied structure. Unsupported frames or missing cell/basis '
+        'information require clarification. Replication order is x outer, y middle, z inner, basis innermost. '
         'Use explicit empty defect lists for a stated perfect crystal. Vacancy indices and substitution '
         'objects {site,element} refer to zero-based sites before any edits. type_elements is a unique '
         'ordered species list and masses_amu is its ordered positive mass list. '

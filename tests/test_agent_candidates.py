@@ -104,6 +104,8 @@ class AgentCandidateTests(unittest.TestCase):
 
     def test_meam_uses_same_candidate_path_and_keeps_index_order(self):
         import test_meam_potentials as fixture
+        from test_structures import EXPLICIT
+        self.value['structure'] = deepcopy(EXPLICIT)
         source = self.root / 'source'
         (source / fixture.FILES['library']).write_bytes(fixture.LIBRARY)
         (source / fixture.FILES['parameters']).write_bytes(fixture.PARAMETERS)
@@ -125,9 +127,25 @@ class AgentCandidateTests(unittest.TestCase):
         record = json.loads((result['snapshot'].path / 'generation.json').read_bytes())
         self.assertEqual(record['potential_receipt']['library_index_elements'], ['Cu', 'Ni'])
         self.assertFalse(record['execution_authorized'])
+        self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
+        self.assertEqual(record['geometry_receipt']['atom_count'], 3)
+        self.assertEqual(record['input']['generator_version'], 3)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
+
+    def test_invalid_explicit_model_geometry_keeps_response_and_does_not_build(self):
+        from test_structures import EXPLICIT
+        from auto_lammps.structures import StructureError
+        self.value['structure'] = deepcopy(EXPLICIT)
+        self.value['structure']['cell_angstrom'][0][1] = 0.1
+        with patch('auto_lammps.agent_candidates.build_structure') as build:
+            with self.assertRaises(StructureError):
+                self.generate()
+            build.assert_not_called()
+        self.assertEqual(self.calls.status()['used_requests'], 1)
+        self.assertEqual(self.calls.history()[0]['receipt']['structured_output'], self.value)
+        self.assertFalse((self.root / 'candidates').exists())
 
     def test_duplicate_and_restart_never_generate_again(self):
         self.generate()
