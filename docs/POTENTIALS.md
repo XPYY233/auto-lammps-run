@@ -1,8 +1,8 @@
 # 势函数资源与适配接口
 
 Issue #21 为产品执行链路增加私人势函数目录和 `resolve_potential` 领域操作。
-当前支持独立 SNAP / qSNAP 文件的静态资源绑定，尚未接入主 Agent 自动选择、网页资源浏览或真实计算。
-源码测试库与这里的运行资源目录分别维护；导入只接受系数、参数及许可三个文件。
+当前支持独立 SNAP / qSNAP 与常规 MEAM 文件的静态资源绑定，已接入同一候选生成、资源筛选和准备历史。
+真实自动选择能力、网页资源浏览及计算尚未验收。源码测试库与运行资源目录分别维护；每个资源只接受三个明确角色的文件。
 
 ## 固定资源
 
@@ -22,14 +22,15 @@ python3 -m auto_lammps.potentials --store "$HOME/.local/share/auto-lammps-privat
 导入 JSON 的 `metadata` 包含 `name, format, elements, units, source, license, applicability,
 usage_evidence, interaction`。`source` 包含 `url, revision, locator`。
 `files` 将 `coefficients, parameters, license` 分别映射到源目录内的安全文件名。
-初版仅接收 `snap` 格式、`metal/real` 单位声明；单位必须通过模型来源核对，文件本身不证明其单位。
+`snap` 接收 `metal/real` 单位声明；`meam` 使用 `library, parameters, license` 三个角色，目前只接受 `metal`。
+单位必须通过模型来源核对，文件本身不证明其单位。
 `interaction` 为 `standalone/hybrid/unresolved`，不允许静默遗漏额外相互作用。
 
 ## 产品侧调用
 
 服务创建 `PotentialAdapter`，配置该任务允许使用的资源摘要、固定软件环境摘要和依赖包声明。
 Agent 提交资源摘要、按原子类型顺序排列的元素与任务单位。接口检查允许列表、文件完整性、
-元素映射、单位、声明的 ML-SNAP 包、参数格式以及常规 SNAP / qSNAP 的系数维度。
+元素映射、单位、相应包声明（ML-SNAP 或 MEAM）、参数格式以及常规 SNAP / qSNAP 的系数维度。
 返回固定文件名下的模型、许可证、两条势函数设置语句和可追溯绑定记录。
 重复元素映射保留原子类型顺序，不排序、不猜测，不接受 NULL 混合映射。
 
@@ -41,6 +42,30 @@ Agent 提交资源摘要、按原子类型顺序排列的元素与任务单位�
 [描述符维度定义](https://docs.lammps.org/compute_sna_atom.html)，核对日期 2026-09-24。
 化学分辨 SNAP、内切换、多势叠加和未知参数暂时阻断；旧 `diagonalstyle` 原样保存并默认要求版本审查。
 不能把此限制解释成原论文或模型无效。
+
+## MEAM 元素顺序与原件
+
+Issue #49 支持 C++ `pair_style meam`，依据 [LAMMPS MEAM 文档](https://docs.lammps.org/pair_meam.html)
+（核对日期 2026-09-24）。元数据 `elements` 明确固定参数索引顺序，与原子类型映射及库文件行顺序分开。
+例如库索引为 `Cu, Ni`、原子类型为 `Ni, Cu, Ni` 时，生成：
+
+```text
+pair_style meam
+pair_coeff * * potentials/<pin>/library.meam Cu Ni potentials/<pin>/model.meam Ni Cu Ni
+```
+
+不根据原子类型重新排序库索引，也不删除暂时未映射到原子类型的已声明元素。绑定记录同时保存两种顺序。
+文件改为受控路径，库文件、参数和许可内容逐字节不变，不补写默认值。
+
+静态检查覆盖每项 19 字段库记录、有限数值、所选元素是否存在、t0/ibar 限制、参数索引范围和维数、
+重复赋值及基本标志值。库中重复的所选元素保留原件但阻止绑定，避免默认选取一项掩盖来源歧义。
+未知参数可保留为有阻断项的资源，不提供给候选生成。最多选择 8 个元素；只接受有明确非空参数文件的
+独立 MEAM，暂不支持 NULL、混合势、MS-MEAM、加速变体、Fortran D 指数及新参考晶格 `dia3`。
+源文件可包含额外库元素，但当前仅支持 ASCII、常规数字和字符串语法。
+
+包清单仍是部署声明，静态检查不证明特定引擎版本兼容、势函数适用或物理结果正确。这个适配层不改写
+作者计算工作流，不将候选生成的输入用于 A；A 仍直接运行经核对的作者入口与原配置。
+合成测试覆盖索引/映射差异、文件破坏、缺包拒绝、旧 SNAP 摘要稳定，以及同一候选服务的历史和重启复用。
 
 ## 旧参数的明确适配
 

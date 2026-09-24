@@ -42,6 +42,8 @@ class PotentialTests(unittest.TestCase):
 
     def test_pin_survives_restart_and_duplicate_import_preserves_bytes(self):
         pin = self.ingest()
+        # Existing schema-v1 SNAP resources must survive addition of other formats.
+        self.assertEqual(pin, '569734c1eb30dae4758134ec38e694df53ad1fe0179082246a06c69f62d9b89f')
         self.assertEqual(pin, self.ingest())
         catalog = PotentialCatalog(self.root / 'catalog')
         record, content = catalog.read(pin)

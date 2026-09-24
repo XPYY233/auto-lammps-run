@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Issue #49: pinned standalone MEAM resources enter the existing potential adapter and candidate preparation history. Preserves original library/parameter/license bytes and independent library-index/atom-type order; blocks malformed or unsupported resources and missing declared packages. Existing SNAP pins stay unchanged. Static and synthetic validation only; no API or physical execution.
+
 - PR 3c: explicit reference-service web configuration, reported evidence with citations, request history and recovery without a new model call. Synthetic route/browser validation only. Records the clarified first-week Codex-led P-A-B validation, second-week independent API adoption, and required human-facing workflow redesign after the first P-A-B run.
 
 - PR 3b: internal reference-side runtime model service for sourced condition and reported-result drafts from workbench exports. Preserves sources before I/O, imports atomically, isolates result fields from execution drafts, and recovers saved completions without another request. Quote checks are not scientific verification; synthetic transport tests only, with no real API or computation enabled.

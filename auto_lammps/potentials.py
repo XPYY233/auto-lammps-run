@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import tempfile
@@ -56,8 +57,10 @@ def _metadata(document):
         raise PotentialError('Unsupported potential metadata fields')
     for key in ('name', 'license', 'applicability', 'usage_evidence'):
         _text(document[key])
-    if document['format'] != 'snap' or document['units'] not in {'metal', 'real'}:
+    if document['format'] not in {'snap', 'meam'} or document['units'] not in {'metal', 'real'}:
         raise PotentialError('Unsupported model format or units')
+    if document['format'] == 'meam' and document['units'] != 'metal':
+        raise PotentialError('MEAM binding currently requires source-verified metal units')
     if document['interaction'] not in {'standalone', 'hybrid', 'unresolved'}:
         raise PotentialError('Declare standalone, hybrid or unresolved interaction')
     elements = document['elements']
@@ -166,6 +169,114 @@ def inspect_snap(coefficients, parameters, elements):
             'blockers': sorted(blockers)}
 
 
+def inspect_meam(library, parameters, elements):
+    """Conservative C++ MEAM format screen, not physical validation.
+
+    Metadata elements fixes the parameter index order; library row order and
+    LAMMPS atom type order are independent. Original bytes are never rewritten.
+    """
+    if len(elements) > 8:
+        raise PotentialError('MEAM binding supports at most eight selected elements')
+    try:
+        library_text = library.decode('ascii')
+        parameter_text = parameters.decode('ascii')
+        tokens = shlex.split(library_text, comments=True, posix=True)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise PotentialError('MEAM files require ASCII text and balanced quotes') from exc
+    if not tokens or len(tokens) % 19 or len(tokens) > 19 * 2048:
+        raise PotentialError('MEAM library requires bounded 19-field entries')
+    lattices = {'fcc', 'bcc', 'hcp', 'dim', 'dia', 'b1', 'c11', 'l12',
+                'b2', 'ch4', 'lin', 'zig', 'tri', 'sc'}
+    number_pattern = r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?'
+
+    def number(value):
+        if not re.fullmatch(number_pattern, value):
+            raise PotentialError('Invalid MEAM numeric value')
+        result = float(value)
+        if not math.isfinite(result):
+            raise PotentialError('Non-finite MEAM numeric value')
+        return result
+
+    selected, blockers = {}, set()
+    for offset in range(0, len(tokens), 19):
+        row = tokens[offset:offset + 19]
+        if any(not re.fullmatch('[A-Za-z0-9_-]+', x) for x in row[:2]):
+            raise PotentialError('Invalid MEAM library label')
+        values = [number(x) for x in row[2:]]
+        if row[0] not in elements:
+            continue
+        if row[0] in selected:
+            blockers.add('duplicate_selected_library_element:' + row[0])
+            continue
+        if row[1] not in lattices:
+            blockers.add('unsupported_library_lattice:' + row[1])
+        if (values[0] <= 0 or not values[1].is_integer() or not 1 <= values[1] <= 118
+                or values[2] <= 0 or values[8] <= 0 or values[15] <= 0):
+            raise PotentialError('Invalid MEAM library coordination, atomic number, mass, length or density')
+        if values[11] != 1:
+            blockers.add('library_t0_must_be_one:' + row[0])
+        if values[16] not in {0, 1, 3, 4, -5}:
+            blockers.add('unsupported_library_ibar:' + row[0])
+        selected[row[0]] = {'entry': offset // 19 + 1, 'fields': row}
+    if set(selected) != set(elements):
+        raise PotentialError('Selected MEAM element missing from library')
+    arities = {key: 0 for key in ('rc', 'delr', 'gsmooth_factor', 'augt1', 'ialloy',
+                                 'mixture_ref_t', 'erose_form', 'emb_lin_neg', 'bkgd_dyn')}
+    arities.update(rho0=1, Ec=2, delta=2, alpha=2, re=2, Cmax=3, Cmin=3,
+                   lattce=2, nn2=2, attrac=2, repuls=2, zbl=2, theta=2)
+    flags = {key: {0, 1} for key in ('augt1', 'mixture_ref_t', 'emb_lin_neg', 'bkgd_dyn', 'nn2', 'zbl')}
+    flags.update(ialloy={0, 1, 2}, erose_form={0, 1, 2})
+    assignments = {}
+    for raw in parameter_text.splitlines():
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        match = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)\s*(?:\(\s*([0-9]+(?:\s*,\s*[0-9]+){0,2})\s*\))?\s*=\s*(.+)', line)
+        if not match:
+            raise PotentialError('Invalid MEAM parameter assignment')
+        key, indices, value = match.groups()
+        indices = [int(x.strip()) for x in indices.split(',')] if indices else []
+        if any(not 1 <= index <= len(elements) for index in indices):
+            raise PotentialError('MEAM parameter index outside selected library order')
+        identity = key + ('(' + ','.join(map(str, indices)) + ')' if indices else '')
+        if identity in assignments:
+            raise PotentialError('Duplicate MEAM parameter assignment')
+        if key not in arities:
+            blockers.add('unsupported_parameter:' + key)
+        elif len(indices) != arities[key]:
+            raise PotentialError('Invalid MEAM parameter index count')
+        if key == 'lattce':
+            try:
+                parsed = shlex.split(value)
+            except ValueError as exc:
+                raise PotentialError('Invalid MEAM lattice quote') from exc
+            if len(parsed) != 1 or parsed[0] not in lattices:
+                raise PotentialError('Unsupported MEAM reference lattice')
+        else:
+            numeric = number(value)
+            if key in flags and numeric not in flags[key]:
+                raise PotentialError('Invalid MEAM flag')
+            if key in {'rc', 'delr', 'rho0', 're', 'gsmooth_factor'} and numeric <= 0:
+                raise PotentialError('MEAM length or density parameter must be positive')
+        assignments[identity] = value
+        if len(assignments) > 2048:
+            raise PotentialError('Too many MEAM parameter assignments')
+    if not assignments:
+        raise PotentialError('An explicit nonempty MEAM parameter file is required')
+    return {'screen': 'meam_static_v1', 'elements': list(elements),
+            'library_entries': selected, 'parameters': assignments, 'blockers': sorted(blockers)}
+
+
+def _roles(metadata):
+    return {'library' if metadata['format'] == 'meam' else 'coefficients', 'parameters', 'license'}
+
+
+def _inspect(content, metadata):
+    if metadata['format'] == 'meam':
+        return inspect_meam(content['library'], content['parameters'], metadata['elements'])
+    return inspect_snap(content['coefficients'], content['parameters'], metadata['elements'])
+
+
 class PotentialCatalog:
     """Administrator imports only; a catalog pin is not permission to use it in a test."""
 
@@ -174,8 +285,8 @@ class PotentialCatalog:
 
     def import_model(self, source, *, metadata, files):
         metadata = _metadata(metadata)
-        if not isinstance(files, dict) or set(files) != {'coefficients', 'parameters', 'license'}:
-            raise PotentialError('Exactly coefficients, parameters and license are required')
+        if not isinstance(files, dict) or set(files) != _roles(metadata):
+            raise PotentialError('Exactly the format-specific model, parameters and license files are required')
         names = [_name(x) for x in files.values()]
         if len(set(names)) != 3:
             raise PotentialError('Model resource roles must use distinct files')
@@ -183,7 +294,7 @@ class PotentialCatalog:
             content = {role: read_file(root, name, MAX_FILE) for role, name in files.items()}
         if not content['license'].strip():
             raise PotentialError('License text must be retained')
-        diagnostics = inspect_snap(content['coefficients'], content['parameters'], metadata['elements'])
+        diagnostics = _inspect(content, metadata)
         records = {role: {'name': files[role], 'size': len(data), 'sha256': sha256(data)}
                    for role, data in content.items()}
         record = {'schema_version': 1, 'status': 'collected', 'metadata': metadata,
@@ -228,10 +339,11 @@ class PotentialCatalog:
             if sha256(encoded) != pin:
                 raise PotentialError('Potential record hash mismatch')
             record = json.loads(encoded)
-            if (record.get('schema_version') != 1 or record.get('status') != 'collected'
-                    or set(record.get('files', {})) != {'coefficients', 'parameters', 'license'}):
+            if record.get('schema_version') != 1 or record.get('status') != 'collected':
                 raise PotentialError('Invalid potential record')
             metadata = _metadata(record['metadata'])
+            if set(record.get('files', {})) != _roles(metadata):
+                raise PotentialError('Invalid potential file roles')
             content, expected = {}, {'record.json'}
             for role, item in record['files'].items():
                 name = _name(item['name'])
@@ -244,7 +356,7 @@ class PotentialCatalog:
                 content[role] = data
             if set(os.listdir(root)) != expected:
                 raise PotentialError('Undeclared files in potential resource')
-        if inspect_snap(content['coefficients'], content['parameters'], metadata['elements']) != record['inspection']:
+        if _inspect(content, metadata) != record['inspection']:
             raise PotentialError('Potential inspection mismatch')
         return record, content
 
@@ -343,18 +455,30 @@ class PotentialAdapter:
             raise PotentialError('Task and potential units differ; no automatic conversion')
         if meta['interaction'] != 'standalone':
             raise PotentialError('Hybrid or unresolved interactions need another adapter')
-        parameters, blockers, conversion = self._parameters(pin, record, content)
+        if meta['format'] == 'meam':
+            if pin in self.legacy_snap_pins:
+                raise PotentialError('MEAM cannot use a legacy SNAP conversion policy')
+            parameters, blockers, conversion = content['parameters'], record['inspection']['blockers'], None
+        else:
+            parameters, blockers, conversion = self._parameters(pin, record, content)
         if blockers:
             raise PotentialError('Potential compatibility blocked: ' + ', '.join(blockers))
-        if 'ML-SNAP' not in self.packages:
-            raise PotentialError('Declared software environment lacks ML-SNAP')
+        package = 'MEAM' if meta['format'] == 'meam' else 'ML-SNAP'
+        if package not in self.packages:
+            raise PotentialError('Declared software environment lacks ' + package)
         # Fixed names prevent metadata or upstream filenames becoming LAMMPS syntax.
         prefix = 'potentials/' + pin
-        files = {prefix + '/model.snapcoeff': content['coefficients'],
-                 prefix + '/model.snapparam': parameters,
-                 prefix + '/LICENSE.txt': content['license']}
-        commands = ('pair_style snap',
-                    f'pair_coeff * * {prefix}/model.snapcoeff {prefix}/model.snapparam ' + ' '.join(type_elements))
+        if meta['format'] == 'meam':
+            files = {prefix + '/library.meam': content['library'],
+                     prefix + '/model.meam': parameters, prefix + '/LICENSE.txt': content['license']}
+            commands = ('pair_style meam', f'pair_coeff * * {prefix}/library.meam '
+                        + ' '.join(meta['elements']) + f' {prefix}/model.meam ' + ' '.join(type_elements))
+        else:
+            files = {prefix + '/model.snapcoeff': content['coefficients'],
+                     prefix + '/model.snapparam': parameters,
+                     prefix + '/LICENSE.txt': content['license']}
+            commands = ('pair_style snap',
+                        f'pair_coeff * * {prefix}/model.snapcoeff {prefix}/model.snapparam ' + ' '.join(type_elements))
         receipt = {'schema_version': 1, 'potential_sha256': pin, 'software_sha256': self.software_sha256,
                    'atom_type_elements': list(type_elements), 'units': units,
                    'files': {name: sha256(data) for name, data in files.items()},
@@ -363,6 +487,8 @@ class PotentialAdapter:
                    'scientifically_verified': False}
         if conversion is not None:
             receipt['compatibility_conversion'] = conversion
+        if meta['format'] == 'meam':
+            receipt['library_index_elements'] = list(meta['elements'])
         return PotentialBinding(pin, files, commands, receipt)
 
 

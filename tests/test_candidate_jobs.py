@@ -1,5 +1,6 @@
 """Preparation lifecycle with real persistence, threads and a killed worker."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -85,6 +86,32 @@ class CandidateJobTests(unittest.TestCase):
         self.assertEqual(self.enqueue(restarted)['id'], final['id'])
         self.assertEqual(self.fixture.transport.call_count, 1)
         self.assertEqual(CandidateHistory(TaskStore(self.tasks.path)).get(self.doc['id']), final)
+
+    def test_meam_resource_reaches_prepared_history_and_download_without_execution(self):
+        import test_meam_potentials as meam
+        f = self.fixture
+        source = f.root / 'source'
+        (source / meam.FILES['library']).write_bytes(meam.LIBRARY)
+        (source / meam.FILES['parameters']).write_bytes(meam.PARAMETERS)
+        pin = f.catalog.import_model(source, metadata=meam.METADATA, files=meam.FILES)
+        f.value['potential_pin'] = pin
+        f.adapter = PotentialAdapter(f.catalog, allowed_pins=[pin], software_sha256='b' * 64, packages=['MEAM'])
+        self.service.close(wait=True)
+        self.service = self.make_service()
+        self.assertTrue(self.service.availability()['enabled'])
+        self.enqueue()
+        final = self.finished()
+        self.assertEqual(final['state'], 'prepared')
+        self.assertEqual([e['state'] for e in final['events']],
+                         ['queued', 'running', 'model_requested', 'preparing_files', 'prepared'])
+        self.assertIn(b'pair_style meam', self.service.file(self.doc['id'], 'in.lammps'))
+        receipt = json.loads(self.service.file(self.doc['id'], 'generation.json'))
+        self.assertFalse(receipt['execution_authorized'])
+        self.assertEqual(receipt['potential_receipt']['library_index_elements'], ['Cu', 'Ni'])
+        self.assertEqual(f.transport.call_count, 1)
+        restarted = self.make_service()
+        self.assertEqual(self.enqueue(restarted)['id'], final['id'])
+        self.assertEqual(f.transport.call_count, 1)
 
     def test_live_worker_is_not_interrupted_by_another_server_or_poll(self):
         entered, release = threading.Event(), threading.Event()

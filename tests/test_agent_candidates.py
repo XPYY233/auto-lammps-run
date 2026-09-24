@@ -102,6 +102,33 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertEqual(self.calls.status()['used_requests'], 1)
         self.assertEqual(evidence['model_receipt']['output_sha256'], self.calls.history()[0]['receipt']['output_sha256'])
 
+    def test_meam_uses_same_candidate_path_and_keeps_index_order(self):
+        import test_meam_potentials as fixture
+        source = self.root / 'source'
+        (source / fixture.FILES['library']).write_bytes(fixture.LIBRARY)
+        (source / fixture.FILES['parameters']).write_bytes(fixture.PARAMETERS)
+        pin = self.catalog.import_model(source, metadata=fixture.METADATA, files=fixture.FILES)
+        self.value['potential_pin'] = pin
+        self.adapter = PotentialAdapter(self.catalog, allowed_pins=[pin], software_sha256='b' * 64,
+                                        packages=['ML-SNAP'])
+        with self.assertRaisesRegex(CandidateError, 'No allowlisted'):
+            self.generate()
+        self.transport.assert_not_called()
+        self.adapter = PotentialAdapter(self.catalog, allowed_pins=[pin], software_sha256='b' * 64,
+                                        packages=['MEAM'])
+        with patch('subprocess.Popen', side_effect=AssertionError('no engine')):
+            result = self.generate()
+        result['snapshot'].verify()
+        script = (result['snapshot'].path / 'in.lammps').read_text()
+        self.assertIn(f'pair_coeff * * potentials/{pin}/library.meam Cu Ni potentials/{pin}/model.meam Cu\n', script)
+        self.assertEqual((result['snapshot'].path / f'potentials/{pin}/model.meam').read_bytes(), fixture.PARAMETERS)
+        record = json.loads((result['snapshot'].path / 'generation.json').read_bytes())
+        self.assertEqual(record['potential_receipt']['library_index_elements'], ['Cu', 'Ni'])
+        self.assertFalse(record['execution_authorized'])
+        request = json.loads(self.transport.call_args.args[0])
+        self.assertIn('meam', request['messages'][1]['content'])
+        self.assertEqual(self.calls.status()['used_requests'], 1)
+
     def test_duplicate_and_restart_never_generate_again(self):
         self.generate()
         self.client = DeepSeekClient(ModelCalls.open_existing(self.calls.path), transport=self.transport,
