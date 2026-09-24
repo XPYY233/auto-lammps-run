@@ -594,3 +594,7 @@ footer {
 .paper-card-top a:hover { text-decoration:underline; }
 .paper-card p { line-height:1.8; }
 .badge.confirmed { color:#256147; background:#edf6f0; }
+.preparation-panel { margin:24px 0; padding:22px; border:1px solid var(--line); border-radius:12px; background:var(--wash); }
+.preparation-panel p, .preparation-panel li { line-height:1.8; }
+#candidate-stage { font-weight:600; }
+#candidate-downloads { flex-wrap:wrap; }
