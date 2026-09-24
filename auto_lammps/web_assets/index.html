@@ -10,6 +10,7 @@
 <form id="create-form"><label>任务名称<input name="title" required maxlength="160" placeholder="给这项研究起一个简短的名字"></label><label>研究模式<select name="mode"><option value="reproduction">文献复现</option><option value="research">开放研究</option></select></label><label class="wide">用自己的话描述任务<textarea name="prompt" required maxlength="12000" rows="6" placeholder="希望研究什么材料、复现哪些物理量？已知哪些条件，哪些还需要查证？"></textarea></label><p class="form-note wide">支持按“温度：300 K”这样的独立行整理已知条件；其他描述保留原文，缺项需补充。此版本不调用模型。</p><button class="primary" type="submit">保存并整理条件 <span aria-hidden="true">→</span></button></form></section>
 <section id="task-view" hidden><div class="task-top"><div><p class="eyebrow">TASK / CONDITIONS</p><h1 id="task-title"></h1></div><span id="task-status" class="badge"></span></div><p id="task-meta" class="subtle"></p><details class="request"><summary>原始任务描述</summary><p id="task-prompt"></p></details>
 <div class="overview"><div><strong id="confirmed-count">0 / 20</strong><span>已确认条件</span></div><div><strong id="conflict-count">0</strong><span>待解决矛盾</span></div><div><strong>未提交</strong><span>计算状态</span></div></div>
+<div class="section-heading"><p>已有文献工作台的单条证据导出？</p><button id="import-literature" class="quiet">从文献导入条件</button></div>
 <div class="section-heading"><h2>逐项核对</h2><p>确认条件仅锁定研究说明，不代表科学检查通过。</p></div>
 <div id="conditions"></div>
 <div class="freeze-panel"><div><h2 id="freeze-heading">保存这份确定的研究条件</h2><p id="freeze-note">补齐或说明不适用的字段，并明确确认后，才能冻结。</p></div><button id="freeze" class="primary">冻结已确认条件</button><a id="export" class="primary" hidden>导出条件记录 ↓</a></div>
@@ -18,5 +19,18 @@
 </main></div>
 <dialog id="condition-dialog"><form id="condition-form"><div class="dialog-top"><h2 id="condition-title"></h2><button type="button" id="close-dialog" class="quiet" aria-label="关闭条件编辑">×</button></div><p class="dialog-error" role="alert" hidden></p><label>适用性<select name="applicability"><option value="required">需要此条件</option><option value="not_applicable">本任务不适用（需说明原因）</option></select></label><label>条件值 / 不适用原因<textarea name="value" rows="4" required maxlength="4000"></textarea></label><div class="form-row"><label>单位（如适用）<input name="unit" maxlength="80"></label><label>信息来源<select name="origin"><option value="user">用户明确指定</option><option value="paper">论文提供</option><option value="code">作者代码提供</option><option value="proposed">建议，等待确认</option></select></label></div><label>来源位置<input name="source_locator" maxlength="1000" placeholder="论文页码/段落，或固定版本的文件与行号"></label><p class="form-note">填写任务输入，不要把待预测结果或参考答案填作条件。原有证据会保留。</p><button type="submit" class="primary">保存条件证据</button></form></dialog>
 <dialog id="resolve-dialog"><form id="resolve-form"><h2>说明采用此条件的依据</h2><p class="dialog-error" role="alert" hidden></p><p>不同来源的值都会保留。解决矛盾后，仍需确认所选条件。</p><label>选择理由<textarea name="reason" rows="4" required maxlength="2000"></textarea></label><div class="actions"><button type="button" id="cancel-resolve" class="quiet">取消</button><button type="submit" class="primary">记录选择</button></div></form></dialog>
+<dialog id="literature-dialog"><form id="literature-form"><div class="dialog-top"><h2>从文献导入条件</h2><button type="button" id="close-literature" class="quiet" aria-label="关闭文献导入">×</button></div><p class="dialog-error" role="alert" hidden></p>
+<p>选择文献工作台导出的单条 CSV（最多 64 KiB），或粘贴其完整文本。导入不会确认条件。</p>
+<label>文献证据文件<input id="literature-file" type="file" accept=".csv,text/csv"></label>
+<label>CSV 原文<textarea id="literature-csv" rows="3" required></textarea></label><button id="preview-literature" type="button" class="quiet">预览来源</button>
+<div id="literature-preview" hidden><div id="literature-context" class="source-context"></div>
+<div class="form-row"><label>取用的来源列<select id="literature-column" required></select></label><label>填入哪个条件<select id="literature-field" required></select></label></div>
+<p id="literature-value" class="source-context"></p>
+<label>此条证据的方法来源<select id="literature-method" required><option value="">请选择</option></select></label>
+<label>分类依据（注明段落或图表位置）<textarea id="literature-basis" rows="3" maxlength="2000" required></textarea></label>
+<label class="check-label"><input id="literature-input-role" type="checkbox" required>已核对原文：所选值是任务输入条件，不是待预测结果或参考答案。</label>
+<p class="form-note">方法分类由操作者声明，尚未验证。原文与结果上下文仅留在本人的审阅资料中；不会生成主 Agent 任务包。</p>
+<button id="save-literature" class="primary" type="submit">加入待确认条件</button></div>
+</form></dialog>
 <footer>Auto-LAMMPS <span>可追溯的条件，是可复现计算的起点。</span></footer>
 </body></html>

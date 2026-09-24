@@ -586,3 +586,8 @@ to {
   border-radius:4px;
   line-height:1.6
 }
+
+.source-context { margin:16px 0; padding:14px; background:#f1f3ec; max-height:320px; overflow:auto; overflow-wrap:anywhere; }
+.source-context p, .candidate details p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.check-label { display:flex; align-items:flex-start; gap:10px; line-height:1.6; }
+.check-label input { width:auto; flex-shrink:0; margin-top:6px; }

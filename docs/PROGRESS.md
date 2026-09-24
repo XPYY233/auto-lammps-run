@@ -11,9 +11,12 @@
 - [PR 1d / #7](https://github.com/XPYY233/auto-lammps-run/pull/7)：分支 feat/pr1d-restricted-staging，基于 PR 1c，继续关联 Issue #3；受限流式上传、私人接收程序与资源脚本已完成离线验证，未部署真实上传或提交。
 - [PR 1e / #8](https://github.com/XPYY233/auto-lammps-run/pull/8)：分支 feat/pr1e-runtime-guard，基于 PR 1d；增加受信提交适配器、签名许可校验、一次性远端派发与计算节点隔离启动器。仅合成验证，尚未部署，见 [RUNTIME.md](RUNTIME.md)。
 - [PR 2 / #10](https://github.com/XPYY233/auto-lammps-run/pull/10)：分支 feat/pr2-task-confirmation，基于 PR 1e；持久条件草稿、来源/冲突核对、逐项确认、不可覆盖冻结及本机 FastAPI 网页，关联 [Issue #9](https://github.com/XPYY233/auto-lammps-run/issues/9)。浏览器已实测保存、冲突、刷新、服务重启、冻结和导出；不执行目标计算，见 [TASKS.md](TASKS.md)。
+- [PR 2b / #12](https://github.com/XPYY233/auto-lammps-run/pull/12)：分支 feat/pr2b-literature-import，基于 PR 2；来源可定位的文献 CSV 导入与条件冲突保存，关联 [Issue #11](https://github.com/XPYY233/auto-lammps-run/issues/11)。实际边界见 [LITERATURE_IMPORT.md](LITERATURE_IMPORT.md)。
 - 主分支保护已读回核实：offline-checks、一次审查、管理员同样受约束；没有自称独立审查或绕过保护。当前 PR 由同一账号发起，GitHub 不允许该账号自行批准；已请求用户提供有写权限的审阅者，尚未修改保护。
 
 ## 实际验证
+
+PR 2b 文献条件导入已完成：独立实现旧工作台单条 CSV 格式适配、来源预览、明确输入映射与条目方法分类、事务导入和冻结来源摘要。145 项本地检查中 144 项通过、1 项 Linux 专用检查跳过；浏览器已用单独合成数据库实测预览、映射、冲突撤销、刷新、来源展开、格式错误及重复导入拒绝。没有真实文章导出端到端验收或科学结果，见 [LITERATURE_IMPORT.md](LITERATURE_IMPORT.md)。
 
 PR 2 本机独立环境 135 项检查中 134 项通过、1 项 Linux 专用过滤器测试明确跳过；功能提交 ea20183 的 Linux CI 全部 135 项通过（[记录](https://github.com/XPYY233/auto-lammps-run/actions/runs/35948870109)）。此前 Linux CI 在功能提交 385a9a8 上全部 121 项通过，含真实内核过滤器检查（[运行记录](https://github.com/XPYY233/auto-lammps-run/actions/runs/35946789359)）。检查包括多进程争抢最后一次额度/核时/并发、同请求只派发一次、审计失败阻止派发、真正退出 worker 后不重提、接受回执对账、取消、超支及终态矛盾。提交调度器为合成替身，没有目标模拟。新增输入快照、只读查询解析及真实子进程边界测试。
 功能提交 fed8f6a 的 [CI](https://github.com/XPYY233/auto-lammps-run/actions/runs/35886109041) 通过；后续进程退出测试及状态记录由独立提交保存，最终检查以 PR 当前版本为准。
@@ -30,6 +33,6 @@ PR 2 本机独立环境 135 项检查中 134 项通过、1 项 Linux 专用过�
 
 ## 下一入口
 
-下一步完成首篇作者工作流核验、文献条件导入与类型化科学条件检查；执行端仍需核实计算节点权限、物理存储强制限制、依赖和隔离验收。[受限上传说明](STAGING.md)列明当前已验证范围与不足。事务恢复与一次性管理员入口见 [RECOVERY.md](RECOVERY.md)。快照和只读查询的边界及来源见 [FROZEN_INPUTS.md](FROZEN_INPUTS.md)。继续核实首篇完整作者流程；满足条件和审查后才在批准预算内计算。
+下一步完成首篇作者工作流核验、真实文献条件适配验收与类型化科学条件检查；执行端仍需核实计算节点权限、物理存储强制限制、依赖和隔离验收。[受限上传说明](STAGING.md)列明当前已验证范围与不足。事务恢复与一次性管理员入口见 [RECOVERY.md](RECOVERY.md)。快照和只读查询的边界及来源见 [FROZEN_INPUTS.md](FROZEN_INPUTS.md)。继续核实首篇完整作者流程；满足条件和审查后才在批准预算内计算。
 
 阶段汇报五项：已完成；实际验证；阻塞；需要确认；下一模块。较早审计见 AUDIT.md，第一周范围与候选见 CANDIDATES.md。

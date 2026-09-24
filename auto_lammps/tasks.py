@@ -227,6 +227,26 @@ class TaskStore:
             condition.update(selected=candidate_id, confirmed=False, resolution=reason)
             return self._write(db, doc, 'condition_selected:'+field)
 
+    def import_literature(self, identifier, revision, csv_text, **mapping):
+        from .literature import input_from_csv
+        choice, snapshot = input_from_csv(csv_text, **mapping)
+        field = mapping['field']
+        digest = choice['literature_source']['source_sha256']
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            sources = doc.setdefault('literature_sources', {})
+            if digest not in sources and len(sources) >= 32:
+                raise TaskError('此任务已达 32 份来源上限，请核对已有资料')
+            # Same file/column/field is an import retry, not new evidence. Do not
+            # let changed classification wording create duplicate candidates.
+            if any(c.get('literature_source', {}).get('source_sha256') == digest
+                   and c['literature_source']['column'] == mapping['column']
+                   for c in doc['fields'][field]['candidates']):
+                raise TaskError('此来源列已导入该条件，请核对已有记录')
+            append_condition(doc, field, choice)
+            sources[digest] = snapshot
+            return self._write(db, doc, 'literature_imported:'+field)
+
     def confirm(self, identifier, revision, fields):
         if (not isinstance(fields, list) or not fields or any(not isinstance(key, str) or key not in FIELDS for key in fields)
                 or len(fields) != len(set(fields))):
@@ -250,6 +270,8 @@ class TaskStore:
             contract = dict(schema_version=1, purpose='condition_review_record', task_id=doc['id'], mode=doc['mode'],
                             title=doc['title'], prompt=doc['prompt'], conditions=doc['fields'],
                             scientific_validation='not_performed', execution_authorized=False)
+            if doc.get('literature_sources'):
+                contract['literature_sources'] = doc['literature_sources']
             content = canonical(contract)
             digest = sha256(content)
             db.execute('INSERT INTO frozen VALUES (?,?,?)', (doc['id'], digest, content.decode()))

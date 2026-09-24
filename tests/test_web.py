@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from auto_lammps.tasks import TaskStore
 from auto_lammps.web import create_app
 from test_tasks import evidence
+from test_literature import export_csv
 
 ORIGIN='http://127.0.0.1:8765'
 HEADERS={'Origin':ORIGIN,'X-Task-Review':'1'}
@@ -72,3 +73,23 @@ class WebTests(unittest.TestCase):
         for path in ('/assets/app.js','/assets/app.css'):
             self.assertEqual(self.client.get(path).status_code,200)
         self.assertEqual(self.client.get('/assets/tasks.sqlite').status_code,404)
+
+    def test_literature_preview_and_atomic_import_keep_result_context_private(self):
+        doc=self.create()
+        content=export_csv()
+        preview=self.client.post('/api/literature/preview',json={'csv_text':content},headers=HEADERS)
+        self.assertEqual(preview.status_code,200,preview.text)
+        self.assertEqual(self.store.get(doc['id'])['revision'],1)
+        data=dict(revision=1,csv_text=content,source_sha256=preview.json()['source_sha256'],
+                  column='conditions',field='timestep',evidence_role='result',method_class='unclear',
+                  classification_basis='Synthetic Methods paragraph 2')
+        url='/api/tasks/'+doc['id']+'/literature'
+        self.assertEqual(self.client.post(url,json=data,headers=HEADERS).status_code,422)
+        data['evidence_role']='input'
+        accepted=self.client.post(url,json=data,headers=HEADERS)
+        self.assertEqual(accepted.status_code,200,accepted.text)
+        self.assertEqual(accepted.json()['revision'],2)
+        self.assertFalse(accepted.json()['fields']['timestep']['confirmed'])
+        self.assertEqual(self.client.post(url,json=data,headers=HEADERS).status_code,409)
+        for route,payload in (('/api/literature/preview',{'csv_text':content}), (url,data)):
+            self.assertEqual(self.client.post(route,json=payload,headers={'Origin':'https://example.test','X-Task-Review':'1'}).status_code,403)
