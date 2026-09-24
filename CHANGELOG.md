@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 5c: task-scoped results and execution history, per-evaluation submission counts, numeric values/units/provenance and verified report downloads. Read-only projection of existing ledger and artifact receipts; excludes reference roles and withholds inconsistent reports. Synthetic browser/integration checks only; no scientific completion or real execution claim.
+
 - PR 1f: cgroup v1 hard-memory-limit validation alongside v2, using kernel effective hierarchy limits and rejecting invalid membership or unbounded controls. Read-only deployment inventory exposed missing SNAP in checked engine modules; compute-node acceptance remains pending. No target calculation or scheduler submission.
 
 - PR 4e: administrator-selected legacy SNAP parameter binding with immutable originals, conversion receipts and explicit default-value provenance. Shared compatibility checks cover candidate availability and generation; policy changes invalidate queued preparation. Fixed duplicate preparation requests racing with the last model allowance. Static and synthetic verification only; no physical equivalence or execution claim.

@@ -538,6 +538,31 @@ class Ledger:
         with self._transaction() as db:
             return [dict(r) for r in db.execute("SELECT * FROM events WHERE request_id=? ORDER BY seq", (request_id,))]
 
+    def product_results(self, manifest_sha256):
+        """Consistent read-only task lookup; reference/development roles excluded."""
+        _digest(manifest_sha256)
+        db=self._connect()
+        try:
+            db.execute('BEGIN')
+            evaluations=db.execute('SELECT DISTINCT e.* FROM evaluations e JOIN requests r ON r.evaluation=e.id '
+                                   'WHERE r.manifest_sha256=? ORDER BY e.id LIMIT 65',(manifest_sha256,)).fetchall()
+            if len(evaluations)>64:raise LedgerError('Result listing requires pagination')
+            result=[]
+            for evaluation in evaluations:
+                if json.loads(evaluation['identity']).get('role')!='agent':continue
+                requests=db.execute('SELECT * FROM requests WHERE evaluation=? ORDER BY rowid LIMIT 129',
+                                    (evaluation['id'],)).fetchall()
+                if len(requests)>128:raise LedgerError('Request history requires pagination')
+                rows=[]
+                for request in requests:
+                    events=[dict(e) for e in db.execute('SELECT kind,at,payload FROM events WHERE request_id=? ORDER BY seq LIMIT 2001',
+                                                     (request['id'],))]
+                    if len(events)>2000:raise LedgerError('Event history requires pagination')
+                    rows.append(dict(request)|{'events':events})
+                result.append(dict(id=evaluation['id'],max_attempts=evaluation['max_attempts'],requests=rows))
+            return result
+        finally:db.close()
+
     def recoverable(self):
         with self._transaction() as db:
             placeholders = ",".join("?" for _ in ACTIVE)
