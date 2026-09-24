@@ -10,6 +10,10 @@ from auto_lammps.web import create_app
 from test_tasks import evidence
 from test_literature import export_csv
 from test_task_packages import frozen_task
+from test_deepseek import response
+from test_condition_generation import OUTPUT, SOURCES
+from unittest.mock import Mock
+from auto_lammps.deepseek import DeepSeekClient, DeepSeekConfig, ModelCalls
 
 ORIGIN='http://127.0.0.1:8765'
 HEADERS={'Origin':ORIGIN,'X-Task-Review':'1'}
@@ -111,3 +115,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get(base+'reference', headers={'Host': 'untrusted.example'}).status_code, 403)
         unfinished = self.create()
         self.assertEqual(self.client.get(f"/api/tasks/{unfinished['id']}/packages/execution").status_code, 422)
+
+    def test_condition_generation_requires_server_configuration(self):
+        doc = self.create()
+        self.assertFalse(self.client.get('/api/schema').json()['model_calls_enabled'])
+        url = f"/api/tasks/{doc['id']}/generate-conditions"
+        self.assertEqual(self.client.post(url, json={'revision':doc['revision']}, headers=HEADERS).status_code, 422)
+        self.assertEqual(len(self.store.history(doc['id'])), 1)
+
+    def test_configured_generation_uses_only_saved_request_and_server_budget(self):
+        calls = ModelCalls(Path(self.tmp.name)/'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=1)
+        transport = Mock(return_value=(200, response(OUTPUT)))
+        model = DeepSeekClient(calls, transport=transport, key_reader=lambda:'synthetic-key')
+        doc = self.store.create('普通研究需求', SOURCES[0]['text'], 'research')
+        url = f"/api/tasks/{doc['id']}/generate-conditions"
+        with TestClient(create_app(self.store, model_client=model), base_url=ORIGIN) as client:
+            self.assertTrue(client.get('/api/schema').json()['model_calls_enabled'])
+            self.assertEqual(client.post(url,json={'revision':1},headers={'Origin':'https://untrusted.example','X-Task-Review':'1'}).status_code,403)
+            self.assertEqual(client.post(url,json={'revision':1,'max_requests':100},headers=HEADERS).status_code,422)
+            self.assertEqual(transport.call_count,0)
+            result=client.post(url,json={'revision':1},headers=HEADERS)
+            self.assertEqual(result.status_code,200,result.text)
+            self.assertEqual(result.json()['fields']['temperature']['candidates'][0]['value'],'300')
+            sent=json.loads(transport.call_args.args[0])
+            source=json.loads(sent['messages'][1]['content'])['sources']
+            self.assertEqual(source,SOURCES)
+            self.assertFalse(client.get('/api/schema').json()['model_calls_enabled'])
+            self.assertEqual(client.post(url,json={'revision':1},headers=HEADERS).status_code,422)
+            self.assertEqual(client.post(url,json={'revision':2},headers=HEADERS).status_code,422)
+            self.assertEqual(transport.call_count,1)

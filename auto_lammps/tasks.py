@@ -104,7 +104,8 @@ def field_state(field):
 
 def issues(document):
     return [{'field': key, 'label': label, 'status': field_state(document['fields'][key])}
-            for key, label in FIELDS.items() if field_state(document['fields'][key]) != 'confirmed']
+            for key, label in FIELDS.items() if not (key == 'reference' and document['mode'] == 'research')
+            and field_state(document['fields'][key]) != 'confirmed']
 
 
 class TaskStore:
@@ -259,6 +260,37 @@ class TaskStore:
                 doc['fields'][key]['confirmed'] = True
             return self._write(db, doc, 'user_confirmed:'+','.join(fields))
 
+    def import_generated_conditions(self, identifier, revision, sources, completion):
+        from .condition_generation import validate_conditions
+        if (not isinstance(completion, dict) or set(completion) != {'value', 'request_id', 'receipt'}
+                or not isinstance(completion['request_id'], str)
+                or not re.fullmatch('[a-f0-9]{32}', completion['request_id'])
+                or not isinstance(completion['receipt'], dict)
+                or completion['receipt'].get('state') != 'completed'
+                or completion['receipt'].get('output_sha256') != sha256(canonical(completion['value']))):
+            raise TaskError('生成记录与条件输出不一致')
+        choices, questions, sources = validate_conditions(sources, completion['value'])
+        source_digest = sha256(canonical(sources))
+        request_id = completion['request_id']
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            batches = doc.setdefault('generated_batches', {})
+            if request_id in batches:
+                raise TaskError('这次生成结果已经导入')
+            if len(batches) >= 16:
+                raise TaskError('此任务已达生成记录上限，请核对已有结果')
+            if doc['mode'] == 'research' and (any(e['field'] == 'reference' for e in choices)
+                                               or any(q['field'] == 'reference' for q in questions)):
+                raise TaskError('科研计算不要求论文标识，模型整理结果未导入')
+            for entry in choices:
+                existing = [{k: v for k, v in c.items() if k != 'id'} for c in doc['fields'][entry['field']]['candidates']]
+                if entry['candidate'] not in existing:
+                    append_condition(doc, entry['field'], entry['candidate'])
+            batches[request_id] = dict(sources=sources, sources_sha256=source_digest,
+                                      questions=questions, response=completion['value'], receipt=completion['receipt'],
+                                      revision=doc['revision']+1)
+            return self._write(db, doc, 'conditions_generated')
+
     def freeze(self, identifier, revision):
         with self.transaction() as db:
             doc = self._read(db, identifier)
@@ -272,6 +304,8 @@ class TaskStore:
                             scientific_validation='not_performed', execution_authorized=False)
             if doc.get('literature_sources'):
                 contract['literature_sources'] = doc['literature_sources']
+            if doc.get('generated_batches'):
+                contract['generated_batches'] = doc['generated_batches']
             content = canonical(contract)
             digest = sha256(content)
             db.execute('INSERT INTO frozen VALUES (?,?,?)', (doc['id'], digest, content.decode()))

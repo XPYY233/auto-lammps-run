@@ -30,6 +30,8 @@ def split_condition_record(content: bytes):
     inputs, mapping = {}, {}
     origins = set()
     for key, field in record['conditions'].items():
+        if key == 'reference' and record['mode'] == 'research':
+            continue
         if (not isinstance(field, dict) or field.get('confirmed') is not True
                 or not isinstance(field.get('candidates'), list)
                 or not isinstance(field.get('selected'), str)):

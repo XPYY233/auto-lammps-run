@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 4a: optional server-side DeepSeek JSON condition extraction, durable request limits and quote-checked draft import. Research tasks no longer require a paper; model output remains unconfirmed. Product goals distinguish the scientific service from its literature-based evaluation. Synthetic tests only; no paid model call or target simulation.
+
 - PR 3a: deterministic execution-task drafts and separate reference-preparation exports with paired hashes, source mapping and local workbench download links. Unreleased drafts only; no semantic answer screening, runtime isolation, model call or simulation claimed.
 
 - PR 2c: private paper register, immutable task/evaluation associations, read-only attempt history and status filters. Added neutral research-workbench styling and a requirement-by-requirement first-week audit. No score publication or actual computation.
