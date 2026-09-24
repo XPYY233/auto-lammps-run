@@ -175,6 +175,8 @@ def main():
     paper = papers.get(args.paper_id)
     report = SourceDiscovery(args.audit_directory).discover(paper['title'], paper['doi'])
     papers.record_source_search(args.paper_id, report)
+    from .potential_acquisition import prepare_paper_resources
+    prepare_paper_resources(papers, args.paper_id, args.audit_directory/'potentials')
     print(json.dumps({'state': report['state'], 'candidates': len(report['candidates']),
                       'matched': sum(c['association'] == 'doi_and_title' for c in report['candidates'])}))
 

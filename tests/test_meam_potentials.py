@@ -110,7 +110,7 @@ class MeamPotentialTests(unittest.TestCase):
 
     def test_parameter_indices_cardinality_duplicates_and_values_rejected(self):
         for extra in (b'Ec(0,1)=1', b'Ec(3,1)=1', b'Ec(1)=1', b'rc(1)=5',
-                      b'Ec(1, 2)=4', b'rc=6', b'rho0(1)=NaN', b'rc=1e999',
+                      b'rho0(1)=NaN', b'rc=1e999',
                       b'nn2(1,1)=2', b'ialloy=3', b're(1,1)=-1',
                       b"lattce(1,1)='unknown'", b'run 0', b'theta(1,1)=180 2'):
             with self.subTest(extra=extra), self.assertRaises(PotentialError):
@@ -119,6 +119,41 @@ class MeamPotentialTests(unittest.TestCase):
         self.parameters.write_bytes(b'# no assignments\n')
         with self.assertRaises(PotentialError):
             self.ingest()
+
+    def test_zero_atomic_number_and_reassignments_preserve_original_bytes(self):
+        library = LIBRARY.replace(b' 29 ', b' 0 ')
+        params = PARAMETERS + b'Ec(1, 2)=4\nrc=6\n'
+        self.library.write_bytes(library)
+        self.parameters.write_bytes(params)
+        pin = self.ingest()
+        record, content = self.catalog.read(pin)
+        inspection = record['inspection']
+        self.assertEqual(content['parameters'], params)
+        self.assertEqual(inspection['parameters']['Ec(1,2)'], '4')
+        self.assertEqual(inspection['parameters']['rc'], '6')
+        self.assertEqual(inspection['reassignments'][0]['previous'], '3')
+        self.assertIn('zero_atomic_number:Cu', inspection['warnings'])
+        binding = self.adapter(pin).resolve_potential(pin, type_elements=['Cu', 'Ni'], units='metal')
+        self.assertEqual(binding.receipt['potential_warnings'], inspection['warnings'])
+        self.assertEqual(self.adapter(pin).compatible_models()[0]['warnings'], inspection['warnings'])
+        self.assertEqual(binding.files[f'potentials/{pin}/library.meam'], library)
+
+    def test_legacy_inspection_records_keep_original_content_identity(self):
+        from auto_lammps.potentials import inspect_meam
+        from auto_lammps.manifest import canonical
+        pin = self.ingest()
+        record, _ = self.catalog.read(pin)
+        record['inspection'] = inspect_meam(LIBRARY, PARAMETERS, self.metadata['elements'], version=1)
+        encoded = canonical(record)
+        legacy_pin = sha256(encoded)
+        folder = self.catalog.directory/legacy_pin
+        folder.mkdir(mode=0o700)
+        for role, name in FILES.items():
+            (folder/name).write_bytes((self.source/name).read_bytes())
+        (folder/'record.json').write_bytes(encoded)
+        self.assertEqual(self.catalog.read(legacy_pin)[0], record)
+        with self.assertRaises(PotentialError):
+            inspect_meam(LIBRARY, PARAMETERS+b'rc=6\n', ['Cu', 'Ni'], version=1)
 
     def test_unknown_parameter_retained_but_not_offered(self):
         self.parameters.write_bytes(PARAMETERS + b'futureflag(1)=1\n')
