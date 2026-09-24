@@ -143,6 +143,8 @@ class RuntimeTests(unittest.TestCase):
         proc=self.root/'cgroup-membership'
         proc.write_text('0::/parent/child\n')
         self.assertEqual(runtime.cgroup_memory_limit(proc,mount),1024)
+        (mount/'memory.max').unlink()
+        self.assertEqual(runtime.cgroup_memory_limit(proc,mount),1024)
         (mount/'parent/memory.max').write_text('max')
         (mount/'parent/child/memory.max').write_text('max')
         with self.assertRaises(runtime.ExecutionDenied): runtime.cgroup_memory_limit(proc,mount)

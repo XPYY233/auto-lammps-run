@@ -179,6 +179,10 @@ def cgroup_memory_limit(proc_cgroup='/proc/self/cgroup', mount='/sys/fs/cgroup')
     current = mount / memberships[0].lstrip('/')
     limits = []
     while True:
+        # The cgroup-v2 root does not expose memory.max. A non-root
+        # allocation must still supply a finite ceiling along its ancestry.
+        if current == mount and not (current/'memory.max').exists():
+            break
         value = (current/'memory.max').read_text().strip()
         if value != 'max':
             if not re.fullmatch(r'[1-9][0-9]*',value):
