@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install web and test dependencies
-        run: python3 -m pip install -e '.[web,test]'
+        run: python3 -m pip install -e '.[web,test,geometry]'
       - name: Offline tests
         run: python3 -m unittest discover -s tests -v
       - name: Public-tree guard

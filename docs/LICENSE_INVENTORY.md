@@ -15,7 +15,8 @@
 | materialsvirtuallab/mlearn | 固定提交 10c427a5480c6281c15c64efaf869b03be04818f；根 LICENSE 为 BSD-3-Clause，版权 Materials Virtual Lab 2019 | 仅私人资源库保存原始 Cu SNAP 模型及许可证；无作者工作流代码复制，无公开再分发；见 POTENTIALS.md |
 | FastAPI 0.141.1 / Uvicorn 0.52.0 / HTTPX 0.28.1 | PyPI 元数据分别为 MIT / BSD-3-Clause / BSD-3-Clause；HTTPX 仅测试使用 | 通过官方包安装，不内嵌第三方源码；发行前继续核查完整传递依赖 |
 | Bubblewrap / libseccomp | 仅调用系统安装版本的程序/API，无源码或二进制内嵌；部署版本、依赖及许可证仍需固定审计 | 不随原创代码重新许可，不打包分发 |
-| LAMMPS、OVITO、PyMuPDF/ASE | 尚未作为本项目运行依赖安装或打包 | 接入前单独核对版本及许可，不套用项目原创许可 |
+| ASE 3.29.0 | PyPI 元数据与已安装包 LICENSE 均为 LGPL-2.1-or-later；官方建模与 LAMMPS data 接口已核对 | 作为 geometry 可选依赖独立安装，仅几何和序列化；无源码复制、不嵌入计算器；发行前继续核对传递依赖和许可义务 |
+| LAMMPS、OVITO、PyMuPDF | 尚未作为本项目运行依赖安装或打包 | 接入前单独核对版本及许可，不套用项目原创许可 |
 | 论文正文、图表、附件 | 不因用户本机可读而获得再分发权 | 不进入公有仓库 |
 
 第一版不修改 LAMMPS 内核，不暗示任何第三方背书。
