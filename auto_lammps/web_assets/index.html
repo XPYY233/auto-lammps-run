@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auto-LAMMPS · 任务条件</title><link rel="stylesheet" href="/assets/app.css"><script defer src="/assets/app.js"></script></head>
+<body>
+<header><a href="/" class="brand">AUTO<span> / </span>LAMMPS</a><span class="edition">研究工作台 · 本机</span><span class="connection">条件准备阶段</span></header>
+<div class="workspace"><aside><div class="aside-title">我的任务 <span id="task-count">0</span></div><button id="new-task" class="primary">＋ 新建任务</button><nav id="task-list" aria-label="任务列表"></nav><div class="aside-note">先明确条件，再开始计算。<br>当前版本不调用模型、不提交作业。</div></aside>
+<main>
+<div id="message" role="status" aria-live="polite" hidden></div>
+<section id="welcome"><p class="eyebrow">01 / DEFINE THE QUESTION</p><h1>从一个清楚的问题开始。</h1><p class="intro">写下研究目标，逐项核对条件与来源。缺失的信息会保留为空；不同证据会一起保留。</p>
+<form id="create-form"><label>任务名称<input name="title" required maxlength="160" placeholder="给这项研究起一个简短的名字"></label><label>研究模式<select name="mode"><option value="reproduction">文献复现</option><option value="research">开放研究</option></select></label><label class="wide">用自己的话描述任务<textarea name="prompt" required maxlength="12000" rows="6" placeholder="希望研究什么材料、复现哪些物理量？已知哪些条件，哪些还需要查证？"></textarea></label><p class="form-note wide">支持按“温度：300 K”这样的独立行整理已知条件；其他描述保留原文，缺项需补充。此版本不调用模型。</p><button class="primary" type="submit">保存并整理条件 <span aria-hidden="true">→</span></button></form></section>
+<section id="task-view" hidden><div class="task-top"><div><p class="eyebrow">TASK / CONDITIONS</p><h1 id="task-title"></h1></div><span id="task-status" class="badge"></span></div><p id="task-meta" class="subtle"></p><details class="request"><summary>原始任务描述</summary><p id="task-prompt"></p></details>
+<div class="overview"><div><strong id="confirmed-count">0 / 20</strong><span>已确认条件</span></div><div><strong id="conflict-count">0</strong><span>待解决矛盾</span></div><div><strong>未提交</strong><span>计算状态</span></div></div>
+<div class="section-heading"><h2>逐项核对</h2><p>确认条件仅锁定研究说明，不代表科学检查通过。</p></div>
+<div id="conditions"></div>
+<div class="freeze-panel"><div><h2 id="freeze-heading">保存这份确定的研究条件</h2><p id="freeze-note">补齐或说明不适用的字段，并明确确认后，才能冻结。</p></div><button id="freeze" class="primary">冻结已确认条件</button><a id="export" class="primary" hidden>导出条件记录 ↓</a></div>
+<details class="history"><summary>查看修订记录</summary><ol id="history-list"></ol></details>
+</section>
+</main></div>
+<dialog id="condition-dialog"><form id="condition-form"><div class="dialog-top"><h2 id="condition-title"></h2><button type="button" id="close-dialog" class="quiet" aria-label="关闭条件编辑">×</button></div><p class="dialog-error" role="alert" hidden></p><label>适用性<select name="applicability"><option value="required">需要此条件</option><option value="not_applicable">本任务不适用（需说明原因）</option></select></label><label>条件值 / 不适用原因<textarea name="value" rows="4" required maxlength="4000"></textarea></label><div class="form-row"><label>单位（如适用）<input name="unit" maxlength="80"></label><label>信息来源<select name="origin"><option value="user">用户明确指定</option><option value="paper">论文提供</option><option value="code">作者代码提供</option><option value="proposed">建议，等待确认</option></select></label></div><label>来源位置<input name="source_locator" maxlength="1000" placeholder="论文页码/段落，或固定版本的文件与行号"></label><p class="form-note">填写任务输入，不要把待预测结果或参考答案填作条件。原有证据会保留。</p><button type="submit" class="primary">保存条件证据</button></form></dialog>
+<dialog id="resolve-dialog"><form id="resolve-form"><h2>说明采用此条件的依据</h2><p class="dialog-error" role="alert" hidden></p><p>不同来源的值都会保留。解决矛盾后，仍需确认所选条件。</p><label>选择理由<textarea name="reason" rows="4" required maxlength="2000"></textarea></label><div class="actions"><button type="button" id="cancel-resolve" class="quiet">取消</button><button type="submit" class="primary">记录选择</button></div></form></dialog>
+<footer>Auto-LAMMPS <span>可追溯的条件，是可复现计算的起点。</span></footer>
+</body></html>
