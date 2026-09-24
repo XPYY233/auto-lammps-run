@@ -317,6 +317,22 @@ class Ledger:
             self._event(db, request_id, 'inputs_staged' if evidence_sha256 else 'upload_failed',
                         {'evidence_sha256': evidence_sha256, 'error_type': error_type})
 
+    def bind_execution_authorization(self, request_id, grant_sha256, batch_sha256, policy_sha256):
+        """Record the trusted controller's existing-grant verification, not issue approval."""
+        for value in (grant_sha256,batch_sha256,policy_sha256):_digest(value)
+        payload=dict(grant_sha256=grant_sha256,batch_sha256=batch_sha256,policy_sha256=policy_sha256)
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            saved=db.execute("SELECT payload FROM events WHERE request_id=? AND kind='execution_authorized'",
+                             (request_id,)).fetchone()
+            if saved:
+                if json.loads(saved[0])!=payload:raise Conflict('Cannot replace bound execution authorization')
+                return
+            if row['state']!='prepared' or not db.execute(
+                    "SELECT 1 FROM events WHERE request_id=? AND kind='inputs_staged'",(request_id,)).fetchone():
+                raise Conflict('Bind authorization to a staged, undispatched request')
+            self._event(db,request_id,'execution_authorized',payload)
+
     def uncertain(self, request_id: str, evidence: dict):
         with self._transaction() as db:
             row = self._request(db, request_id)
