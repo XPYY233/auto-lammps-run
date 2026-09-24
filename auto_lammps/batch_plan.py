@@ -65,8 +65,8 @@ def render_batch(submission: Submission, environment: BatchEnvironment):
              f'#SBATCH --ntasks={resources.cores}', '#SBATCH --cpus-per-task=1',
              f'#SBATCH --time={walltime}', f'#SBATCH --mem={resources.memory_bytes // (1024 * 1024)}M',
              '#SBATCH --no-requeue', '#SBATCH --export=NIL',
-             f'#SBATCH --chdir={directory}', f'#SBATCH --output={directory}/output/slurm-%j.stdout',
-             f'#SBATCH --error={directory}/output/slurm-%j.stderr']
+             f'#SBATCH --chdir={directory}', f'#SBATCH --output={directory}/scheduler.stdout',
+             f'#SBATCH --error={directory}/scheduler.stderr', '#SBATCH --open-mode=append']
     if environment.account:
         lines.append(f'#SBATCH --account={environment.account}')
     lines.extend(['set -eu', 'umask 077', 'test -n "${SLURM_JOB_ID:-}" || exit 97',

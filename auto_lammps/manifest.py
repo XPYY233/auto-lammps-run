@@ -42,7 +42,9 @@ def relative_name(name):
             or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', part) for part in name.split('/'))
             or str(PurePosixPath(name)) != name):
         raise ManifestError('Unsafe input path')
-    if name.split('/')[0] in {'manifest.json', 'job.sh', 'receipt.json', 'allocation.json', 'stage.json', 'output'}:
+    if name.split('/')[0] in {'manifest.json', 'job.sh', 'receipt.json', 'allocation.json', 'stage.json', 'output',
+                              'execution-intent.json', 'execution-result.json', 'scheduler.stdout', 'scheduler.stderr',
+                              'scheduler-intent.json', 'scheduler-result.json'}:
         raise ManifestError('Reserved input name')
     return name
 
