@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 5d: bounded post-dispatch following connects reconciliation, output collection, frozen-plan analysis and task history. Poll allowance/cadence and query storage reservations persist across restarts; failed/partial downloads stop for attention without automatic retransfers. Includes real process-exit and concurrency checks with synthetic inputs; no real model or target computation.
+
 - PR 5c: task-scoped results and execution history, per-evaluation submission counts, numeric values/units/provenance and verified report downloads. Read-only projection of existing ledger and artifact receipts; excludes reference roles and withholds inconsistent reports. Synthetic browser/integration checks only; no scientific completion or real execution claim.
 
 - PR 1f: cgroup v1 hard-memory-limit validation alongside v2, using kernel effective hierarchy limits and rejecting invalid membership or unbounded controls. Read-only deployment inventory exposed missing SNAP in checked engine modules; compute-node acceptance remains pending. No target calculation or scheduler submission.

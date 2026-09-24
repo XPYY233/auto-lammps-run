@@ -19,7 +19,17 @@ EVENTS={'reserved':'预留计算资源','dispatch_intent':'发起计算提交','
         'analysis_reserved':'开始分析结果','analysis_saved':'保存分析记录','reconciliation_started':'核对调度记录',
         'reconciliation_finished':'保存调度核对','reconciliation_conflict':'调度记录存在矛盾',
         'scheduler_observation_conflict':'调度记录存在矛盾','cancel_intent':'请求取消',
-        'cancelled_before_dispatch':'提交前已取消'}
+        'cancelled_before_dispatch':'提交前已取消','following_registered':'开始自动跟进',
+        'following_poll':'预留调度查询与记录空间'}
+FOLLOWING={'waiting':'等待计算进展','collecting':'自动回收结果','analyzing':'自动分析结果',
+           'analyzed':'自动分析已完成','analysis_failed':'自动分析未完成',
+           'diagnostics_saved':'失败计算的诊断已保存','attention':'自动跟进需要核对'}
+
+
+def event_label(event):
+    if event['kind']=='following_progress':
+        return FOLLOWING.get(json.loads(event['payload'])['state'],'自动跟进状态待核对')
+    return EVENTS.get(event['kind'],'保存运行记录')
 
 
 class ResultUnavailable(ValueError):
@@ -119,10 +129,12 @@ class ResultsReader:
                        collection if collection else '结果回收待完成' if 'output_fetch_started' in kinds else
                        '结果待回收' if request['state']=='completed' and request['accounted'] else
                        STATES.get(request['state'],'状态待核对'))
+                progress=[json.loads(e['payload']) for e in events if e['kind']=='following_progress']
+                if progress and progress[-1]['state']=='attention':stage='自动跟进需要核对 · '+stage
                 requests.append(dict(id=request['id'],dispatch_ordinal=ordinal if request['dispatch_claimed'] else None,
                     state=request['state'],state_label=STATES.get(request['state'],'状态待核对'),stage=stage,
                     accounted=bool(request['accounted']),reports=reports,
-                    history=[dict(at=e['at'],label=EVENTS.get(e['kind'],'保存运行记录')) for e in events]))
+                    history=[dict(at=e['at'],label=event_label(e)) for e in events]))
             pending=sum(r['state']=='prepared' and not r['dispatch_claimed'] for r in group['requests'])
             base['evaluations'].append(dict(id=group['id'],max_attempts=group['max_attempts'],
                 dispatch_count=ordinal,pending_attempts=pending,used_attempts=ordinal+pending,requests=requests))
