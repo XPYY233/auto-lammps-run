@@ -74,7 +74,9 @@ def meam_declarations(data):
 class MeamAcquisition:
     def __init__(self, audit_directory, *, reader=None):
         self.root = private_directory(audit_directory)
-        self.reader = reader or GitHubReader()
+        if reader is None:
+            raise AcquisitionError('Use the configured HPC resource preparation entry')
+        self.reader = reader
 
     def acquire(self, repository, commit):
         repository_name(repository)
@@ -209,14 +211,25 @@ class MeamAcquisition:
         return report
 
 
-def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None):
+def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None, policy=None, capture=None):
     paper = papers.get(identifier)
     candidates = [c for c in paper.get('source_discovery', {}).get('candidates', [])
                   if c.get('association') == 'doi_and_title']
     if len(candidates) != 1:
         return {'state': 'source_unresolved'}
     candidate, = candidates
-    report = MeamAcquisition(audit_directory, reader=reader).acquire(candidate['repository'], candidate['commit'])
+    if reader is None:
+        from .remote_resources import RemoteResources
+        options = {'capture': capture} if capture is not None else {}
+        acquisition = RemoteResources(audit_directory, policy, **options).acquire(candidate['repository'], candidate['commit'])
+        papers.record_reference_resources(identifier, acquisition)
+        report = acquisition.get('potential_acquisition')
+        if report is None:
+            return {'state': acquisition['state'], 'bindings': [], 'files': []}
+    else:
+        if policy is not None:
+            raise AcquisitionError('Synthetic reader cannot be combined with HPC policy')
+        report = MeamAcquisition(audit_directory, reader=reader).acquire(candidate['repository'], candidate['commit'])
     papers.record_potential_acquisition(identifier, report)
     return report
 
@@ -226,10 +239,14 @@ def main():
     parser.add_argument('--database', required=True, type=Path)
     parser.add_argument('--paper-id', required=True)
     parser.add_argument('--audit-directory', required=True, type=Path)
+    parser.add_argument('--hpc-policy', required=True, type=Path)
     args = parser.parse_args()
     from .papers import PaperStore
     from .tasks import TaskStore
-    report = prepare_paper_resources(PaperStore(TaskStore(args.database)), args.paper_id, args.audit_directory)
+    from .manifest import read_file, root_descriptor
+    with root_descriptor(args.hpc_policy.parent) as root:
+        policy = json.loads(read_file(root, args.hpc_policy.name, 10000))
+    report = prepare_paper_resources(PaperStore(TaskStore(args.database)), args.paper_id, args.audit_directory, policy=policy)
     print(json.dumps({'state': report['state'], 'files': len(report.get('files', [])),
                       'bindings': len(report.get('bindings', []))}))
 

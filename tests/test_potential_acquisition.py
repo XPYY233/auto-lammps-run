@@ -143,7 +143,7 @@ class AcquisitionTests(unittest.TestCase):
         changed['engine_verified'] = True
         with self.assertRaises(TaskError): papers.record_potential_acquisition(paper['id'], changed)
 
-    def test_source_discovery_entrypoint_triggers_resource_preparation(self):
+    def test_source_discovery_without_HPC_policy_does_not_download_resources(self):
         from auto_lammps.source_discovery import main
         papers = PaperStore(TaskStore(self.root/'cli.sqlite'))
         paper = papers.add(TITLE, DOI, 'Synthetic full task', 'Synthetic test')
@@ -152,6 +152,6 @@ class AcquisitionTests(unittest.TestCase):
                 '--audit-directory', str(self.root/'cli-audit')]
         with patch('sys.argv', args), patch('builtins.print'), patch.object(
                 SourceDiscovery, 'discover', return_value=discovery), patch(
-                'auto_lammps.potential_acquisition.GitHubReader', return_value=self.reader):
+                'auto_lammps.potential_acquisition.GitHubReader', side_effect=AssertionError('no local download')):
             main()
-        self.assertEqual(len(papers.get(paper['id'])['potential_acquisition']['files']), 2)
+        self.assertNotIn('potential_acquisition',papers.get(paper['id']))

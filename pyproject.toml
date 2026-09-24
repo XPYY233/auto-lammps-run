@@ -19,4 +19,4 @@ build-backend = "setuptools.build_meta"
 include = ["auto_lammps*"]
 
 [tool.setuptools.package-data]
-auto_lammps = ["web_assets/*.html", "web_assets/*.css", "web_assets/*.js"]
+auto_lammps = ["web_assets/*.html", "web_assets/*.css", "web_assets/*.js", "worker_licenses/*.txt"]

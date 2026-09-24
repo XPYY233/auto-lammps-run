@@ -188,6 +188,30 @@ class PaperStore:
             self._write(db, doc, 'potential_acquired:'+acquisition_id)
         return self.get(identifier)
 
+    def record_reference_resources(self, identifier, report):
+        """Remote source identities for the reference side; no scientific pass."""
+        if (not isinstance(report, dict) or report.get('schema_version') != 1
+                or report.get('state') not in {'finished', 'partial', 'unknown'}
+                or report.get('location') != 'hpc'
+                or any(report.get(k) is not False for k in
+                       ('scientific_validation', 'execution_authorized', 'author_identity_verified'))
+                or len(canonical(report)) > 500000):
+            raise TaskError('超算参考资料记录不完整')
+        acquisition_id = task_id(report.get('id'))
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            if not any(c.get('association') == 'doi_and_title' and
+                       c.get('repository') == report.get('repository') and
+                       c.get('commit') == report.get('commit')
+                       for c in doc.get('source_discovery', {}).get('candidates', [])):
+                raise TaskError('超算参考资料与已核对的论文仓库不一致')
+            event = 'reference_resources_prepared:'+acquisition_id+':'+report['state']
+            if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?', (identifier, event)).fetchone():
+                return self._read(db, identifier)
+            doc['reference_resources'] = report
+            self._write(db, doc, event)
+        return self.get(identifier)
+
     def record_engine_preparation(self, identifier, report):
         """Source preparation status only, no engine deployment or execution grant."""
         from .manifest import sha256
