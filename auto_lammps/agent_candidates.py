@@ -142,7 +142,8 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
         'Use explicit empty defect lists for a stated perfect crystal. Vacancy indices and substitution '
         'objects {site,element} refer to zero-based sites before any edits. type_elements is a unique '
         'ordered species list and masses_amu is its ordered positive mass list. '
-        'Select potential_pin only from the supplied compatible resources. The service supplies units, '
+        'Select potential_pin only from the supplied compatible resources, consider their stated applicability, '
+        'and explain the choice in summary. If suitability cannot be established, ask rather than guess. The service supplies units, '
         'atom_style atomic, boundary, read_data structure.data and exact potential commands. workflow '
         'contains only the subsequent scientific LAMMPS commands you independently write. No setup '
         'commands, includes, loops, dynamic commands, code execution, external files or hidden retries. '
@@ -177,7 +178,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         meta = record['metadata']
         if (meta['units'] == units and meta['interaction'] == 'standalone'
                 and not record['inspection']['blockers'] and 'ML-SNAP' in adapter.packages):
-            compatible.append({'pin': pin, 'format': meta['format'], 'elements': meta['elements'], 'units': meta['units']})
+            compatible.append({'pin': pin, 'format': meta['format'], 'elements': meta['elements'],
+                               'units': meta['units'], 'applicability': meta['applicability']})
     if not compatible:
         raise CandidateError('No allowlisted statically compatible potential; no model request sent')
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
