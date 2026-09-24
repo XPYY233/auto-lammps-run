@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PR 4e: administrator-selected legacy SNAP parameter binding with immutable originals, conversion receipts and explicit default-value provenance. Shared compatibility checks cover candidate availability and generation; policy changes invalidate queued preparation. Fixed duplicate preparation requests racing with the last model allowance. Static and synthetic verification only; no physical equivalence or execution claim.
+
 - PR 4a: optional server-side DeepSeek JSON condition extraction, durable request limits and quote-checked draft import. Research tasks no longer require a paper; model output remains unconfirmed. Product goals distinguish the scientific service from its literature-based evaluation. Synthetic tests only; no paid model call or target simulation.
 
 - PR 3a: deterministic execution-task drafts and separate reference-preparation exports with paired hashes, source mapping and local workbench download links. Unreleased drafts only; no semantic answer screening, runtime isolation, model call or simulation claimed.

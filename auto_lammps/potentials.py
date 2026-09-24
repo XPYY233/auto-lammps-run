@@ -1,4 +1,4 @@
-"""Private pinned model resources. Never evaluates a potential or edits its bytes."""
+"""Private pinned resources; explicit binding conversions never alter the catalog."""
 from dataclasses import dataclass
 import fcntl
 import json
@@ -14,6 +14,11 @@ from urllib.parse import urlsplit
 from .manifest import canonical, private_directory, read_file, root_descriptor, sha256
 
 MAX_FILE = 16 * 1024 * 1024
+SNAP_DIAGONAL_RULE = 'remove-diagonalstyle-3-v1'
+SNAP_DIAGONAL_SOURCE = ('https://github.com/lammps/lammps/blob/'
+                        'd71abe6102c44577442ba7f03b7378a83166b9fd/doc/src/pair_snap.rst')
+SNAP_LEGACY_DEFAULTS_SOURCE = ('https://github.com/lammps/lammps/blob/'
+                              'b47e49223377d4ff6779e712bae54bbddc3596cf/src/SNAP/pair_snap.cpp')
 ELEMENTS = set(('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn '
                 'Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd '
                 'In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu '
@@ -263,11 +268,68 @@ class PotentialAdapter:
     A formal test still requires OS-enforced separation and audited allowed resources.
     """
 
-    def __init__(self, catalog, *, allowed_pins, software_sha256, packages):
+    def __init__(self, catalog, *, allowed_pins, software_sha256, packages, legacy_snap_pins=()):
         self.catalog = catalog
         self.allowed_pins = frozenset(_digest(x) for x in allowed_pins)
         self.software_sha256 = _digest(software_sha256)
         self.packages = frozenset(packages)
+        if not isinstance(legacy_snap_pins, (list, tuple, set, frozenset)):
+            raise PotentialError('Legacy SNAP policy must be a collection of resource pins')
+        self.legacy_snap_pins = frozenset(_digest(x) for x in legacy_snap_pins)
+        if not self.legacy_snap_pins <= self.allowed_pins:
+            raise PotentialError('Legacy SNAP policy must be a subset of allowed resources')
+
+    def compatibility_policy(self):
+        return {'rule': SNAP_DIAGONAL_RULE, 'pins': sorted(self.legacy_snap_pins),
+                'software_sha256': self.software_sha256}
+
+    def _parameters(self, pin, record, content):
+        inspection = record['inspection']
+        original = content['parameters']
+        if pin not in self.legacy_snap_pins:
+            return original, inspection['blockers'], None
+        params = inspection['parameters']
+        # This narrowly reviewed rule is not a general old-to-new translator.
+        required = {'rcutfac', 'twojmax', 'rfac0', 'rmin0', 'diagonalstyle',
+                    'quadraticflag', 'bzeroflag'}
+        if (not required <= params.keys() or params.keys() - required - {'switchflag'}
+                or params.get('diagonalstyle') != ['3']
+                or inspection['blockers'] != ['legacy_diagonalstyle_requires_version_review']):
+            raise PotentialError('Resource does not match the reviewed legacy SNAP rule')
+        lines = original.splitlines(keepends=True)
+        removed = [i for i, line in enumerate(lines)
+                   if line.split(b'#', 1)[0].split()[:1] == [b'diagonalstyle']]
+        if len(removed) != 1:
+            raise PotentialError('Expected exactly one legacy parameter line')
+        converted = b''.join(line for i, line in enumerate(lines) if i != removed[0])
+        checked = inspect_snap(content['coefficients'], converted, record['metadata']['elements'])
+        if checked['parameters'] != {k: v for k, v in params.items() if k != 'diagonalstyle'}:
+            raise PotentialError('Unexpected parameter change during SNAP conversion')
+        receipt = {'rule': SNAP_DIAGONAL_RULE, 'basis': SNAP_DIAGONAL_SOURCE,
+                   'legacy_defaults_basis': SNAP_LEGACY_DEFAULTS_SOURCE,
+                   'unwritten_defaults_requiring_environment_review':
+                       {} if 'switchflag' in params else {'switchflag': 1},
+                   'original_parameter_sha256': sha256(original),
+                   'bound_parameter_sha256': sha256(converted),
+                   'removed_line': removed[0] + 1, 'removed_parameter': {'diagonalstyle': '3'},
+                   'numerical_equivalence_verified': False}
+        return converted, checked['blockers'], receipt
+
+    def compatible_models(self, *, units=None):
+        """The same resource checks serve availability, generation and binding."""
+        models = []
+        for pin in sorted(self.allowed_pins):
+            record, _ = self.catalog.read(pin)
+            meta = record['metadata']
+            if units is not None and meta['units'] != units:
+                continue
+            try:
+                self.resolve_potential(pin, type_elements=meta['elements'], units=meta['units'])
+            except PotentialError:
+                continue
+            models.append({'pin': pin, 'format': meta['format'], 'elements': meta['elements'],
+                           'units': meta['units'], 'applicability': meta['applicability']})
+        return models
 
     def resolve_potential(self, pin, *, type_elements, units):
         if _digest(pin) not in self.allowed_pins:
@@ -281,14 +343,15 @@ class PotentialAdapter:
             raise PotentialError('Task and potential units differ; no automatic conversion')
         if meta['interaction'] != 'standalone':
             raise PotentialError('Hybrid or unresolved interactions need another adapter')
-        if record['inspection']['blockers']:
-            raise PotentialError('Potential compatibility blocked: ' + ', '.join(record['inspection']['blockers']))
+        parameters, blockers, conversion = self._parameters(pin, record, content)
+        if blockers:
+            raise PotentialError('Potential compatibility blocked: ' + ', '.join(blockers))
         if 'ML-SNAP' not in self.packages:
             raise PotentialError('Declared software environment lacks ML-SNAP')
         # Fixed names prevent metadata or upstream filenames becoming LAMMPS syntax.
         prefix = 'potentials/' + pin
         files = {prefix + '/model.snapcoeff': content['coefficients'],
-                 prefix + '/model.snapparam': content['parameters'],
+                 prefix + '/model.snapparam': parameters,
                  prefix + '/LICENSE.txt': content['license']}
         commands = ('pair_style snap',
                     f'pair_coeff * * {prefix}/model.snapcoeff {prefix}/model.snapparam ' + ' '.join(type_elements))
@@ -298,6 +361,8 @@ class PotentialAdapter:
                    'commands': list(commands), 'checks': 'static_resource_binding',
                    'execution_authorized': False, 'environment_verified': False,
                    'scientifically_verified': False}
+        if conversion is not None:
+            receipt['compatibility_conversion'] = conversion
         return PotentialBinding(pin, files, commands, receipt)
 
 

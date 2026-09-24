@@ -172,14 +172,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     if condition_record_sha256 is not None and (not isinstance(condition_record_sha256, str)
                                                 or not re.fullmatch('[a-f0-9]{64}', condition_record_sha256)):
         raise CandidateError('Invalid frozen condition record digest')
-    compatible = []
-    for pin in sorted(adapter.allowed_pins):
-        record, _ = adapter.catalog.read(pin)
-        meta = record['metadata']
-        if (meta['units'] == units and meta['interaction'] == 'standalone'
-                and not record['inspection']['blockers'] and 'ML-SNAP' in adapter.packages):
-            compatible.append({'pin': pin, 'format': meta['format'], 'elements': meta['elements'],
-                               'units': meta['units'], 'applicability': meta['applicability']})
+    compatible = adapter.compatible_models(units=units)
     if not compatible:
         raise CandidateError('No allowlisted statically compatible potential; no model request sent')
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
@@ -188,6 +181,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms)
     context = {'generator_version': GENERATOR_VERSION, 'messages': messages,
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
+               'potential_compatibility': adapter.compatibility_policy(),
                'geometry_runtime': runtime, 'condition_record_sha256': condition_record_sha256}
     request_id = sha256(canonical(context))[:32]
     if on_stage:

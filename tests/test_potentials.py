@@ -92,6 +92,75 @@ class PotentialTests(unittest.TestCase):
         with self.assertRaisesRegex(PotentialError, 'allowlist'):
             self.adapter(pin, allowed_pins=[]).resolve_potential(pin, type_elements=['Cu'], units='metal')
 
+    def legacy_parameters(self):
+        return (b'# preserved comment\r\nrcutfac 4\r\ntwojmax 0\r\nrfac0 0.99363\r\n'
+                b'rmin0 0\r\n  diagonalstyle 3 # obsolete\r\nquadraticflag 0\r\nbzeroflag 0')
+
+    def test_explicit_legacy_binding_preserves_original_and_records_exact_conversion(self):
+        original = self.legacy_parameters()
+        (self.source / self.files['parameters']).write_bytes(original)
+        pin = self.ingest()
+        self.assertEqual(self.adapter(pin).compatible_models(), [])
+        with self.assertRaisesRegex(PotentialError, 'compatibility blocked'):
+            self.adapter(pin).resolve_potential(pin, type_elements=['Cu'], units='metal')
+        adapter = self.adapter(pin, legacy_snap_pins=[pin])
+        binding = adapter.resolve_potential(pin, type_elements=['Cu', 'Cu'], units='metal')
+        expected = original.replace(b'  diagonalstyle 3 # obsolete\r\n', b'')
+        self.assertEqual(binding.files[f'potentials/{pin}/model.snapparam'], expected)
+        self.assertEqual(self.catalog.read(pin)[1]['parameters'], original)
+        self.assertEqual(binding.files[f'potentials/{pin}/model.snapcoeff'], self.coefficients)
+        self.assertEqual(binding.files[f'potentials/{pin}/LICENSE.txt'], self.catalog.read(pin)[1]['license'])
+        receipt = binding.receipt['compatibility_conversion']
+        self.assertEqual(receipt['original_parameter_sha256'], sha256(original))
+        self.assertEqual(receipt['bound_parameter_sha256'], sha256(expected))
+        self.assertEqual(receipt['removed_line'], 6)
+        self.assertEqual(receipt['unwritten_defaults_requiring_environment_review'], {'switchflag': 1})
+        self.assertFalse(receipt['numerical_equivalence_verified'])
+        self.assertEqual(adapter.compatible_models()[0]['pin'], pin)
+        self.assertEqual(adapter.compatible_models(units='real'), [])
+        self.assertEqual(binding, adapter.resolve_potential(pin, type_elements=['Cu', 'Cu'], units='metal'))
+
+    def test_legacy_policy_cannot_broaden_resource_allowlist_or_guess_parameters(self):
+        pin = self.ingest()
+        with self.assertRaisesRegex(PotentialError, 'subset'):
+            self.adapter(pin, legacy_snap_pins=['f' * 64])
+        for value in (pin, None, {pin: True}):
+            with self.subTest(value=value), self.assertRaises(PotentialError):
+                self.adapter(pin, legacy_snap_pins=value)
+        for parameters in (self.parameters, self.legacy_parameters().replace(b'diagonalstyle 3', b'diagonalstyle 2'),
+                           self.legacy_parameters().replace(b'bzeroflag 0', b''),
+                           self.legacy_parameters() + b'\nchemflag 0\n',
+                           self.legacy_parameters() + b'\nunknown 1\n'):
+            with self.subTest(parameters=parameters):
+                (self.source / self.files['parameters']).write_bytes(parameters)
+                pin = self.ingest()
+                adapter = self.adapter(pin, legacy_snap_pins=[pin])
+                with self.assertRaisesRegex(PotentialError, 'reviewed legacy'):
+                    adapter.resolve_potential(pin, type_elements=['Cu'], units='metal')
+                self.assertEqual(adapter.compatible_models(), [])
+
+    def test_legacy_rule_does_not_bypass_units_packages_or_interaction_checks(self):
+        (self.source / self.files['parameters']).write_bytes(self.legacy_parameters())
+        pin = self.ingest()
+        for kwargs, units in (({'packages': []}, 'metal'), ({}, 'real')):
+            with self.assertRaises(PotentialError):
+                self.adapter(pin, legacy_snap_pins=[pin], **kwargs).resolve_potential(pin, type_elements=['Cu'], units=units)
+        self.metadata['interaction'] = 'unresolved'
+        pin = self.ingest()
+        with self.assertRaisesRegex(PotentialError, 'unresolved'):
+            self.adapter(pin, legacy_snap_pins=[pin]).resolve_potential(pin, type_elements=['Cu'], units='metal')
+
+    def test_explicit_switch_and_quadratic_coefficients_are_not_changed(self):
+        original = self.legacy_parameters().replace(b'quadraticflag 0', b'quadraticflag 1') + b'\nswitchflag 0\n'
+        coefficients = b'1 3\nCu 0.5 1\n0\n0\n0\n'
+        (self.source / self.files['parameters']).write_bytes(original)
+        (self.source / self.files['coefficients']).write_bytes(coefficients)
+        pin = self.ingest()
+        binding = self.adapter(pin, legacy_snap_pins=[pin]).resolve_potential(pin, type_elements=['Cu'], units='metal')
+        self.assertEqual(binding.files[f'potentials/{pin}/model.snapcoeff'], coefficients)
+        self.assertEqual(binding.files[f'potentials/{pin}/model.snapparam'], original.replace(b'  diagonalstyle 3 # obsolete\r\n', b''))
+        self.assertEqual(binding.receipt['compatibility_conversion']['unwritten_defaults_requiring_environment_review'], {})
+
     def test_concurrent_duplicate_import_has_one_immutable_result(self):
         with ThreadPoolExecutor(max_workers=4) as pool:
             pins = list(pool.map(lambda _: self.ingest(), range(8)))

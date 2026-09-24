@@ -105,6 +105,23 @@ class CandidateJobTests(unittest.TestCase):
         self.assertEqual(self.finished()['state'], 'prepared')
         self.assertEqual(self.fixture.transport.call_count, 1)
 
+    def test_concurrent_intent_wins_over_stale_budget_availability(self):
+        other = self.make_service()
+        availability = self.service.availability
+        def racing_availability():
+            # Another request arrives after our initial history read, and uses
+            # the final model allowance before this request checks availability.
+            other.enqueue(self.doc['id'], self.doc['revision'])
+            other.close(wait=True)
+            result = availability()
+            self.assertFalse(result['enabled'])
+            return result
+        self.service.availability = racing_availability
+        job = self.enqueue()
+        self.assertEqual(job['id'], self.history.get(self.doc['id'])['id'])
+        self.assertEqual(job['state'], 'prepared')
+        self.assertEqual(self.fixture.transport.call_count, 1)
+
     def test_actual_worker_exit_retains_unknown_model_intent_and_never_resends(self):
         process = multiprocessing.get_context('spawn').Process(target=crash_worker,
             args=(str(self.fixture.root), self.fixture.pin, self.doc['id'], self.doc['revision']))
@@ -161,6 +178,18 @@ class CandidateJobTests(unittest.TestCase):
         other.start()
         self.assertEqual(self.finished()['state'], 'prepared')
         self.assertEqual(self.fixture.transport.call_count, 1)
+
+    def test_changed_compatibility_policy_blocks_queued_work_without_model_request(self):
+        self.service.pool.submit = Mock()
+        self.enqueue()
+        f = self.fixture
+        f.adapter = PotentialAdapter(f.catalog, allowed_pins=[f.pin], software_sha256='b' * 64,
+                                     packages=['ML-SNAP'], legacy_snap_pins=[f.pin])
+        other = self.make_service()
+        self.assertNotEqual(self.service.config_sha256, other.config_sha256)
+        other.start()
+        self.assertEqual(self.finished()['state'], 'configuration_changed')
+        f.transport.assert_not_called()
 
     def test_api_history_download_and_origin_boundaries(self):
         base = f"/api/tasks/{self.doc['id']}/candidate"

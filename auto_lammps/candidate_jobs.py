@@ -106,6 +106,7 @@ class CandidateService:
         config = {'resources': asdict(resources), 'max_atoms': max_atoms, 'model': asdict(client.calls.config),
                   'model_ledger': str(client.calls.path.resolve()), 'catalog': str(adapter.catalog.directory),
                   'pins': sorted(adapter.allowed_pins), 'software': adapter.software_sha256,
+                  'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
                     for name in ('candidate_jobs.py', 'agent_candidates.py', 'structures.py', 'potentials.py')}}
@@ -115,11 +116,8 @@ class CandidateService:
     def availability(self):
         if self.client.calls.status()['remaining_requests'] <= 0:
             return {'enabled': False, 'reason': '模型尚无可用调用额度。'}
-        for pin in sorted(self.adapter.allowed_pins):
-            record, _ = self.adapter.catalog.read(pin)
-            if (record['metadata']['interaction'] == 'standalone' and not record['inspection']['blockers']
-                    and 'ML-SNAP' in self.adapter.packages):
-                return {'enabled': True, 'reason': ''}
+        if self.adapter.compatible_models():
+            return {'enabled': True, 'reason': ''}
         return {'enabled': False, 'reason': '尚无已配置且通过静态兼容检查的势函数。'}
 
     def enqueue(self, identifier, revision):
@@ -128,11 +126,11 @@ class CandidateService:
             return existing
         inputs = research_inputs(self.tasks, identifier, revision)
         available = self.availability()
-        if not available['enabled']:
-            raise CandidateError(available['reason'])
         with self.tasks.transaction() as db:
             row = db.execute('SELECT id FROM candidate_jobs WHERE task_id=?', (identifier,)).fetchone()
             if row is None:
+                if not available['enabled']:
+                    raise CandidateError(available['reason'])
                 job = uuid.uuid4().hex
                 db.execute('INSERT INTO candidate_jobs VALUES (?,?,?,?,?,?)',
                            (job, identifier, revision, inputs['condition_record_sha256'], self.config_sha256,
