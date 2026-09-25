@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Issue #75: append explicit first-week third-attempt allowances and approved campaign resource revisions without resetting evaluation identities, failures or charges. Settle never-dispatched cancelled preparation storage against evidence; keep standard product evaluations at two attempts. Record all three real pre-engine reference failures and the unexecuted Slurm bootstrap correction.
+
 - Issue #73: accept multiword Slurm allocation fields such as SubmitLine while continuing to reject duplicate identities, multiple records and mismatched resources. Fixes a real pre-engine reference-launch failure; preserves its attempt and accounting history.
 
 - Issue #71: document the unnecessary engine-build detour before reference A, restore the user-directed use of the installed compatible engine, and preserve preparation/failure history. Define adapter and RAG responsibilities, evidence reuse, structured validation, retrieval isolation and failure-learning acceptance cases. Documentation only; retrieval automation and real A/B results are not claimed.
