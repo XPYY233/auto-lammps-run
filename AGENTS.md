@@ -25,6 +25,10 @@
 - Reply briefly in Chinese; give pronunciation for key English terms when useful.
 - All changes after initialization use an Issue, branch, PR, CI and authorized review.
 - Preserve source history and failure records. Never force push or alter another project.
+- Record each newly observed execution error in docs/AUDIT.md during the same work
+  turn, before retrying: evidence, impact, cause or unverified hypothesis, corrective
+  action and validation status. Add reusable lessons to the stage skill; update the
+  private checkpoint and retain attempts/costs. Recording a lesson is not a verified fix.
 - Public code must exclude credentials, private paths, library keys, PDFs, private
   evidence, author reference source, hidden targets and real execution logs.
 - Every target energy/force/minimization/dynamics evaluation is HPC-only through
