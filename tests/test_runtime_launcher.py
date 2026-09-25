@@ -135,6 +135,20 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(runtime.ExecutionDenied):
             runtime.parse_allocation(self.allocation()+' JobId=123',**args)
 
+    def test_scheduler_multiword_values_preserve_identity_checks(self):
+        args=dict(request_id=REQUEST,manifest_sha256=self.digest,job_id='123',uid=os.getuid(),host='compute-fixture',resources=asdict(RESOURCES))
+        extra=' SubmitLine=/usr/bin/sbatch --parsable /fixture/job.sh WorkDir=/fixture Socks/Node=* ReqB:S:C:T=0:0:*:*'
+        self.assertEqual(runtime.parse_allocation(self.allocation().strip()+extra,**args),1)
+        for text in (
+            self.allocation(NumCPUs='2').strip()+extra,
+            self.allocation().strip()+extra+' JobId=123',
+            self.allocation().strip()+' SubmitLine=echo JobState=RUNNING WorkDir=/fixture',
+            'unparsed prefix '+self.allocation().strip()+extra,
+            self.allocation()+'\n'+extra,
+        ):
+            with self.subTest(text=text), self.assertRaises(runtime.ExecutionDenied):
+                runtime.parse_allocation(text,**args)
+
     def test_cgroup_hierarchical_minimum_and_unbounded_denial(self):
         mount=self.root/'cgroup'
         (mount/'parent/child').mkdir(parents=True)

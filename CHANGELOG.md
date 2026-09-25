@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Issue #73: accept multiword Slurm allocation fields such as SubmitLine while continuing to reject duplicate identities, multiple records and mismatched resources. Fixes a real pre-engine reference-launch failure; preserves its attempt and accounting history.
+
 - Issue #71: document the unnecessary engine-build detour before reference A, restore the user-directed use of the installed compatible engine, and preserve preparation/failure history. Define adapter and RAG responsibilities, evidence reuse, structured validation, retrieval isolation and failure-learning acceptance cases. Documentation only; retrieval automation and real A/B results are not claimed.
 
 - Issue #51: explicit non-cubic cell/basis geometry in the same candidate service. Preserves supplied restricted-triclinic axes, all nonzero tilts, basis/replication order and defect indices; rejects missing, overlapping or numerically degenerate inputs before allocation. Candidate protocol version 3 records the new contract. Synthetic geometry/service checks only; no reference input reconstruction or physical execution.
