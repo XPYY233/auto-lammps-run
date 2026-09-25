@@ -105,6 +105,55 @@ class LedgerTests(unittest.TestCase):
             same.register_evaluation('campaign', task_sha256=H1, repetition=0,
                                      role='agent', system_sha256=H2, max_attempts=1)
 
+    def test_reference_continuation_retains_failures_and_cannot_extend_agent(self):
+        reference = self.register(role='reference')
+        self.ledger.approve_week_one_third_attempt(reference, approval_sha256=H1)
+        ids = []
+        for i in range(3):
+            row = self.reserve(str(i), evaluation=reference)
+            self.ledger.begin_dispatch(row['id'])
+            self.ledger.rejected(row['id'], {'synthetic': True})
+            ids.append(row['id'])
+        self.ledger.approve_reference_continuation(reference, approval_sha256=H3)
+        self.ledger.approve_reference_continuation(reference, approval_sha256=H3)
+        for i in range(3, 6):
+            row = self.reserve(str(i), evaluation=reference)
+            self.ledger.begin_dispatch(row['id'])
+            self.ledger.rejected(row['id'], {'synthetic': True})
+        snapshot = Ledger(self.path).evaluation_snapshot(reference)
+        self.assertIsNone(snapshot['max_attempts'])
+        self.assertIsNone(snapshot['remaining_attempts'])
+        self.assertEqual(snapshot['dispatch_claims'], 6)
+        self.assertEqual([r['id'] for r in snapshot['requests'][:3]], ids)
+        with self.assertRaises(Conflict):
+            self.ledger.approve_reference_continuation(self.evaluation, approval_sha256=H3)
+        with self.assertRaises(Conflict):
+            self.ledger.approve_reference_continuation(reference, approval_sha256=H2)
+        for key in ('b1','b2'):
+            self.rejected_attempt(key)
+        with self.assertRaises(LimitExceeded):
+            self.reserve('b3')
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['max_attempts'], 2)
+
+    def test_reference_continuation_keeps_resource_and_concurrency_checks(self):
+        reference = self.register(role='reference')
+        self.ledger.approve_reference_continuation(reference, approval_sha256=H3)
+        for resource in (Resources(9,10,100,100), Resources(2,10,100,10001)):
+            with self.assertRaises(LimitExceeded):
+                self.reserve('oversized', evaluation=reference, resources=resource)
+        self.reserve('reference-active', evaluation=reference)
+        with self.assertRaises(Conflict):
+            self.reserve('duplicate-active', evaluation=reference)
+
+    def test_reference_continuation_approval_is_append_only(self):
+        reference = self.register(role='reference')
+        self.ledger.approve_reference_continuation(reference, approval_sha256=H3)
+        with sqlite3.connect(self.path) as db:
+            for statement in ('DELETE FROM reference_continuations',
+                              "UPDATE reference_continuations SET approval_sha256='changed'"):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(statement)
+
     def test_explicit_week_one_allowance_preserves_attempts_and_standard_limit(self):
         first=self.rejected_attempt('first')
         second=self.rejected_attempt('second')

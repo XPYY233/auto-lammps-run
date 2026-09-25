@@ -1,5 +1,7 @@
 # Development rules
 
+最新修订：第一周作者参考 A 可继续提交直至跑通，不限次数；每次失败和费用保留。B 及最终产品最多两次，进入 B 前仍须先汇报策略并获确认。A 使用 32 核、8 GiB 内存、并发 1，遵守集群七天时限；B 累计核时仍按完整 A 的实际小时数 b 计算为 32*b+b²。
+
 - For this project, read the locally installed `auto-lammps-stage-guide` skill at
   `~/.codex/skills/auto-lammps-stage-guide/SKILL.md`. It routes current norms and
   recorded lessons; it adds no approval gate. Reopen both final-expectation images

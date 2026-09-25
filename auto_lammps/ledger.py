@@ -118,6 +118,13 @@ CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
  policy TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
  PRIMARY KEY(campaign, revision)
 );
+CREATE TABLE IF NOT EXISTS reference_continuations (
+ evaluation TEXT PRIMARY KEY REFERENCES evaluations(id), approval_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_update BEFORE UPDATE ON reference_continuations
+ BEGIN SELECT RAISE(ABORT, 'reference continuation is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_delete BEFORE DELETE ON reference_continuations
+ BEGIN SELECT RAISE(ABORT, 'reference continuation is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_policy_revision_update BEFORE UPDATE ON campaign_policy_revisions
  BEGIN SELECT RAISE(ABORT, 'policy revisions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_policy_revision_delete BEFORE DELETE ON campaign_policy_revisions
@@ -165,7 +172,7 @@ class Ledger:
             if app_id not in {0, 0x414C4D50} or (tables and app_id == 0):
                 raise LedgerError("Refusing to modify a database owned by another application")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in {0, 1, 2}:
+            if version not in {0, 1, 2, 3}:
                 raise LedgerError("Unsupported ledger schema")
             statement = ""
             for line in SCHEMA.splitlines(keepends=True):
@@ -174,7 +181,7 @@ class Ledger:
                     db.execute(statement)
                     statement = ""
             db.execute("PRAGMA application_id=1095519568")
-            db.execute("PRAGMA user_version=2")
+            db.execute("PRAGMA user_version=3")
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
@@ -282,9 +289,36 @@ class Ledger:
 
     @staticmethod
     def _attempt_allowance(db, evaluation):
+        continuation = db.execute('SELECT 1 FROM reference_continuations WHERE evaluation=?',
+                                  (evaluation['id'],)).fetchone()
+        if continuation and json.loads(evaluation['identity'])['role'] == 'reference':
+            return None, 'week_one_reference_development'
         allowance = db.execute('SELECT * FROM validation_allowances WHERE evaluation=?',
                                (evaluation['id'],)).fetchone()
         return (allowance['max_attempts'], allowance['stage']) if allowance else (evaluation['max_attempts'], 'standard')
+
+    def approve_reference_continuation(self, evaluation: str, *, approval_sha256: str):
+        """Controller-only explicit reference development approval; never B authority.
+
+        Remove only the reference attempt cap. Resources, reconciliation and all
+        existing requests remain unchanged. The evidence digest is not permission
+        for an Agent to grant itself this exception.
+        """
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+            if ev is None or json.loads(ev['identity'])['role'] != 'reference':
+                raise Conflict('Continuation is restricted to author reference development')
+            old = db.execute('SELECT approval_sha256 FROM reference_continuations WHERE evaluation=?',
+                             (evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256'] != approval_sha256:
+                    raise Conflict('Cannot replace reference continuation approval')
+                return
+            db.execute('INSERT INTO reference_continuations VALUES (?,?)', (evaluation, approval_sha256))
+            self._event(db, None, 'reference_continuation_approved',
+                        {'evaluation': evaluation, 'approval_sha256': approval_sha256,
+                         'max_attempts': None, 'product_max_attempts': 2})
 
     def approve_week_one_third_attempt(self, evaluation: str, *, approval_sha256: str):
         """Trusted controller only, after explicit user approval; never an Agent tool.
@@ -358,7 +392,7 @@ class Ledger:
             if any(r["state"] in ACTIVE for r in own):
                 raise Conflict("Existing evaluation request must finish or be reconciled first")
             max_attempts, _ = self._attempt_allowance(db, ev)
-            if sum(r["dispatch_claimed"] or r["state"] == "prepared" for r in own) >= max_attempts:
+            if max_attempts is not None and sum(r["dispatch_claimed"] or r["state"] == "prepared" for r in own) >= max_attempts:
                 raise LimitExceeded("Evaluation submission allowance exhausted")
             if sum(r["state"] in ACTIVE for r in all_rows) >= policy["concurrency"]:
                 raise LimitExceeded("Campaign concurrency exhausted")
@@ -655,7 +689,7 @@ class Ledger:
             return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=maximum,
                         original_max_attempts=row['max_attempts'], attempt_scope=scope,
                         reserved_attempts=len(requests), dispatch_claims=sum(r['dispatch_claimed'] for r in requests),
-                        remaining_attempts=max(0,maximum-used), requests=requests)
+                        remaining_attempts=None if maximum is None else max(0,maximum-used), requests=requests)
         finally:
             db.close()
 

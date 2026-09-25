@@ -625,7 +625,9 @@ function paperCard(p,statuses,availableTasks) {
   for (const evaluation of p.evaluations) {
     if (!evaluation.available) { details.append(node('p','账本记录暂不可读；次数未知，不能重新提交。','error')); continue; }
     details.append(node('h3',roleNames[evaluation.identity.role]||evaluation.identity.role));
-    details.append(node('p',`额度已占用 ${evaluation.reserved_attempts} / ${evaluation.max_attempts} · 已记账派发 ${evaluation.dispatch_claims} · 剩余 ${evaluation.remaining_attempts}`));
+    details.append(node('p',evaluation.max_attempts===null
+      ? `参考开发已获准继续至跑通 · 已记账派发 ${evaluation.dispatch_claims} 次 · 全部失败与费用保留`
+      : `额度已占用 ${evaluation.reserved_attempts} / ${evaluation.max_attempts} · 已记账派发 ${evaluation.dispatch_claims} · 剩余 ${evaluation.remaining_attempts}`));
     details.append(node('small','评测标识：'+evaluation.id));
     for (const [i,request] of evaluation.requests.entries()) {
       const requestBox=node('div',undefined,'request-record');
