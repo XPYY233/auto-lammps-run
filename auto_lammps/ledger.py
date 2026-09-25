@@ -107,6 +107,25 @@ CREATE TABLE IF NOT EXISTS requests (
  accounted INTEGER NOT NULL DEFAULT 0, actual_core_seconds INTEGER,
  UNIQUE(evaluation, idempotency_key), UNIQUE(job_id)
 );
+CREATE TABLE IF NOT EXISTS validation_allowances (
+ evaluation TEXT PRIMARY KEY REFERENCES evaluations(id),
+ stage TEXT NOT NULL CHECK(stage='week_one_validation'),
+ max_attempts INTEGER NOT NULL CHECK(max_attempts=3),
+ approval_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
+ campaign TEXT NOT NULL REFERENCES campaigns(id), revision INTEGER NOT NULL,
+ policy TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
+ PRIMARY KEY(campaign, revision)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_policy_revision_update BEFORE UPDATE ON campaign_policy_revisions
+ BEGIN SELECT RAISE(ABORT, 'policy revisions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_policy_revision_delete BEFORE DELETE ON campaign_policy_revisions
+ BEGIN SELECT RAISE(ABORT, 'policy revisions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_allowance_update BEFORE UPDATE ON validation_allowances
+ BEGIN SELECT RAISE(ABORT, 'validation allowance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_allowance_delete BEFORE DELETE ON validation_allowances
+ BEGIN SELECT RAISE(ABORT, 'validation allowance is immutable'); END;
 CREATE TABLE IF NOT EXISTS events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT REFERENCES requests(id),
  kind TEXT NOT NULL, at REAL NOT NULL, payload TEXT NOT NULL
@@ -146,7 +165,7 @@ class Ledger:
             if app_id not in {0, 0x414C4D50} or (tables and app_id == 0):
                 raise LedgerError("Refusing to modify a database owned by another application")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in {0, 1}:
+            if version not in {0, 1, 2}:
                 raise LedgerError("Unsupported ledger schema")
             statement = ""
             for line in SCHEMA.splitlines(keepends=True):
@@ -155,7 +174,7 @@ class Ledger:
                     db.execute(statement)
                     statement = ""
             db.execute("PRAGMA application_id=1095519568")
-            db.execute("PRAGMA user_version=1")
+            db.execute("PRAGMA user_version=2")
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
@@ -227,6 +246,92 @@ class Ledger:
             self._event(db, None, "evaluation_registered", {"evaluation": evaluation, "identity": json.loads(identity)})
         return evaluation
 
+    @staticmethod
+    def _policy(db, campaign):
+        row = db.execute('SELECT policy FROM campaign_policy_revisions WHERE campaign=? ORDER BY revision DESC LIMIT 1', (campaign,)).fetchone()
+        if row is None:
+            row = db.execute('SELECT policy FROM campaigns WHERE id=?', (campaign,)).fetchone()
+        if row is None:
+            raise LedgerError('Unknown campaign')
+        return json.loads(row[0])
+
+    def amend_campaign_policy(self, campaign: str, policy: Policy, *, expected_previous_sha256: str):
+        """Append an explicitly approved controller policy, preserving every attempt.
+
+        Approval evidence is retained outside the database and bound by the new
+        policy's approval_sha256. A stale or active campaign cannot be changed.
+        """
+        _digest(expected_previous_sha256)
+        with self._transaction() as db:
+            previous=self._policy(db,campaign)
+            if hashlib.sha256(_json(previous).encode()).hexdigest()!=expected_previous_sha256:
+                raise Conflict('Campaign policy changed; re-read the approved revision')
+            if policy.approval_sha256==previous['approval_sha256']:
+                raise Conflict('A policy amendment needs its own approval evidence')
+            rows=db.execute('SELECT r.* FROM requests r JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?',(campaign,)).fetchall()
+            if any(r['state'] in ACTIVE or (r['job_id'] and not r['accounted']) for r in rows):
+                raise Conflict('Reconcile all active or unaccounted requests before amendment')
+            if (sum(r['charge_core_seconds'] for r in rows)>policy.total_core_seconds or
+                    sum(r['charge_storage_bytes'] for r in rows)>policy.total_storage_bytes):
+                raise LimitExceeded('New policy cannot hide already charged resources')
+            revision=db.execute('SELECT COALESCE(MAX(revision),0)+1 FROM campaign_policy_revisions WHERE campaign=?',(campaign,)).fetchone()[0]
+            db.execute('INSERT INTO campaign_policy_revisions VALUES (?,?,?,?)',
+                       (campaign,revision,_json(asdict(policy)),expected_previous_sha256))
+            self._event(db,None,'campaign_policy_amended',{'campaign':campaign,'revision':revision,
+                'previous_sha256':expected_previous_sha256,'policy':asdict(policy)})
+
+    @staticmethod
+    def _attempt_allowance(db, evaluation):
+        allowance = db.execute('SELECT * FROM validation_allowances WHERE evaluation=?',
+                               (evaluation['id'],)).fetchone()
+        return (allowance['max_attempts'], allowance['stage']) if allowance else (evaluation['max_attempts'], 'standard')
+
+    def approve_week_one_third_attempt(self, evaluation: str, *, approval_sha256: str):
+        """Trusted controller only, after explicit user approval; never an Agent tool.
+
+        The digest identifies a retained approval record, not automatic authority.
+        Original identity, failures, resource policy and product limit stay intact.
+        """
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+            if ev is None or ev['max_attempts'] != 2 or json.loads(ev['identity'])['role'] not in {'reference', 'agent', 'development'}:
+                raise Conflict('Requires an existing two-attempt validation evaluation')
+            old = db.execute('SELECT * FROM validation_allowances WHERE evaluation=?', (evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256'] != approval_sha256:
+                    raise Conflict('Cannot replace validation approval')
+                return
+            db.execute('INSERT INTO validation_allowances VALUES (?,?,?,?)',
+                       (evaluation, 'week_one_validation', 3, approval_sha256))
+            self._event(db, None, 'week_one_third_attempt_approved',
+                        {'evaluation': evaluation, 'max_attempts': 3, 'product_max_attempts': 2,
+                         'approval_sha256': approval_sha256})
+
+    def settle_cancelled_preparation_storage(self, request_id: str, *, retained_bytes: int, evidence_sha256: str):
+        """Settle never-dispatched preparation from a verified retained-file inventory.
+
+        The controller must account all retained copies and stop further writes.
+        This does not delete files or change actual submitted-job accounting.
+        """
+        _digest(evidence_sha256)
+        if type(retained_bytes) is not int or retained_bytes < 0:
+            raise ValueError('Invalid retained storage')
+        payload = {'retained_bytes': retained_bytes, 'evidence_sha256': evidence_sha256}
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if row['state'] != 'cancelled_before_dispatch' or row['dispatch_claimed'] or row['job_id']:
+                raise Conflict('Only never-dispatched cancelled preparation can settle storage')
+            old = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='preparation_storage_settled'", (request_id,)).fetchone()
+            if old:
+                if json.loads(old['payload']) != payload:
+                    raise Conflict('Cannot change settled preparation storage')
+                return
+            if retained_bytes > row['charge_storage_bytes']:
+                raise LimitExceeded('Retained storage exceeds its reservation')
+            db.execute('UPDATE requests SET charge_storage_bytes=? WHERE id=?', (retained_bytes, request_id))
+            self._event(db, request_id, 'preparation_storage_settled', payload)
+
     def reserve(self, evaluation: str, idempotency_key: str, manifest_sha256: str, resources: Resources):
         _identifier(idempotency_key)
         _digest(manifest_sha256)
@@ -241,7 +346,7 @@ class Ledger:
             ev = db.execute("SELECT * FROM evaluations WHERE id=?", (evaluation,)).fetchone()
             if not ev:
                 raise LedgerError("Unregistered evaluation")
-            policy = json.loads(db.execute("SELECT policy FROM campaigns WHERE id=?", (ev["campaign"],)).fetchone()[0])
+            policy = self._policy(db, ev["campaign"])
             if (resources.cores > policy["max_cores"] or resources.wall_seconds > policy["max_wall_seconds"]
                     or resources.memory_bytes > policy["max_memory_bytes"]):
                 raise LimitExceeded("Per-job resources exceed approved limits")
@@ -252,7 +357,8 @@ class Ledger:
             own = [r for r in all_rows if r["evaluation"] == evaluation]
             if any(r["state"] in ACTIVE for r in own):
                 raise Conflict("Existing evaluation request must finish or be reconciled first")
-            if sum(r["dispatch_claimed"] or r["state"] == "prepared" for r in own) >= ev["max_attempts"]:
+            max_attempts, _ = self._attempt_allowance(db, ev)
+            if sum(r["dispatch_claimed"] or r["state"] == "prepared" for r in own) >= max_attempts:
                 raise LimitExceeded("Evaluation submission allowance exhausted")
             if sum(r["state"] in ACTIVE for r in all_rows) >= policy["concurrency"]:
                 raise LimitExceeded("Campaign concurrency exhausted")
@@ -277,7 +383,7 @@ class Ledger:
             # Accounting or an unexpected scheduler restart may have exhausted a
             # shared budget since reservation. Never dispatch a stale reservation.
             campaign = db.execute("SELECT campaign FROM evaluations WHERE id=?", (row["evaluation"],)).fetchone()[0]
-            policy = json.loads(db.execute("SELECT policy FROM campaigns WHERE id=?", (campaign,)).fetchone()[0])
+            policy = self._policy(db, campaign)
             rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
                               (campaign,)).fetchall()
             if any(r["state"] == "reconcile_required" for r in rows):
@@ -441,7 +547,7 @@ class Ledger:
             if row['state'] not in JOB_TERMINAL or not row['accounted'] or not row['job_id']:
                 raise Conflict('Output collection requires terminal, accounted scheduler evidence')
             campaign = db.execute('SELECT campaign FROM evaluations WHERE id=?', (row['evaluation'],)).fetchone()[0]
-            policy = json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?', (campaign,)).fetchone()[0])
+            policy = self._policy(db, campaign)
             rows = db.execute('SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?',
                               (campaign,)).fetchall()
             if any(r['state'] == 'reconcile_required' for r in rows):
@@ -500,7 +606,7 @@ class Ledger:
             for saved in previous:
                 if saved['analysis_id']==analysis_id:return saved
             campaign=db.execute('SELECT campaign FROM evaluations WHERE id=?',(row['evaluation'],)).fetchone()[0]
-            policy=json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?',(campaign,)).fetchone()[0])
+            policy=self._policy(db, campaign)
             rows=db.execute('SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?',
                             (campaign,)).fetchall()
             if any(r['state']=='reconcile_required' for r in rows):
@@ -544,9 +650,12 @@ class Ledger:
                     'SELECT seq,kind,at FROM events WHERE request_id=? ORDER BY seq', (request['id'],))]
                 requests.append({key: request[key] for key in ('id','state','job_id','dispatch_claimed',
                     'accounted','actual_core_seconds','charge_core_seconds')} | {'events': events})
-            return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=row['max_attempts'],
+            maximum, scope = self._attempt_allowance(db, row)
+            used = sum(r['dispatch_claimed'] or r['state']=='prepared' for r in requests)
+            return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=maximum,
+                        original_max_attempts=row['max_attempts'], attempt_scope=scope,
                         reserved_attempts=len(requests), dispatch_claims=sum(r['dispatch_claimed'] for r in requests),
-                        remaining_attempts=max(0,row['max_attempts']-len(requests)), requests=requests)
+                        remaining_attempts=max(0,maximum-used), requests=requests)
         finally:
             db.close()
 
@@ -575,7 +684,9 @@ class Ledger:
                                                      (request['id'],))]
                     if len(events)>2000:raise LedgerError('Event history requires pagination')
                     rows.append(dict(request)|{'events':events})
-                result.append(dict(id=evaluation['id'],max_attempts=evaluation['max_attempts'],requests=rows))
+                maximum, scope = self._attempt_allowance(db, evaluation)
+                result.append(dict(id=evaluation['id'],max_attempts=maximum,
+                                   original_max_attempts=evaluation['max_attempts'],attempt_scope=scope,requests=rows))
             return result
         finally:db.close()
 
@@ -610,7 +721,7 @@ class Ledger:
             if len(polls)>=policy['max_polls']:raise LimitExceeded('Following poll allowance exhausted')
             if polls and time.time()<polls[-1]['at']+policy['interval_seconds']:return False
             campaign=db.execute('SELECT campaign FROM evaluations WHERE id=?',(row['evaluation'],)).fetchone()[0]
-            budget=json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?',(campaign,)).fetchone()[0])
+            budget=self._policy(db, campaign)
             used=db.execute('SELECT sum(r.charge_storage_bytes) FROM requests r JOIN evaluations e ON r.evaluation=e.id '
                             'WHERE e.campaign=?',(campaign,)).fetchone()[0]
             if used+policy['poll_storage_bytes']>budget['total_storage_bytes']:
@@ -741,10 +852,7 @@ class Ledger:
 
     def summary(self, campaign: str):
         with self._transaction() as db:
-            found = db.execute("SELECT policy FROM campaigns WHERE id=?", (campaign,)).fetchone()
-            if not found:
-                raise LedgerError("Unknown campaign")
-            policy = json.loads(found[0])
+            policy = self._policy(db, campaign)
             rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
                               (campaign,)).fetchall()
             charged = sum(r["charge_core_seconds"] for r in rows)

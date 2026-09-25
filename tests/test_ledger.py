@@ -1,6 +1,8 @@
 """Synthetic accounting tests. No SSH, LAMMPS or model requests."""
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import replace, asdict
+import hashlib
+import json
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -102,6 +104,81 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             same.register_evaluation('campaign', task_sha256=H1, repetition=0,
                                      role='agent', system_sha256=H2, max_attempts=1)
+
+    def test_explicit_week_one_allowance_preserves_attempts_and_standard_limit(self):
+        first=self.rejected_attempt('first')
+        second=self.rejected_attempt('second')
+        with self.assertRaises(LimitExceeded): self.reserve('third')
+        self.ledger.approve_week_one_third_attempt(self.evaluation,approval_sha256=H3)
+        fresh=Ledger(self.path)
+        snapshot=fresh.evaluation_snapshot(self.evaluation)
+        self.assertEqual((snapshot['max_attempts'],snapshot['remaining_attempts'],snapshot['dispatch_claims']),(3,1,2))
+        self.assertEqual(snapshot['attempt_scope'],'week_one_validation')
+        self.assertEqual(snapshot['original_max_attempts'],2)
+        self.assertEqual([r['id'] for r in snapshot['requests']],[first['id'],second['id']])
+        fresh.approve_week_one_third_attempt(self.evaluation,approval_sha256=H3)
+        with self.assertRaises(Conflict): fresh.approve_week_one_third_attempt(self.evaluation,approval_sha256=H2)
+        third=self.rejected_attempt('third')
+        with self.assertRaises(LimitExceeded): self.reserve('fourth')
+        ordinary=self.register(repetition=1)
+        self.assertEqual(fresh.evaluation_snapshot(ordinary)['max_attempts'],2)
+        self.assertEqual(fresh.get(third['id'])['state'],'rejected')
+
+    def test_validation_allowance_does_not_expand_resources(self):
+        self.ledger.approve_week_one_third_attempt(self.evaluation,approval_sha256=H3)
+        with self.assertRaises(LimitExceeded): self.reserve(resources=replace(RESOURCE,cores=9))
+        with self.assertRaises(LimitExceeded): self.reserve(resources=replace(RESOURCE,storage_bytes=10001))
+
+    def test_approved_resource_amendment_preserves_identity_and_cost(self):
+        original=hashlib.sha256(json.dumps(asdict(POLICY),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        row=self.accepted_job()
+        updated=replace(POLICY,max_cores=32,total_core_seconds=2000,approval_sha256=H3)
+        with self.assertRaises(Conflict):
+            self.ledger.amend_campaign_policy('campaign',updated,expected_previous_sha256=original)
+        self.ledger.observe(row['id'],'101','completed',{'synthetic':True})
+        self.ledger.account(row['id'],20,H1)
+        self.ledger.amend_campaign_policy('campaign',updated,expected_previous_sha256=original)
+        fresh=Ledger(self.path)
+        self.assertEqual(fresh.summary('campaign')['accounted_core_seconds'],20)
+        self.assertEqual(fresh.evaluation_snapshot(self.evaluation)['dispatch_claims'],1)
+        self.assertEqual(fresh.evaluation_snapshot(self.evaluation)['max_attempts'],2)
+        next_row=fresh.reserve(self.evaluation,'second',H2,replace(RESOURCE,cores=32))
+        self.assertEqual(next_row['charge_core_seconds'],320)
+        with self.assertRaises(Conflict):
+            fresh.amend_campaign_policy('campaign',updated,expected_previous_sha256=original)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(json.loads(db.execute('SELECT policy FROM campaigns WHERE id=?',('campaign',)).fetchone()[0]),asdict(POLICY))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('DELETE FROM campaign_policy_revisions')
+
+    def test_resource_amendment_cannot_hide_prior_charges(self):
+        row=self.accepted_job()
+        self.ledger.observe(row['id'],'101','failed',{'synthetic':True})
+        self.ledger.account(row['id'],20,H1)
+        original=hashlib.sha256(json.dumps(asdict(POLICY),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        with self.assertRaises(LimitExceeded):
+            self.ledger.amend_campaign_policy('campaign',replace(POLICY,total_core_seconds=19,approval_sha256=H3),expected_previous_sha256=original)
+
+    def test_cancelled_preparation_storage_settlement_preserves_history(self):
+        row=self.reserve()
+        with self.assertRaises(Conflict):
+            self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=10,evidence_sha256=H3)
+        self.ledger.cancel_intent(row['id'])
+        with self.assertRaises(LimitExceeded):
+            self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=101,evidence_sha256=H3)
+        self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=10,evidence_sha256=H3)
+        self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=10,evidence_sha256=H3)
+        with self.assertRaises(Conflict):
+            self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=0,evidence_sha256=H3)
+        state=self.ledger.get(row['id'])
+        self.assertEqual((state['charge_storage_bytes'],state['state'],state['dispatch_claimed']),(10,'cancelled_before_dispatch',0))
+        self.assertIn('reserved',[e['kind'] for e in self.ledger.events(row['id'])])
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['remaining_attempts'],2)
+
+    def test_dispatched_failure_cannot_use_preparation_storage_settlement(self):
+        row=self.rejected_attempt('first')
+        with self.assertRaises(Conflict):
+            self.ledger.settle_cancelled_preparation_storage(row['id'],retained_bytes=0,evidence_sha256=H3)
 
     def test_cannot_modify_unrelated_database(self):
         other = Path(self.tmp.name) / 'other.sqlite'

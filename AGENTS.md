@@ -36,6 +36,12 @@
 - Do not submit until scope, resource/API limits and scoring rules are approved.
 - Maximum two submissions per formal evaluation; uncertain submission means
   reconcile first. The second attempt cannot see target answers or score differences.
+- Latest first-week exception: explicit user approval permits three P-A-B validation
+  submissions with existing failures counted; final product stays at two and R2
+  excludes third-attempt successes. Reference A uses 32 cores with no user-imposed
+  time limit (respect cluster limits). After complete A, its elapsed hours b sets
+  B's cumulative core-hour ceiling to 32*b+b*b; queue time is excluded. Record
+  policy amendments without changing identities, old charges or submission history.
 - Separate scheduler completion, output validity and scientific success.
 - Week one: Codex is responsible for the real P-A-B workflow validation. Before B, report the strategy and wait for user confirmation. After the first validation succeeds, request API configuration for week two. From week two onward, model runtime uses the separately configured API. Record Codex-assisted validation separately from API automation acceptance.
 - No copying existing code until provenance and license obligations are checked.
