@@ -1,6 +1,18 @@
 # Development rules
 
 - Read README.md and docs/PROGRESS.md, then only the relevant specification.
+- Reconcile the current audit and private execution checkpoint with the latest user
+  instructions. Historical blockers must not override later resolved decisions.
+- Use docs/RELIABILITY.md when changing adapters, retrieval or failure recovery;
+  distinguish proposed knowledge from verified experience and protect test answers.
+- Reuse verified existing HPC software and prior audit evidence before proposing
+  downloads or builds. A missing package in one module is not evidence that the
+  cluster lacks a compatible engine. The user has explicitly accepted the existing
+  compatible engine for the selected author reference run; do not repeat that
+  compatibility decision or make the optional build PR a prerequisite for A.
+- Prioritize the original author workflow for A. Repeat checks only for changed
+  inputs, a real failure, or a specific unresolved condition. Preparation, help
+  output and passing software tests are not a submitted or completed simulation.
 - Reply briefly in Chinese; give pronunciation for key English terms when useful.
 - All changes after initialization use an Issue, branch, PR, CI and authorized review.
 - Preserve source history and failure records. Never force push or alter another project.
