@@ -1,6 +1,27 @@
 # Development rules
 
+- For this project, read the locally installed `auto-lammps-stage-guide` skill at
+  `~/.codex/skills/auto-lammps-stage-guide/SKILL.md`. It routes current norms and
+  recorded lessons; it adds no approval gate. Reopen both final-expectation images
+  as required below, then resume the current user task instead of expanding setup.
+- Prioritize end-to-end automation and the researcher's ability to complete a task.
+  Audit and reuse available assets before building replacements or asking the user:
+  literature workbench, Zotero PDFs, public supplements/source/potentials, installed
+  HPC software, existing analysis and mature visualization tools. Retrieve obtainable
+  resources within existing authorization; ask only about genuine unresolved needs.
 - Read README.md and docs/PROGRESS.md, then only the relevant specification.
+- Reconcile the current audit and private execution checkpoint with the latest user
+  instructions. Historical blockers must not override later resolved decisions.
+- Use docs/RELIABILITY.md when changing adapters, retrieval or failure recovery;
+  distinguish proposed knowledge from verified experience and protect test answers.
+- Reuse verified existing HPC software and prior audit evidence before proposing
+  downloads or builds. A missing package in one module is not evidence that the
+  cluster lacks a compatible engine. The user has explicitly accepted the existing
+  compatible engine for the selected author reference run; do not repeat that
+  compatibility decision or make the optional build PR a prerequisite for A.
+- Prioritize the original author workflow for A. Repeat checks only for changed
+  inputs, a real failure, or a specific unresolved condition. Preparation, help
+  output and passing software tests are not a submitted or completed simulation.
 - Reply briefly in Chinese; give pronunciation for key English terms when useful.
 - All changes after initialization use an Issue, branch, PR, CI and authorized review.
 - Preserve source history and failure records. Never force push or alter another project.
