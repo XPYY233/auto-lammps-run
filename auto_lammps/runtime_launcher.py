@@ -150,11 +150,18 @@ def duration(value):
 
 
 def parse_allocation(text, *, request_id, manifest_sha256, job_id, uid, host, resources):
+    # scontrol -o is one record, not one whitespace token per field: SubmitLine
+    # and other descriptive values can contain spaces. Split at key boundaries;
+    # duplicate keys still fail rather than letting a value override identity.
+    record = text.strip()
+    boundaries = list(re.finditer(r'(?:^|\s)([A-Za-z][A-Za-z0-9_:/]*)=', record))
+    if not boundaries or boundaries[0].start() != 0 or '\n' in record or '\r' in record:
+        raise ExecutionDenied('Ambiguous scheduler record')
     fields = {}
-    for part in text.strip().split():
-        if '=' not in part:
-            raise ExecutionDenied('Ambiguous scheduler record')
-        key,value = part.split('=',1)
+    for index, boundary in enumerate(boundaries):
+        key = boundary[1]
+        end = boundaries[index+1].start() if index+1 < len(boundaries) else len(record)
+        value = record[boundary.end():end].strip()
         if key in fields:
             raise ExecutionDenied('Duplicate scheduler field')
         fields[key]=value
