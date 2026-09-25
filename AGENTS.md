@@ -1,5 +1,14 @@
 # Development rules
 
+- For this project, read the locally installed `auto-lammps-stage-guide` skill at
+  `~/.codex/skills/auto-lammps-stage-guide/SKILL.md`. It routes current norms and
+  recorded lessons; it adds no approval gate. Reopen both final-expectation images
+  as required below, then resume the current user task instead of expanding setup.
+- Prioritize end-to-end automation and the researcher's ability to complete a task.
+  Audit and reuse available assets before building replacements or asking the user:
+  literature workbench, Zotero PDFs, public supplements/source/potentials, installed
+  HPC software, existing analysis and mature visualization tools. Retrieve obtainable
+  resources within existing authorization; ask only about genuine unresolved needs.
 - Read README.md and docs/PROGRESS.md, then only the relevant specification.
 - Reconcile the current audit and private execution checkpoint with the latest user
   instructions. Historical blockers must not override later resolved decisions.
