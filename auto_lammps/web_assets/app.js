@@ -5,7 +5,7 @@ const statuses = {missing:'缺失',unselected:'待选择',conflict:'有矛盾',p
 let schema, current = null, editing = null, resolving = null, busy = false;
 let literaturePreview = null;
 let paperFilter='all';
-let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null;
+let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
 let candidateState=null, candidateTask=null, candidatePolling=false;
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
 const literatureColumns = {material:'材料',conditions:'条件',conditions_text:'条件说明'};
@@ -808,9 +808,12 @@ function renderWorkspaceResults(){
  }
 }
 async function refreshWorkspace(){
- if(!current)return;const id=current.id;workspaceReport=null;rawResult=null;renderFlow(null);renderWorkspaceResults();
+ if(!current)return;const id=current.id;workspaceReport=null;rawResult=null;executionState=null;renderFlow(null);renderWorkspaceResults();
  try{const result=await api(`/api/tasks/${id}/reference-result`);if(current?.id!==id)return;workspaceReport=result.report;}catch(error){if(current?.id===id)notice('参考报告暂不可核验，未显示旧数值。',true);}
- if(current?.id!==id)return;const r=workspaceReport;
+ if(current?.id!==id)return;
+ try{const state=await api(`/api/tasks/${id}/execution`);if(current?.id!==id)return;executionState=state;}
+ catch(error){executionState={job:null,message:'执行状态暂不可核验。'};}
+ const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
  if(r){$('#task-status').textContent='A 已结束 · B '+bState(r);$('#task-meta').textContent='文献复现验证 · '+r.scope;for(const label of ['作者原始流程','P–A 诊断已保存','科学结论待核验'])$('#task-tags').append(node('span',label,'tag'));}
@@ -831,8 +834,30 @@ async function refreshWorkspace(){
   for(const f of new Map(currentRawFiles().map(f=>[f.request_id,f])).values())addInfo('作业 '+f.job_id,requestStates[f.state]||f.state);
   $('#execution-flow').replaceChildren(node('h2','计算记录'),node('p','原始输出已回收，可下载查看。完整执行阶段及分析报告尚未接入。','flow-note'));
  }
- renderWorkspaceResults();
+ renderExecutionControls();renderWorkspaceResults();
  if(!$('.discussion-panel').hidden)await refreshDiscussion();
+}
+function renderExecutionControls(){
+ if(workspaceReport||!executionState)return;
+ const box=$('#execution-flow'),job=executionState.job;
+ if(job){
+  box.replaceChildren(node('h2','任务执行流程'),node('p',job.label,'flow-note'));
+  $('#task-status').textContent=job.label;
+  $('#task-information').replaceChildren();addInfo('执行状态',job.label);addInfo('提交次数',`${job.dispatch_count} / ${job.max_attempts}`);
+  if(job.job_id)addInfo('作业号',job.job_id);
+  addInfo('资源核算',job.accounted?'已核算':'待核算');addInfo('科学结论','尚未核验');
+  if(!executionState.worker_alive&&['queued','running','waiting'].includes(job.state))box.append(node('p','后台当前未运行；恢复服务后继续已有请求，不会重复提交。','form-note'));
+  if(job.state==='attention')box.append(node('p',job.reason==='deployment_file_missing'?'执行所需的部署文件尚未就绪，记录已保留。':job.reason==='deployment_changed'?'执行配置发生变化，需要核对后恢复。':'执行检查未通过，记录已保留；不会自动重提计算。','form-note'));
+  const details=node('details');details.append(node('summary','执行历史'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
+ }else{
+  if(executionState.can_start){
+   box.replaceChildren(node('h2','计算方案已准备'),node('p','开始后将核对执行许可，自动提交、跟进和处理结果。','flow-note'));
+   $('#task-status').textContent='方案已准备';$('#task-information').replaceChildren();addInfo('执行状态','等待开始');
+   if(executionState.submissions)addInfo('提交次数',`${executionState.submissions.count} / ${executionState.submissions.maximum}`);
+  }
+  box.append(node('p',executionState.message||'计算服务状态待核对。','form-note'));
+  if(executionState.can_start){const button=node('button','开始计算','primary');button.onclick=()=>action(async()=>{const id=current.id;button.disabled=true;await api(`/api/tasks/${id}/execution`,{revision:current.revision});if(current?.id===id){await refreshResults();await refreshWorkspace();}});box.append(button);}
+ }
 }
 let hpcState=null;
 async function openHPC(){hpcState=await api('/api/hpc-connection');const p=hpcState.profile||{};for(const [id,key] of Object.entries({'hpc-label':'label','hpc-host':'host','hpc-user':'username','hpc-work':'work_directory','hpc-partition':'partition','hpc-account':'account'}))$('#'+id).value=p[key]||'';$('#hpc-port').value=p.port||22;$('#hpc-auth').value=p.authentication||'agent';clearHPCSecrets();$('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';$('#hpc-dialog .dialog-error').hidden=true;$('#check-hpc').disabled=!hpcState.configured;$('#hpc-status').textContent=hpcState.configured?'连接已保存；SSH 检查仅验证登录，计算环境与自动提交另行验证。':'填写你自己的计算连接。应用不预设其他用户的超算地址。';$('#hpc-dialog').showModal();}
@@ -894,4 +919,4 @@ function renderPlotGallery(report,box){
 }
 async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(node('strong',m.question),node('p',m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'请先保存模型连接。发送后会保留问题、答复和模型用量；当前助手可解读结果，不能执行新的计算或任意分析代码。':'结果助手尚未启用。可先下载数据或配置模型。';}
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
-setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshWorkspace();});},30000);
+setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);

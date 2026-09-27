@@ -177,7 +177,18 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None):
+    if execution_jobs:
+        if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
+        controller=execution_jobs.controller
+        if results_reader is None:
+            results_reader=ResultsReader(store,execution_jobs.ledger,controller.following.analysis.collector.directory,controller.following.analysis.directory)
+        elif (results_reader.ledger.path!=execution_jobs.ledger.path or
+              results_reader.collections!=controller.following.analysis.collector.directory or
+              results_reader.reports!=controller.following.analysis.directory):
+            raise ValueError('Execution and results must share the ledger and artifact directories')
+        if candidate_service and candidate_service.snapshots!=controller.snapshots:
+            raise ValueError('Candidate and execution services must share snapshots')
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
@@ -196,9 +207,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     async def lifespan(app):
         if candidate_service:
             candidate_service.start()
+        if execution_jobs:execution_jobs.start()
         try:
             yield
         finally:
+            if execution_jobs:execution_jobs.close()
             if candidate_service:
                 candidate_service.close()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -451,6 +464,22 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         preparation = preparations.reconcile(identifier)
         return {'events': store.history(identifier), 'preparation_events': preparation['events'] if preparation else []}
 
+    @app.get('/api/tasks/{identifier}/execution')
+    def execution_status(identifier: str):
+        store.get(identifier)
+        if execution_jobs is None:
+            return dict(configured=False,worker_alive=False,can_start=False,job=None,message='自动执行服务尚未接入，任务已保存。')
+        return execution_jobs.status(identifier)
+
+    @app.post('/api/tasks/{identifier}/execution',status_code=202)
+    def execution_start(identifier: str,data: Revision):
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        from .ledger import LedgerError
+        try:return execution_jobs.enqueue(identifier,data.revision)
+        except (ValueError,OSError,LedgerError,runtime_denied):
+            return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
+
     @app.get('/api/tasks/{identifier}/candidate')
     def candidate_get(identifier: str):
         return {'candidate': preparations.reconcile(identifier), 'downloads_enabled': candidate_service is not None}
@@ -513,12 +542,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Local task conditions; no simulation or model execution.')
+    parser = argparse.ArgumentParser(description='Local research workspace with explicitly configured model and execution services.')
     parser.add_argument('--data-directory', required=True)
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
+    parser.add_argument('--ledger', help='Existing private ledger shared by execution and operator history')
     parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
     parser.add_argument('--reference-model-ledger', help='Explicit existing reference-side model policy; no automatic enablement')
+    parser.add_argument('--execution-config',type=Path,help='Private deployment with fixed task/evaluation bindings and existing grants')
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
@@ -560,12 +590,19 @@ def main():
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
                     snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
+    execution_jobs=None
+    if args.execution_config:
+        if ledger is None:parser.error('Execution requires an existing ledger')
+        from .execution_jobs import load_execution_jobs
+        execution_jobs=load_execution_jobs(store,ledger,args.execution_config)
+        if candidate_service and candidate_service.snapshots!=execution_jobs.controller.snapshots:
+            parser.error('Candidate and execution services must share snapshots')
     papers=PaperStore(store,ledger=ledger)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory), host='127.0.0.1', port=args.port,
+                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

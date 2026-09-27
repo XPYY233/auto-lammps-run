@@ -61,3 +61,29 @@ authorization, environment, runtime_profile_path=...)`，其中工具与路径�
 覆盖缺许可、错误批准身份/资源/输出/脚本、上传时过期、上传未知不重传、派发未知不重提、
 任务身份与角色不符、输入变化、提交前取消、完成后许可过期仍可读取状态，以及不可替换的
 授权摘要。重复执行完整合成链路保持一次模型替身调用、一次派发和一次下载。
+
+## 网页与持久执行队列（Issue #95）
+
+网页新增任务级 execution 状态与发起入口，仅接受当前任务版本。ExecutionJobs 将已准备
+候选绑定到控制端指定的既有评测，保存不可变意图及追加历史；浏览器不能指定评测、路径、
+许可或尝试键。队列复用 CandidateExecution 的许可核验、一次性上传/提交和 FollowingService。
+重复点击沿用同一队列记录和请求；进程中断后按账本恢复，提交已发生时只对账。
+跨进程文件锁保护同一队列步骤。部署身份变化、许可缺失或检查异常保存待核对，不自动重试。
+这些状态不会通过重新点击或重启被清除；后续受信恢复界面尚未实现。
+
+网页服务的后台线程持续推进任务，关闭浏览器不影响执行。服务自身停止时暂停跟进；监督
+服务重启后扫描原队列。worker_alive 来自当前线程存活检查，不从“运行中”字符串推断。
+网页进程不应运行在休眠电脑上作为长期集群服务；停止它不取消远端作业。
+
+使用 `--execution-config` 加载 Git 外、仅本人可读的部署配置，同时指定已有 `--ledger`。
+配置精确字段为：snapshots_directory、collections_directory、reports_directory、audit_directory、
+stage_endpoint、submit_endpoint、collect_endpoint、environment、authorization、runtime_profile_path、
+max_polls、interval_seconds、query_max_bytes、task_evaluations。
+三个 endpoint 沿用 StageEndpoint；environment 沿用 BatchEnvironment；authorization 为
+ExistingAuthorization 的 directory 和固定 pins；task_evaluations 是控制端给出的任务 ID 到
+既有评测 ID 映射。装载不签发许可、不请求远端；状态读取不预留计算或提交。结果读取和
+原始下载自动共享同一账本和产物目录，拒绝不一致的候选目录或结果配置。
+
+此入口仅补上“已准备且已绑定部署的方案到结果”。科学条件自动整理/确认、自动许可
+签发与安装、用户自定义 HPC 连接的能力发现和执行部署、第二版修复候选仍未完成；不能
+将本入口或合成全链路验收宣称为普通用户从空白需求到科学结果的完整自动化。
