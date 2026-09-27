@@ -9,3 +9,9 @@ Principles: distinguish loading, empty, error and retained evidence; distinguish
 First delivery fixes result-refresh consistency and existing-result readability. The complete figure-target selection workflow and scientific structure/trajectory viewing remain separate unfinished items, not implied by these styles.
 
 Potential resources are grouped by verified binding, element selection and exact companion file set. The file-level names, source links and hashes remain in details; missing companions are never reported as ready.
+
+## User visual correction
+
+The first implementation overused blue, white and gray, creating visual fatigue. Keep blue for primary actions and selection; introduce teal for result surfaces, violet for resource/analysis groups and warm amber for pending attention. These are navigation/content categories, never scientific success claims. Green/red state labels remain evidence-driven and always include text. Use low-saturation tinted surfaces and colored line icons rather than assigning random colors to whole cards.
+
+Additional tokens: teal #087F8C / #E9F7F5, violet #7356B8 / #F2EEFB, amber #A86B16 / #FFF5E5. White data surfaces keep chart/table readability; alternate section tint and icon grounds establish distinct areas.
