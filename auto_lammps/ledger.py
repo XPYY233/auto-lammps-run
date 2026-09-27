@@ -570,6 +570,28 @@ class Ledger:
         with self._transaction() as db:
             return self._request(db, request_id)
 
+    def reserve_raw_export(self, request_id, export_sha256, storage_bytes):
+        """Retain storage for an operator raw-output copy; no new computation."""
+        _digest(export_sha256)
+        if type(storage_bytes) is not int or storage_bytes<=0: raise ValueError('Invalid export storage')
+        with self._transaction() as db:
+            row=self._request(db,request_id)
+            if row['state'] not in JOB_TERMINAL or not row['accounted']: raise Conflict('Export requires accounted terminal job')
+            for event in db.execute("SELECT payload FROM events WHERE request_id=? AND kind='raw_export_reserved'",(request_id,)):
+                old=json.loads(event['payload'])
+                if old['export_sha256']==export_sha256:
+                    if old['storage_bytes']!=storage_bytes: raise Conflict('Export reservation changed')
+                    return old
+            campaign=db.execute('SELECT campaign FROM evaluations WHERE id=?',(row['evaluation'],)).fetchone()[0]
+            policy=self._policy(db,campaign)
+            rows=db.execute('SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?',(campaign,)).fetchall()
+            if any(r['state']=='reconcile_required' for r in rows): raise Conflict('Unresolved scheduler conflict')
+            if sum(r['charge_storage_bytes'] for r in rows)+storage_bytes>policy['total_storage_bytes']: raise LimitExceeded('Export storage unavailable')
+            proof=dict(export_sha256=export_sha256,storage_bytes=storage_bytes)
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+? WHERE id=?',(storage_bytes,request_id))
+            self._event(db,request_id,'raw_export_reserved',proof)
+            return proof
+
     def begin_output_fetch(self, request_id: str):
         """Reserve another local copy, including failed partial transfers.
 

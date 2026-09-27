@@ -1,6 +1,6 @@
 """Loopback task application with optional, administrator-configured NLP.
 
-The browser can save operator model connections, but cannot configure scheduler access.
+The browser can save operator model connections, and versioned HPC settings. Existing job connections stay fixed.
 """
 import argparse
 from contextlib import asynccontextmanager
@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, SecretStr
 from fastapi.exceptions import RequestValidationError
 
@@ -25,6 +25,8 @@ from .agent_candidates import CandidateError
 from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .model_connections import ModelConnections
+from .hpc_connections import HPCConnections
+from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
 
 ASSETS = Path(__file__).parent/'web_assets'
@@ -156,11 +158,31 @@ class DiscussionInput(ProviderInput):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class HPCInput(Input):
+    revision: StrictInt = Field(ge=0)
+    label: str
+    host: str
+    port: StrictInt = Field(ge=1,le=65535)
+    username: str
+    work_directory: str
+    partition: str = ''
+    account: str = ''
+    authentication: str
+    private_key: SecretStr | None = None
+    known_hosts: SecretStr | None = None
+    certificate: SecretStr | None = None
+
+class HPCCheckInput(Input):
+    revision: StrictInt = Field(ge=1)
+
+
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None):
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
+    hpc = hpc_connections or HPCConnections(store)
+    raw_outputs = RawOutputs(store,papers)
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -241,6 +263,38 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.post('/api/model-connections/models')
     def connection_models(data: ProviderInput):
         return connections.list_models(data.provider)
+
+    @app.get('/api/hpc-connection')
+    def hpc_status():
+        return hpc.status()
+
+    @app.post('/api/hpc-connection')
+    def save_hpc(data: HPCInput):
+        value=data.model_dump(exclude={'revision','private_key','known_hosts','certificate'})
+        return hpc.save(value,data.revision,**{k:(getattr(data,k).get_secret_value() if getattr(data,k) is not None else None) for k in ('private_key','known_hosts','certificate')})
+
+    @app.post('/api/hpc-connection/check')
+    def check_hpc(data: HPCCheckInput):
+        return hpc.check(data.revision)
+
+    @app.get('/api/tasks/{identifier}/raw-files')
+    def raw_files(identifier: str):
+        try:return raw_outputs.listing(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'原始输出记录暂不可核验。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/raw-files/{file_id}')
+    def raw_file(identifier: str,file_id: str):
+        try:name,size,stream=raw_outputs.download(identifier,file_id)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'原始文件或所属计算未通过核验。'},status_code=409)
+        def chunks():
+            try:
+                while data:=stream.read(1024*1024):yield data
+            finally:stream.close()
+        from starlette.background import BackgroundTask
+        return StreamingResponse(chunks(),media_type='application/octet-stream',background=BackgroundTask(stream.close),
+            headers={'Content-Disposition':'attachment; filename="'+name+'"','Content-Length':str(size)})
 
     @app.get('/api/tasks/{identifier}/discussion')
     def discussion_history(identifier: str):

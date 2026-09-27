@@ -94,3 +94,17 @@ Then reconcile the roadmap with the latest user corrections, which take preceden
 Use this check to choose the next action; do not repeat the entire roadmap to the user each turn.
 
 Homepage natural-language input also provides a clickable route to the guided new-task page. Model settings require a specific model ID and secure API-key entry. Results offer multiple evidence-backed plots, downloads and a follow-up natural-language analysis window. Runtime AI selects analyses/plots from the research request and real data, not a hardcoded paper figure list. Background job monitoring must survive a closed browser and retain state; do not equate a Codex heartbeat with the final product service.
+
+## Shared-directory collaboration
+
+The user-designated deepseek-harness owns source/potential discovery; follow
+`docs/HARNESS_COLLABORATION.md`. Coordinate file ownership before code changes.
+Do not switch a shared checkout branch, stage another worker's files or revert
+unrelated changes. Use separate worktrees for independent simultaneous code work.
+Keep discovered author solutions and targets out of the active B context.
+
+Before starting a new paper's P–A–B preparation, consult the existing resource
+catalog and harness handoff. Require a matched LAMMPS workflow and its complete
+potential files/parameters first; preserve missing-resource candidates without
+starting A. Bundle completeness is not scientific reference validation. Do not
+repeat already verified discovery at unchanged versions.

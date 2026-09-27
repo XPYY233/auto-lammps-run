@@ -12,7 +12,7 @@ STATES={'prepared':'尚未提交','dispatching':'正在提交','unknown':'提交
         'queued':'排队中','running':'计算中','cancelling':'正在取消','completed':'计算已结束',
         'failed':'计算失败','cancelled':'已取消','timeout':'计算超时','rejected':'提交被拒绝',
         'cancelled_before_dispatch':'提交前已取消','reconcile_required':'记录存在矛盾 · 待核对'}
-EVENTS={'reserved':'预留计算资源','dispatch_intent':'发起计算提交','scheduler_accepted':'收到作业编号',
+EVENTS={'raw_export_reserved':'保留原始输出下载空间','reserved':'预留计算资源','dispatch_intent':'发起计算提交','scheduler_accepted':'收到作业编号',
         'scheduler_observed':'更新计算状态','accounting_final':'完成资源核算','dispatch_unknown':'提交状态待核对',
         'scheduler_rejected':'提交被拒绝','upload_intent':'开始传送输入','inputs_staged':'输入传送完成',
         'upload_failed':'输入传送未完成','output_fetch_started':'开始回收结果','output_fetch_finished':'保存回收记录',
