@@ -393,7 +393,9 @@ async function refreshCandidate() {
   const {candidate,downloads_enabled}=await api(`/api/tasks/${id}/candidate`);
   if(current?.id!==id || $('#task-view').hidden) return;
   candidateState=candidate?.state || null; candidateTask=id;
-  const available=schema.candidate_preparation || {enabled:false,reason:'方案准备服务尚未配置。'};
+  const automatic=schema.automatic_workflow?.configured;
+  const available=(automatic?schema.automatic_workflow:schema.candidate_preparation) || {enabled:false,reason:'方案准备服务尚未配置。'};
+  $('#prepare-candidate').textContent=automatic?'开始自动计算':'准备计算方案';
   $('#prepare-candidate').hidden=!!candidate || current.mode!=='research';
   $('#prepare-candidate').disabled=!available.enabled;
   $('#candidate-stage').textContent=candidate?.label || '尚未准备方案';
@@ -401,6 +403,7 @@ async function refreshCandidate() {
     current.mode==='reproduction' ? '文献测试任务仍需核对输入发布与访问隔离，暂不生成方案。' :
     available.enabled ? '根据已确认条件生成结构、势函数调用与计算输入；可关闭页面，稍后查看进度。' : available.reason;
   const summary=$('#candidate-summary'); summary.replaceChildren(); $('#candidate-downloads').replaceChildren();
+  if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件自动准备、提交与分析。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
   if(!candidate) return;
   const result=candidate.result;
   if(result.summary) summary.append(node('p',result.summary));
@@ -423,9 +426,11 @@ async function refreshCandidate() {
 $('#prepare-candidate').onclick=()=>action(async()=>{
   const id=current.id;
   $('#prepare-candidate').disabled=true;
-  try { await api(`/api/tasks/${id}/candidate`,{revision:current.revision}); }
+  const automatic=schema.automatic_workflow?.configured;
+  try { await api(`/api/tasks/${id}/${automatic?'workflow':'candidate'}`,{revision:current.revision}); }
   finally { await refreshModelStatus(); await refreshCandidate(); await renderHistory(); }
-  notice('方案准备已记录，可以稍后返回查看进度。');
+  await refreshWorkspace();
+  notice(automatic?'已开始自动准备与计算，可以关闭页面，稍后查看结果。':'方案准备已记录，可以稍后返回查看进度。');
 });
 setInterval(async()=>{
   if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
@@ -850,6 +855,12 @@ function renderExecutionControls(){
   if(job.state==='attention')box.append(node('p',job.reason==='deployment_file_missing'?'执行所需的部署文件尚未就绪，记录已保留。':job.reason==='deployment_changed'?'执行配置发生变化，需要核对后恢复。':'执行检查未通过，记录已保留；不会自动重提计算。','form-note'));
   const details=node('details');details.append(node('summary','执行历史'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
  }else{
+  const flow=executionState.automatic_workflow,step=flow?.workflow;
+  if(step){box.replaceChildren(node('h2','任务执行流程'),node('p',step.label,'flow-note'));$('#task-status').textContent=step.label;
+   if(step.state==='attention')box.append(node('p','请查看准备记录中的问题；已有调用和提交历史保留，未自动重试。','form-note'));
+   else if(!flow.worker_alive)box.append(node('p','后台当前未运行；服务恢复后继续已有流程。','form-note'));
+   return;
+  }
   if(executionState.can_start){
    box.replaceChildren(node('h2','计算方案已准备'),node('p','开始后将核对执行许可，自动提交、跟进和处理结果。','flow-note'));
    $('#task-status').textContent='方案已准备';$('#task-information').replaceChildren();addInfo('执行状态','等待开始');

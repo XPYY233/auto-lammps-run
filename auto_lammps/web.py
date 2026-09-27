@@ -203,14 +203,18 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
+    from .research_workflow import ResearchWorkflow
+    workflow = ResearchWorkflow(candidate_service, execution_jobs) if candidate_service and execution_jobs else None
     @asynccontextmanager
     async def lifespan(app):
         if candidate_service:
             candidate_service.start()
         if execution_jobs:execution_jobs.start()
+        if workflow:workflow.start()
         try:
             yield
         finally:
+            if workflow:workflow.close()
             if execution_jobs:execution_jobs.close()
             if candidate_service:
                 candidate_service.close()
@@ -353,6 +357,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         reference_status = reference_model_client.calls.status() if reference_model_client else None
         return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': False,
+                'automatic_workflow': workflow.availability() if workflow else {'configured':False,'enabled':False},
                 'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else
                     {'enabled': False, 'reason': '方案准备服务尚未配置。'}}
@@ -469,7 +474,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         store.get(identifier)
         if execution_jobs is None:
             return dict(configured=False,worker_alive=False,can_start=False,job=None,message='自动执行服务尚未接入，任务已保存。')
-        return execution_jobs.status(identifier)
+        result=execution_jobs.status(identifier)
+        if workflow:result['automatic_workflow']=workflow.status(identifier)
+        return result
 
     @app.post('/api/tasks/{identifier}/execution',status_code=202)
     def execution_start(identifier: str,data: Revision):
@@ -479,6 +486,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return execution_jobs.enqueue(identifier,data.revision)
         except (ValueError,OSError,LedgerError,runtime_denied):
             return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
+
+    @app.post('/api/tasks/{identifier}/workflow',status_code=202)
+    def workflow_start(identifier: str,data: Revision):
+        if workflow is None:
+            return JSONResponse({'detail':'自动计算服务尚未就绪。'},status_code=422)
+        return workflow.enqueue(identifier,data.revision)
 
     @app.get('/api/tasks/{identifier}/candidate')
     def candidate_get(identifier: str):
