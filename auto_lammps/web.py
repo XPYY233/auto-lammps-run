@@ -177,17 +177,21 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None):
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
     hpc = hpc_connections or HPCConnections(store)
-    raw_outputs = RawOutputs(store,papers)
+    if results_reader and results_reader.tasks.path!=store.path:
+        raise ValueError('Results must belong to the same task store')
+    if results_reader and collections_directory is not None and Path(collections_directory).absolute()!=results_reader.collections:
+        raise ValueError('Raw downloads and results must share the same collection directory')
+    raw_outputs = RawOutputs(store,papers,
+        collections=results_reader.collections if results_reader else collections_directory,
+        ledger=results_reader.ledger if results_reader else None)
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
-    if results_reader and results_reader.tasks.path!=store.path:
-        raise ValueError('Results must belong to the same task store')
     @asynccontextmanager
     async def lifespan(app):
         if candidate_service:
@@ -535,8 +539,10 @@ def main():
         key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
     results_reader=None
-    if args.collections_directory or args.reports_directory:
-        if not (ledger and args.collections_directory and args.reports_directory):
+    if args.collections_directory and not ledger:
+        parser.error('Raw downloads require an existing ledger')
+    if args.reports_directory:
+        if not (ledger and args.collections_directory):
             parser.error('Result viewing requires an existing ledger and both artifact directories')
         results_reader=ResultsReader(store,ledger,args.collections_directory,args.reports_directory)
     if args.candidate_config:
@@ -559,7 +565,7 @@ def main():
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          result_assistant_enabled=args.enable_result_assistant), host='127.0.0.1', port=args.port,
+                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

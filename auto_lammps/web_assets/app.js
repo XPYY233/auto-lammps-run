@@ -5,7 +5,7 @@ const statuses = {missing:'缺失',unselected:'待选择',conflict:'有矛盾',p
 let schema, current = null, editing = null, resolving = null, busy = false;
 let literaturePreview = null;
 let paperFilter='all';
-let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null;
+let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null;
 let candidateState=null, candidateTask=null, candidatePolling=false;
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
 const literatureColumns = {material:'材料',conditions:'条件',conditions_text:'条件说明'};
@@ -751,6 +751,8 @@ $('#resource-search').oninput=renderResourceTable;
 function showHelp(){current=null;hideViews('help-view');selectNavigation('help');history.replaceState(null,'','#help');renderHelp();}
 function emptyState(title,message){const box=node('div',undefined,'empty-result');box.append(node('span','◇','empty-icon'),node('h3',title),node('p',message));return box;}
 function number(v,digits=4){return Number.isFinite(v)?v.toLocaleString('en-US',{maximumFractionDigits:digits,minimumFractionDigits:0}):'—';}
+function fileSize(bytes){if(bytes<1024)return number(bytes,0)+' B';if(bytes<1024**2)return number(bytes/1024,2)+' KiB';if(bytes<1024**3)return number(bytes/1024**2,2)+' MiB';return number(bytes/1024**3,2)+' GiB';}
+function currentRawFiles(){return rawResult?.task===current?.id?rawResult.files:[];}
 function duration(seconds){const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=Math.floor(seconds%60);return `${h} 小时 ${m} 分 ${s} 秒`;}
 function addInfo(label,value){$('#task-information').append(node('dt',label),node('dd',value));}
 function bState(report){return report.agent_progress?.stage || '记录暂不可核验';}
@@ -782,8 +784,14 @@ function reportDownloads(report,box){
 function taskTimeline(){const list=node('ol',undefined,'task-timeline');for(const item of $('#history-list').children)list.append(item.cloneNode(true));return list;}
 function renderWorkspaceResults(){
  const box=$('#research-results');box.replaceChildren();const r=workspaceReport;
- if(resultTab==='history'&&!r){box.append(node('h3','任务历史'),taskTimeline());if(!normalResult?.evaluations?.length){box.append(node('p','尚无计算提交记录。','plot-caption'));return;}}
+ if(resultTab==='history'&&!r){box.append(node('h3','任务历史'),taskTimeline());if(!normalResult?.evaluations?.length&&!currentRawFiles().length){box.append(node('p','尚无计算提交记录。','plot-caption'));return;}}
  if(!r && normalResult?.evaluations?.length){for(const group of normalResult.evaluations){box.append(node('h3',`计算记录 · ${group.dispatch_count} / ${group.max_attempts} 次提交`));for(const request of group.requests){box.append(node('p',request.stage));for(const report of request.reports)box.append(resultReport(report,current.id));}}return;}
+ if(!r&&currentRawFiles().length){
+  box.append(emptyState('原始输出已回收','可从右侧下载原始数据和日志。分析报告尚未生成或未接入；文件回收不代表科学验证通过。'));
+  const jobs=new Map(currentRawFiles().map(f=>[f.request_id,f]));
+  for(const f of jobs.values())box.append(node('p',`作业 ${f.job_id} · ${requestStates[f.state]||f.state}`));
+  return;
+ }
  if(!r){const empty=emptyState('还没有计算结果',current.status==='conditions_frozen'?'研究条件已保存。方案与计算记录会在服务就绪后显示。':'研究需求已保存。方案、计算与分析就绪后，真实结果会显示在这里。');const button=node('button','查看模型设置','quiet');button.onclick=()=>action(openModel);empty.append(button);box.append(empty);return;}
  if(resultTab==='overview'){
   const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','应力–应变曲线'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(values,plot);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
@@ -800,7 +808,7 @@ function renderWorkspaceResults(){
  }
 }
 async function refreshWorkspace(){
- if(!current)return;const id=current.id;workspaceReport=null;renderFlow(null);renderWorkspaceResults();
+ if(!current)return;const id=current.id;workspaceReport=null;rawResult=null;renderFlow(null);renderWorkspaceResults();
  try{const result=await api(`/api/tasks/${id}/reference-result`);if(current?.id!==id)return;workspaceReport=result.report;}catch(error){if(current?.id===id)notice('参考报告暂不可核验，未显示旧数值。',true);}
  if(current?.id!==id)return;const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
@@ -815,6 +823,15 @@ async function refreshWorkspace(){
  $('#task-model').textContent=r?'第一周 · Codex 辅助验证':'应用模型尚未启用';
  const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
  await showRawFiles(id);
+ if(current?.id!==id)return;
+ if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
+  $('#task-status').textContent='原始输出已回收';
+  $('#task-information').replaceChildren();addInfo('结果状态','原始输出已回收');addInfo('分析报告','尚未生成或未接入');
+  addInfo('提交次数','完整提交记录尚未接入');
+  for(const f of new Map(currentRawFiles().map(f=>[f.request_id,f])).values())addInfo('作业 '+f.job_id,requestStates[f.state]||f.state);
+  $('#execution-flow').replaceChildren(node('h2','计算记录'),node('p','原始输出已回收，可下载查看。完整执行阶段及分析报告尚未接入。','flow-note'));
+ }
+ renderWorkspaceResults();
  if(!$('.discussion-panel').hidden)await refreshDiscussion();
 }
 let hpcState=null;
@@ -827,7 +844,17 @@ $('#hpc-dialog').addEventListener('close',clearHPCSecrets);
 $('#hpc-auth').onchange=()=>{$('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';};
 $('#hpc-form').onsubmit=e=>{e.preventDefault();action(async()=>{const payload={revision:hpcState.revision,label:$('#hpc-label').value.trim(),host:$('#hpc-host').value.trim(),port:Number($('#hpc-port').value),username:$('#hpc-user').value.trim(),work_directory:$('#hpc-work').value.trim(),partition:$('#hpc-partition').value.trim(),account:$('#hpc-account').value.trim(),authentication:$('#hpc-auth').value,private_key:$('#hpc-key').value||null,known_hosts:$('#hpc-known').value||null,certificate:$('#hpc-cert').value||null};try{hpcState=await api('/api/hpc-connection',payload);}finally{clearHPCSecrets();}$('#check-hpc').disabled=false;$('#hpc-status').textContent='已保存第 '+hpcState.revision+' 版连接。运行中的作业仍使用原连接；通用自动提交尚未开放。';});};
 $('#check-hpc').onclick=()=>action(async()=>{const b=$('#check-hpc');b.disabled=true;$('#hpc-status').textContent='正在检查已保存的 SSH 连接…';try{const result=await api('/api/hpc-connection/check',{revision:hpcState.revision});$('#hpc-status').textContent=result.message;}finally{b.disabled=false;}});
-async function showRawFiles(id){const box=$('#task-files');try{const result=await api(`/api/tasks/${id}/raw-files`);if(current?.id!==id)return;box.append(node('h3','原始计算输出'));if(!result.files.length){box.append(node('p',result.message,'form-note'));return;}for(const f of result.files){const row=node('div',undefined,'file-row'),a=node('a',f.name+' ↓');a.href=`/api/tasks/${id}/raw-files/${f.id}`;row.append(a,node('small',number(f.size/1024/1024,2)+' MB · 作业 '+f.job_id));box.append(row);}}catch(error){if(current?.id===id)box.append(node('p','原始文件暂不可核验，未展示下载链接。','form-note'));}}
+async function showRawFiles(id){
+ const box=$('#task-files');
+ try{
+  const result=await api(`/api/tasks/${id}/raw-files`);if(current?.id!==id)return;
+  rawResult={task:id,files:result.files};
+  if(result.files.length&&!workspaceReport)box.replaceChildren();
+  box.append(node('h3','原始计算输出'));
+  if(!result.files.length){box.append(node('p',result.message,'form-note'));return;}
+  for(const f of result.files){const row=node('div',undefined,'file-row'),a=node('a',f.name+' ↓');a.href=`/api/tasks/${id}/raw-files/${f.id}`;row.append(a,node('small',fileSize(f.size)+' · 作业 '+f.job_id));box.append(row);}
+ }catch(error){if(current?.id===id){rawResult=null;box.append(node('p','原始文件暂不可核验，未展示下载链接。','form-note'));}}
+}
 let connectionState=null;
 async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();$('#model-dialog').showModal();}
 function refreshConnectionLabel(){const c=connectionState?.connections[$('#provider-choice').value];$('#connection-status').textContent=c?.configured?'已保存密钥，留空可保留；连接可用性以实际响应为准。':'尚未保存该模型商的密钥。';$('#fetch-models').disabled=!c?.configured||!c?.model_listing;$('#remove-key').disabled=!c?.configured;if(c&&!c.model_listing)$('#connection-status').textContent+=' 此模型商请手动填写模型 ID。';}
