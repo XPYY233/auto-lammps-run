@@ -696,18 +696,51 @@ function taskCards(){
 }
 async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');history.replaceState(null,'','#tasks');await listTasks();taskCards();}
 let resourceFilter='all',resourceRows=[];
+function potentialResourceRows(p){
+ const report=p.potential_acquisition||{},files=report.files||[];
+ return files.map(f=>{
+  const bindings=(report.bindings||[]).filter(b=>Object.values(b.files||{}).includes(f.path));
+  const unique=values=>[...new Set(values.filter(Boolean))];
+  const elements=unique(bindings.flatMap(b=>b.elements||[]));
+  const styles=unique(bindings.map(b=>b.pair_style));
+  const roles=unique(bindings.flatMap(b=>Object.entries(b.files||{}).filter(([,path])=>path===f.path).map(([role])=>role)));
+  const roleNames={library:'元素基础参数库',parameters:'合金相互作用参数'};
+  const family=styles.length?styles.map(x=>x.toUpperCase()).join(' / '):'类型待核验';
+  const purpose=roles.length?roles.map(x=>roleNames[x]||x).join(' / '):'文件用途待核验';
+  const companions=unique(bindings.flatMap(b=>Object.values(b.files||{}))).filter(path=>path!==f.path);
+  const names={Nb:'铌',Ti:'钛',Zr:'锆',Mo:'钼',V:'钒',Fe:'铁',Cu:'铜',Al:'铝',W:'钨',Ta:'钽',Ni:'镍',Co:'钴',Cr:'铬',Si:'硅',C:'碳',O:'氧',H:'氢'};
+  const details=[];
+  if(bindings.length)details.push('元素依据：固定来源中调用配置的所选元素；不代表已验证所有合金组成。');
+  else details.push('尚无与此文件对应的调用配置，不能仅凭文件名推断元素或类型。');
+  for(const mapping of unique(bindings.map(b=>(b.type_elements||[]).join(' → '))))details.push('原子类型顺序：'+mapping);
+  for(const units of unique(bindings.map(b=>b.units)))details.push('LAMMPS 单位制：'+units);
+  for(const pack of unique(bindings.map(b=>b.required_package)))details.push('所需引擎组件：'+pack);
+  const warnings=unique(bindings.flatMap(b=>b.inspection?.warnings||[])),blockers=unique(bindings.flatMap(b=>b.inspection?.blockers||[]));
+  if(warnings.length)details.push('静态检查提示：'+warnings.join('；'));
+  if(blockers.length)details.push('待解决项：'+blockers.join('；'));
+  const license=report.license_status;
+  details.push('许可：'+(license==='not_declared_in_scanned_tree'?'已扫描来源未声明许可证':license||'待核验'));
+  details.push('已保存来源与摘要；当前条目不代表科学适用性已验证。');
+  return {kind:'potential',name:`${elements.join('–')||'元素待核验'} · ${family} ${purpose}`,filename:f.path,
+   type:family,elements:elements.map(e=>names[e]?`${e}（${names[e]}）`:e).join(' · ')||'元素待核验',
+   tags:[purpose,companions.length?'需配套使用':'配套关系待核验'],companion:companions.join('、'),
+   version:report.commit||f.version||'',paper:p.title,doi:p.doi,url:f.source_url,hash:f.sha256,
+   state:blockers.length?'存在待解决项':bindings.length&&bindings.every(b=>b.static_status==='checked')?'已获取 · 静态检查记录已保存':'已获取 · 元数据待核验',
+   note:details.join('\n')};
+ });
+}
 function renderResourceTable(){
- const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter)&&[r.name,r.type,r.paper,r.doi,r.elements].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=rows.length+' 项已登记资源 · 验证范围以来源记录为准';
+ const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter)&&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=rows.length+' 项已登记资源 · 验证范围以来源记录为准';
  if(!rows.length){box.append(emptyState('没有匹配的资源','调整关键词或资源分类。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['资源','类型 / 元素','版本','验证状态','来源与详情'])hr.append(node('th',label));head.append(hr);table.append(head,body);
- for(const r of rows){const tr=node('tr'),name=node('td');name.append(node('strong',r.name));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version||'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}d.append(node('p',r.note));if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
+ for(const r of rows){const tr=node('tr'),name=node('td');name.append(node('strong',r.name));if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));if(r.tags){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}if(r.companion)name.append(node('small','配套文件：'+r.companion));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version?r.version.slice(0,12):'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}if(r.version)d.append(node('p','固定版本：'+r.version));for(const line of r.note.split('\n'))d.append(node('p',line));if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
 }
 async function showResources(){
  current=null;hideViews('resources-view');selectNavigation('resources');history.replaceState(null,'','#resources');
  const result=await api('/api/papers');resourceRows=[];
  for(const button of document.querySelectorAll('[data-resource]')){button.classList.toggle('selected',button.dataset.resource===resourceFilter);button.onclick=()=>{resourceFilter=button.dataset.resource;for(const b of document.querySelectorAll('[data-resource]'))b.classList.toggle('selected',b===button);renderResourceTable();};}
  for(const p of result.papers){
-  for(const f of p.potential_acquisition?.files||[])resourceRows.push({kind:'potential',name:f.path,type:'势函数文件',elements:(f.elements||[]).join(' · ')||'元素映射见来源',version:f.version||'',paper:p.title,doi:p.doi,url:f.source_url,hash:f.sha256,state:'已获取 · 按任务核验',note:`${f.size} 字节；已保存来源与摘要。公开可得不等于许可或科学适用性已验证。`});
+  resourceRows.push(...potentialResourceRows(p));
   for(const c of (p.source_discovery?.candidates||[]).filter(c=>c.association==='doi_and_title'))resourceRows.push({kind:'paper',name:c.repository,type:'论文源码',elements:'',version:c.commit?.slice(0,12),paper:p.title,doi:p.doi,url:c.url,state:'题目与 DOI 相符',note:'关联证据不等于作者身份核验。源码仅供参考端验证，不提供给独立评测生成者。'});
  }
  for(const [name,url,note] of [['LAMMPS','https://docs.lammps.org/','模拟引擎；实际版本及能力以任务环境记录为准。'],['OVITO','https://www.ovito.org/','结构与轨迹分析工具；网页交互尚待接入。']])resourceRows.push({kind:'tools',name,type:'工具文档',url,note,state:'官方文档'});
