@@ -22,9 +22,10 @@ class SubmitUncertain(RuntimeError):
 
 
 class SlurmSubmitter:
-    def __init__(self, ledger: Ledger, endpoint: StageEndpoint, audit_directory):
+    def __init__(self, ledger: Ledger, endpoint: StageEndpoint, audit_directory, *, transport=None):
         # endpoint.helper_path pins remote_submit.py, not the upload receiver.
         self.ledger, self.endpoint = ledger, endpoint
+        self.transport = transport
         self.audit_directory = private_directory(audit_directory)
 
     def _reserved(self, submission, allowed_states):
@@ -35,6 +36,8 @@ class SlurmSubmitter:
             raise Conflict('Submission differs from the durable request or its allowed state')
         if not any(event['kind'] == 'inputs_staged' for event in self.ledger.events(submission.request_id)):
             raise Conflict('Complete input upload must be recorded before dispatch')
+        from .hpc_transport import bind_request
+        bind_request(self.ledger,submission.request_id,self)
         return row
 
     def prepare(self, submission: Submission):
@@ -51,6 +54,7 @@ class SlurmSubmitter:
         command = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                    '-o', 'ConnectTimeout=10', '-o', 'ClearAllForwardings=yes', '-o', 'ForwardAgent=no',
                    '-o', 'ForwardX11=no', '-o', 'PermitLocalCommand=no', endpoint.host_alias, shlex.join(remote)]
+        if self.transport is not None: command = self.transport.command(endpoint.host_alias,remote)
         trace = self.audit_directory / submission.request_id
         # Even direct misuse of the adapter cannot repeat network dispatch.
         trace.mkdir(mode=0o700, exist_ok=False)

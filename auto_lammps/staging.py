@@ -78,10 +78,11 @@ def upload_chunks(snapshot):
 
 
 class StageClient:
-    def __init__(self, endpoint: StageEndpoint, audit_directory, *, timeout=60):
+    def __init__(self, endpoint: StageEndpoint, audit_directory, *, timeout=60, transport=None):
         if not 0 < timeout <= 60:
             raise ValueError('Upload timeout must be bounded')
         self.endpoint = endpoint
+        self.transport = transport
         self.audit_directory = private_directory(audit_directory)
         self.timeout = timeout
 
@@ -97,6 +98,7 @@ class StageClient:
         command = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                    '-o', 'ConnectTimeout=10', '-o', 'ClearAllForwardings=yes', '-o', 'ForwardAgent=no',
                    '-o', 'ForwardX11=no', '-o', 'PermitLocalCommand=no', endpoint.host_alias, shlex.join(remote)]
+        if self.transport is not None: command = self.transport.command(endpoint.host_alias,remote)
         trace = self.audit_directory / uuid.uuid4().hex
         trace.mkdir(mode=0o700)
         intent = _write_new(trace / 'intent.json', dict(argv=command, request_id=submission.request_id,
@@ -132,6 +134,8 @@ class StagingService:
         document = snapshot.verify()
         if row['manifest_sha256'] != snapshot.digest or json.loads(row['resources']) != document['resources']:
             raise Conflict('Frozen inputs do not match the reserved request')
+        from .hpc_transport import bind_request
+        bind_request(self.ledger,request_id,self.client)
         if self.ledger.begin_staging(request_id):
             try:
                 proof = self.client.upload(Submission(request_id, snapshot.digest, Resources(**document['resources'])), snapshot)

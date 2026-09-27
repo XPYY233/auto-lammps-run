@@ -164,15 +164,27 @@ def load_execution_jobs(tasks, ledger, path):
     required={'snapshots_directory','collections_directory','reports_directory','audit_directory',
               'stage_endpoint','submit_endpoint','collect_endpoint','environment','authorization',
               'runtime_profile_path','max_polls','interval_seconds','query_max_bytes','task_evaluations'}
-    if set(value)!=required:raise ValueError('Invalid execution deployment fields')
+    if set(value) not in (required,required|{'hpc_connection_revision'}):raise ValueError('Invalid execution deployment fields')
     audit=Path(value['audit_directory'])
     stage=StageEndpoint(**value['stage_endpoint']);submit=StageEndpoint(**value['submit_endpoint']);collect=StageEndpoint(**value['collect_endpoint'])
-    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'])),
-        VersionedAnalysisService(OutputCollector(ledger,collect,value['collections_directory']),value['reports_directory']),
+    transport=None
+    if 'hpc_connection_revision' in value:
+        from .hpc_connections import HPCConnections
+        from .hpc_transport import SavedHPCTransport
+        transport=SavedHPCTransport(HPCConnections(tasks),value['hpc_connection_revision'],stage.host_alias)
+        profile=transport.identity['profile']
+        root=Path(profile['work_directory'])
+        if any(root not in Path(e.root_path).parents for e in (stage,submit,collect)):
+            raise ValueError('Request storage must be inside the saved HPC work directory')
+        if (profile['partition']!=value['environment']['partition'] or
+                (profile['account'] or None)!=value['environment']['account']):
+            raise ValueError('Deployment partition/account differs from saved HPC settings')
+    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'],transport=transport)),
+        VersionedAnalysisService(OutputCollector(ledger,collect,value['collections_directory'],transport=transport),value['reports_directory']),
         value['snapshots_directory'],max_polls=value['max_polls'],interval_seconds=value['interval_seconds'])
     controller=CandidateExecution(tasks,ledger,value['snapshots_directory'],
-        StagingService(ledger,StageClient(stage,audit/'uploads')),
-        SubmissionService(ledger,SlurmSubmitter(ledger,submit,audit/'dispatch')),following,
+        StagingService(ledger,StageClient(stage,audit/'uploads',transport=transport)),
+        SubmissionService(ledger,SlurmSubmitter(ledger,submit,audit/'dispatch',transport=transport)),following,
         ExistingAuthorization(**value['authorization']),BatchEnvironment(**value['environment']),
         runtime_profile_path=value['runtime_profile_path'])
     return ExecutionJobs(controller,value['task_evaluations'])

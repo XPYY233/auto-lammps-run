@@ -74,6 +74,10 @@ class CandidateExecution:
         endpoints=(staging.client.endpoint,submission.scheduler.endpoint,following.analysis.collector.endpoint)
         if len({(e.host_alias,e.root_path,e.python_path) for e in endpoints})!=1:
             raise ValueError('Execution stages must use the same approved deployment')
+        from .hpc_transport import transport_identity
+        adapters=(staging.client,submission.scheduler,following.analysis.collector,following.reconciliation.reader)
+        if any(transport_identity(a)!=transport_identity(adapters[0]) for a in adapters):
+            raise ValueError('Execution stages must share one saved HPC connection')
         collector=endpoints[2]
         if (environment.root_path!=collector.root_path or environment.python_path!=collector.python_path or
                 environment.launcher_path!=collector.helper_path or environment.launcher_sha256!=collector.helper_sha256 or
@@ -113,6 +117,8 @@ class CandidateExecution:
         # The key is owned by the controller; callers cannot rename an attempt.
         key='candidate_'+job['id']
         row=self.ledger.reserve(evaluation,key,digest,resources)
+        from .hpc_transport import bind_request
+        bind_request(self.ledger,row['id'],self.staging.client)
         request=Submission(row['id'],digest,resources)
         return dict(row=row,key=key,snapshot=snapshot,submission=request,batch=render_batch(request,self.environment))
 

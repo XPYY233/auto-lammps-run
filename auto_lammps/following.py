@@ -24,6 +24,9 @@ class FollowingService:
             raise ValueError('All services must share the same accounted ledger')
         if reader.host_alias!=collector.endpoint.host_alias:
             raise ValueError('Query and collection must use the same approved login alias')
+        from .hpc_transport import transport_identity
+        if transport_identity(reader)!=transport_identity(collector):
+            raise ValueError('Query and collection must use the same saved connection')
         self.snapshots=private_directory(snapshots)
         self.max_polls,self.interval_seconds=max_polls,interval_seconds
         # Two bounded base64 query receipts, plus intents and interpretation.
@@ -32,6 +35,7 @@ class FollowingService:
             endpoint=asdict(collector.endpoint),query=dict(host=reader.host_alias,audit=str(reader.audit_directory),
             timeout=reader.timeout,max_bytes=reader.max_bytes),collection_timeout=collector.timeout,
             analysis=getattr(analysis,'identity',adapter_identity)(),follower_sha256=sha256(Path(__file__).read_bytes()))
+        if transport_identity(reader) is not None: config['connection']=transport_identity(reader)
         self.config_sha256=sha256(canonical(config))
 
     def _progress(self, request_id, state, reason=''):
@@ -53,6 +57,8 @@ class FollowingService:
         finally:os.close(fd)
 
     def _advance(self, request_id):
+        from .hpc_transport import bind_request
+        bind_request(self.ledger,request_id,self.reconciliation.reader)
         row=self.ledger.get(request_id)
         self.ledger.register_following(request_id,self.config_sha256,max_polls=self.max_polls,
             interval_seconds=self.interval_seconds,poll_storage_bytes=self.poll_storage_bytes)

@@ -241,13 +241,16 @@ def transfer(argv, receiver, *, timeout, max_bytes):
 
 
 class OutputCollector:
-    def __init__(self, ledger, endpoint, directory, *, timeout=60):
+    def __init__(self, ledger, endpoint, directory, *, timeout=60, transport=None):
         if not 0 < timeout <= 60:
             raise ValueError('Collection timeout must be bounded')
         self.ledger, self.endpoint = ledger, endpoint
+        self.transport = transport
         self.directory, self.timeout = private_directory(directory), timeout
 
     def fetch(self, request_id):
+        from .hpc_transport import bind_request
+        bind_request(self.ledger,request_id,self)
         row = self.ledger.get(request_id)
         identity(request_id, row['manifest_sha256'])
         lock = os.open(self.directory/'.collection.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
@@ -286,6 +289,7 @@ class OutputCollector:
             argv = ['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10',
                     '-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-o','ForwardX11=no',
                     '-o','PermitLocalCommand=no',endpoint.host_alias,shlex.join(remote)]
+            if self.transport is not None: argv = self.transport.command(endpoint.host_alias,remote)
             intent_sha256 = _write_new(path/'intent.json', dict(context=context, argv=argv))
             receiver, header, captured, error = None, None, None, ''
             try:
