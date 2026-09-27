@@ -74,6 +74,61 @@ def capture_sbatch(argv, cwd, *, timeout=20, limit=65536):
                     **{key:base64.b64encode(value).decode() for key,value in output.items()})
 
 
+def private_bytes_once(path, data):
+    """Resume an exact installation; never replace existing grant or batch bytes."""
+    try:
+        fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o400)
+    except FileExistsError:
+        if bootstrap_read(path,len(data),private=True)!=data:
+            raise ValueError('Existing authorization differs; cannot replace it')
+        return
+    with os.fdopen(fd,'wb') as output:
+        output.write(data);output.flush();os.fsync(output.fileno())
+    fd=os.open(Path(path).parent,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+
+
+def install_authorization(config_path,request_id,manifest_sha256,root_path,stream):
+    """Fixed-protocol grant delivery only: no scheduler or input execution."""
+    if not re.fullmatch(r'[a-f0-9]{32}',request_id) or not re.fullmatch(r'[a-f0-9]{64}',manifest_sha256):
+        raise ValueError('Invalid authorization identity')
+    config=json.loads(bootstrap_read(config_path,16384,private=True))
+    source=bootstrap_read(config['runtime_path'],1000000)
+    if hashlib.sha256(source).hexdigest()!=config['runtime_sha256']:
+        raise ValueError('Installed runtime helper version mismatch')
+    runtime=types.ModuleType('approved_runtime_helper')
+    exec(compile(source,config['runtime_path'],'exec'),runtime.__dict__)
+    profile_data=runtime.read_regular(Path(config['runtime_path']).parent/'runtime.json',1000000,private=True)
+    profile=json.loads(profile_data);runtime.validate_deployment_paths(profile)
+    if root_path!=profile['requests_root']:raise ValueError('Wrong deployment root')
+    raw=stream.read(1600001)
+    if len(raw)>1600000:raise ValueError('Oversized authorization package')
+    value=json.loads(raw)
+    if set(value)!={'envelope','batch_base64'}:raise ValueError('Unexpected authorization fields')
+    key=runtime.read_regular(Path(profile['control_root'])/'grant.key',32,private=True)
+    grant=runtime.verify_grant(value['envelope'],key,request_id=request_id,manifest_sha256=manifest_sha256,
+        profile_sha256=runtime.digest(profile_data),now=time.time())
+    batch=base64.b64decode(value['batch_base64'],validate=True)
+    if not 1<=len(batch)<=1000000 or runtime.digest(batch)!=runtime.hash_value(grant.get('batch_sha256')):
+        raise ValueError('Batch differs from signed authorization')
+    if runtime.execution_mode(profile)=='native_slurm' and (
+            grant.get('execution_scope')!='trusted_research' or grant.get('formal_isolation') is not False):
+        raise ValueError('Native grant scope mismatch')
+    control=Path(profile['control_root']);fd=runtime.directory(control,private=True);os.close(fd)
+    # The envelope is the commit marker. A crash after writing the identical batch
+    # can be resumed, but existing envelope/script conflicts are never overwritten.
+    envelope=runtime.canonical(value['envelope'])
+    for path,data in ((control/(request_id+'.sh'),batch),(control/(request_id+'.json'),envelope)):
+        if path.exists() and bootstrap_read(path,len(data),private=True)!=data:
+            raise ValueError('Authorization conflict')
+    private_bytes_once(control/(request_id+'.sh'),batch)
+    private_bytes_once(control/(request_id+'.json'),envelope)
+    return dict(state='authorization_installed',request_id=request_id,manifest_sha256=manifest_sha256,
+        grant_sha256=runtime.digest(runtime.canonical(grant)),batch_sha256=runtime.digest(batch),
+        profile_sha256=runtime.digest(profile_data))
+
+
 def submit(config_path, request_id, manifest_sha256, root_path):
     if sys.platform!='linux':
         raise ValueError('Scheduler submission requires the approved Linux service')
@@ -173,9 +228,12 @@ def main():
     parser.add_argument('--request-id',required=True)
     parser.add_argument('--manifest-sha256',required=True)
     parser.add_argument('--root',required=True)
+    parser.add_argument('--install-authorization',action='store_true')
     args=parser.parse_args()
     try:
-        result=submit(Path(__file__).resolve().parent/'submission.json',args.request_id,args.manifest_sha256,args.root)
+        config=Path(__file__).resolve().parent/'submission.json'
+        result=(install_authorization(config,args.request_id,args.manifest_sha256,args.root,sys.stdin.buffer)
+                if args.install_authorization else submit(config,args.request_id,args.manifest_sha256,args.root))
     except Exception as exc:
         print(json.dumps(dict(state='unknown',error_type=type(exc).__name__)))
         return 1

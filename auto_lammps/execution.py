@@ -33,6 +33,9 @@ class ExistingAuthorization:
         self.software_sha256=runtime.hash_value(software_sha256)
         self.policy_sha256=sha256(canonical(dict(self.pins,software_sha256=self.software_sha256)))
 
+    def ensure(self, submission, snapshot, batch):
+        return True  # Existing grants remain externally issued and installed.
+
     def verify(self, submission, snapshot, batch):
         manifest=snapshot.verify()
         if snapshot.digest!=submission.manifest_sha256:raise Conflict('Wrong authorized snapshot')
@@ -84,6 +87,10 @@ class CandidateExecution:
         adapters=(staging.client,submission.scheduler,following.analysis.collector,following.reconciliation.reader)
         if any(transport_identity(a)!=transport_identity(adapters[0]) for a in adapters):
             raise ValueError('Execution stages must share one saved HPC connection')
+        if hasattr(authorization,'endpoint'):
+            if (authorization.ledger.path!=ledger.path or authorization.endpoint!=submission.scheduler.endpoint
+                    or transport_identity(authorization)!=transport_identity(adapters[0])):
+                raise ValueError('Authorization delivery must use the same accounted deployment')
         collector=endpoints[2]
         if (environment.root_path!=collector.root_path or environment.python_path!=collector.python_path or
                 environment.launcher_path!=collector.helper_path or environment.launcher_sha256!=collector.helper_sha256 or
@@ -141,6 +148,8 @@ class CandidateExecution:
             return self.following.advance(request_id)
         if row['state']!='prepared':
             return dict(request_id=request_id,state='attention',reason='request_not_prepared',scientific_status='not_evaluated')
+        if not self.authorization.ensure(plan['submission'],plan['snapshot'],plan['batch']):
+            return dict(request_id=request_id,state='waiting',reason='authorization_delivery_unconfirmed',scientific_status='not_evaluated')
         self.authorization.verify(plan['submission'],plan['snapshot'],plan['batch'])
         result=self.staging.stage(request_id,plan['snapshot'])
         if result['upload_state']!='staged':
