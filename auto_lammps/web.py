@@ -1,6 +1,6 @@
 """Loopback task application with optional, administrator-configured NLP.
 
-The browser cannot configure model budgets, credentials or scheduler access.
+The browser can save operator model connections, but cannot configure scheduler access.
 """
 import argparse
 from contextlib import asynccontextmanager
