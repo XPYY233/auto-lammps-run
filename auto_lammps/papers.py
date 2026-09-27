@@ -107,6 +107,25 @@ class PaperStore:
                        (identifier,identifier_task,evaluation,expected_task_sha256))
             self._write(db,doc,'evaluation_linked:'+evaluation)
 
+    def bind_reference_evaluation(self, identifier, identifier_task, evaluation):
+        """Trusted controller: A may precede B condition freeze; never permits agent bindings."""
+        if self.ledger is None:raise TaskError('未配置参考账本')
+        snapshot=self.ledger.evaluation_snapshot(evaluation)
+        if snapshot['identity']['role']!='reference':raise TaskError('这里只能关联作者参考 A')
+        with self.tasks.transaction() as db:
+            doc=self._read(db,identifier)
+            task=self.tasks._read(db,identifier_task)
+            if doc['selection']!='selected' or task['mode']!='reproduction':raise TaskError('需要已选论文和复现任务')
+            if not db.execute('SELECT 1 FROM paper_tasks WHERE paper_id=? AND task_id=?',(identifier,identifier_task)).fetchone():
+                raise TaskError('参考任务未关联此论文')
+            previous=db.execute('SELECT * FROM paper_evaluations WHERE evaluation=?',(evaluation,)).fetchone()
+            if previous:
+                if previous['paper_id']==identifier and previous['task_id']==identifier_task:return
+                raise TaskError('参考运行已有关联，不可转移')
+            db.execute('INSERT INTO paper_evaluations VALUES (?,?,?,?)',
+                       (identifier,identifier_task,evaluation,snapshot['identity']['task']))
+            self._write(db,doc,'reference_evaluation_linked:'+evaluation)
+
     def get(self, identifier):
         with self.tasks.transaction() as db:
             doc=self._read(db,identifier)

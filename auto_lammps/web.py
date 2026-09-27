@@ -22,6 +22,8 @@ from .manifest import ManifestError, canonical, read_file, root_descriptor, sha2
 from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError
 from .results import ResultsReader
+from .operator_workspace import ModelPreferences, ReferenceViews
+from .runtime_launcher import ExecutionDenied as runtime_denied
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -126,13 +128,20 @@ class LinkPaperTask(Revision):
     task_id: str
 
 
+class PreferenceInput(Input):
+    provider: str
+    model: str = Field(max_length=100)
+    revision: StrictInt = Field(ge=0)
+
+
 class ReferenceDraft(Revision):
     csv_texts: list[str] = Field(min_length=1, max_length=8)
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None):
+               reference_model_client=None, reference_views=None):
     papers = PaperStore(store) if papers is None else papers
+    preferences = ModelPreferences(store)
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -188,6 +197,31 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail': '文件不存在'}, status_code=404)
         return FileResponse(ASSETS/name)
 
+    @app.get('/api/model-preference')
+    def model_preference():
+        return preferences.get()
+
+    @app.post('/api/model-preference')
+    def save_model_preference(data: PreferenceInput):
+        return preferences.save(data.provider,data.model,data.revision)
+
+    @app.get('/api/tasks/{identifier}/reference-result')
+    def reference_result(identifier: str):
+        store.get(identifier)
+        if reference_views is None:return {'report':None}
+        try:return {'report':reference_views.get(identifier)}
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'参考报告与原始记录未通过核验，暂不展示数值。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/reference-result/files/{name}')
+    def reference_file(identifier: str, name: str):
+        if reference_views is None:return JSONResponse({'detail':'参考报告尚未接入。'},status_code=404)
+        try:data=reference_views.download(identifier,name)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'文件不在已核验的报告中。'},status_code=409)
+        media={'.png':'image/png','.pdf':'application/pdf','.csv':'text/csv; charset=utf-8','.md':'text/markdown; charset=utf-8','.json':'application/json'}.get(Path(name).suffix,'application/octet-stream')
+        return Response(data,media_type=media,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
+
     @app.get('/api/schema')
     def schema():
         status = model_client.calls.status() if model_client else None
@@ -216,7 +250,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks')
     def tasks():
-        return {'tasks': store.list()}
+        rows=store.list()
+        if papers.ledger is not None:
+            for paper in papers.list()['papers']:
+                for row in rows:
+                    refs=[e for e in paper['evaluations'] if e.get('available') and
+                          e['identity']['role']=='reference' and e['task_id']==row['id']]
+                    state=('作者参考 A 已结束' if any(r['state']=='completed' and r['accounted'] for e in refs for r in e['requests']) else
+                           '作者参考 A 已提交' if any(e['dispatch_claims'] for e in refs) else None)
+                    if state:row['reference_stage']=state
+        return {'tasks':rows}
 
     @app.get('/api/tasks/{identifier}/results')
     def task_results(identifier: str):
@@ -359,6 +402,7 @@ def main():
     parser.add_argument('--reference-model-ledger', help='Explicit existing reference-side model policy; no automatic enablement')
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
+    parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
@@ -394,9 +438,11 @@ def main():
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
                     snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
-    uvicorn.run(create_app(store, port=args.port, papers=PaperStore(store, ledger=ledger), model_client=model_client,
+    papers=PaperStore(store,ledger=ledger)
+    reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
+    uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
-                          reference_model_client=reference_model_client), host='127.0.0.1', port=args.port,
+                          reference_model_client=reference_model_client,reference_views=reference_views), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

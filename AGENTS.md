@@ -6,6 +6,11 @@
   `~/.codex/skills/auto-lammps-stage-guide/SKILL.md`. It routes current norms and
   recorded lessons; it adds no approval gate. Reopen both final-expectation images
   as required below, then resume the current user task instead of expanding setup.
+- The product's runtime AI is DeepSeek (provider `deepseek-official`); its role,
+  boundaries, API slot and integration requirements are defined in `DEEPSEEK.md` at
+  the repository root. Read it before changing any model-facing interface, and finish
+  its section-9 developer confirmation (project specs plus both approved images)
+  before implementing it.
 - Prioritize end-to-end automation and the researcher's ability to complete a task.
   Audit and reuse available assets before building replacements or asking the user:
   literature workbench, Zotero PDFs, public supplements/source/potentials, installed
@@ -42,9 +47,9 @@
 - Do not submit until scope, resource/API limits and scoring rules are approved.
 - Maximum two submissions per formal evaluation; uncertain submission means
   reconcile first. The second attempt cannot see target answers or score differences.
-- Latest first-week exception: explicit user approval permits three P-A-B validation
-  submissions with existing failures counted; final product stays at two and R2
-  excludes third-attempt successes. Reference A uses 32 cores with no user-imposed
+- Latest first-week exception: author reference A may continue until successful
+  without an attempt cap; retain all failures and costs. B and the final product
+  stay at two submissions. Reference A uses 32 cores with no user-imposed
   time limit (respect cluster limits). After complete A, its elapsed hours b sets
   B's cumulative core-hour ceiling to 32*b+b*b; queue time is excluded. Record
   policy amendments without changing identities, old charges or submission history.
@@ -75,7 +80,7 @@ Then reconcile the roadmap with the latest user corrections, which take preceden
 - Codex owns week-one P-A-B validation. Independent runtime API integration begins in week two, requested after the first validation succeeds.
 - Report the B strategy and wait for user confirmation before starting B.
 - Target physics runs only through accounted HPC; retain the approved budget, two-submission evaluation limit and full failure history.
-- After the first P-A-B validation, redesign and accept the human-facing flow from a blank page, with no developer backend assistance.
+- Latest user instruction: if the B strategy receives no reply within three minutes, work on the approved human-facing interface while waiting. Silence never approves B. Accept the full product flow from a blank page without developer backend assistance; UI checks alone do not establish end-to-end automation.
 - Every reproduction paper must show its full published title and verified DOI/link in the web register, reproduction records and relevant progress reports. Distinguish unselected candidates from pending, in-progress and reproduced tasks; do not report a candidate as a completed reproduction.
 - Preserve the domain adapter, verified source test library, potential library, progress feedback, analysis/OVITO, paper status list and history requirements. The picture's illustrative numbers and formulas are not frozen scoring criteria.
 
