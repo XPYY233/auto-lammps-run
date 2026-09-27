@@ -682,8 +682,15 @@ class Ledger:
             for request in db.execute('SELECT * FROM requests WHERE evaluation=? ORDER BY rowid', (evaluation,)):
                 events = [dict(seq=e['seq'], kind=e['kind'], at=e['at']) for e in db.execute(
                     'SELECT seq,kind,at FROM events WHERE request_id=? ORDER BY seq', (request['id'],))]
+                monitor = db.execute("SELECT at,payload FROM events WHERE request_id=? AND kind='monitor_result' ORDER BY seq DESC LIMIT 1",
+                                     (request['id'],)).fetchone()
+                monitoring = None
+                if monitor:
+                    saved = json.loads(monitor['payload'])
+                    monitoring = dict(last_checked=monitor['at'], next_due=saved['next_due'],
+                                      reason=saved['reason'], failures=saved['consecutive_failures'])
                 requests.append({key: request[key] for key in ('id','state','job_id','dispatch_claimed',
-                    'accounted','actual_core_seconds','charge_core_seconds')} | {'events': events})
+                    'accounted','actual_core_seconds','charge_core_seconds')} | {'events': events, 'monitoring': monitoring})
             maximum, scope = self._attempt_allowance(db, row)
             used = sum(r['dispatch_claimed'] or r['state']=='prepared' for r in requests)
             return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=maximum,
@@ -778,6 +785,81 @@ class Ledger:
             if previous is None or json.loads(previous[0])!=payload:
                 self._event(db,request_id,'following_progress',payload)
         return payload
+
+    def register_monitor(self, request_id, config_sha256, *, interval_seconds, poll_storage_bytes):
+        """Register read-only monitoring independently of result collection policy."""
+        _digest(config_sha256)
+        if (type(interval_seconds) is not int or not 15 <= interval_seconds <= 3600
+                or type(poll_storage_bytes) is not int or not 16384 <= poll_storage_bytes <= 13000000):
+            raise ValueError('Invalid monitoring policy')
+        policy = dict(config_sha256=config_sha256, interval_seconds=interval_seconds,
+                      poll_storage_bytes=poll_storage_bytes)
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if not row['dispatch_claimed'] or row['state'] in {'rejected', 'cancelled_before_dispatch'}:
+                raise Conflict('Only dispatched requests may be monitored')
+            prior = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_registered'",
+                               (request_id,)).fetchone()
+            if prior and json.loads(prior[0]) != policy:
+                raise Conflict('Monitoring configuration cannot change silently')
+            if not prior:
+                self._event(db, request_id, 'monitor_registered', policy)
+
+    def claim_monitor_poll(self, request_id):
+        """Reserve receipts and persist timing before accessing the scheduler."""
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            policy = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_registered'",
+                                (request_id,)).fetchone()
+            if policy is None:
+                raise Conflict('No monitoring policy')
+            if row['state'] == 'reconcile_required' or (row['state'] in JOB_TERMINAL and row['accounted']):
+                return False
+            policy = json.loads(policy[0])
+            poll = db.execute("SELECT at FROM events WHERE request_id=? AND kind='monitor_poll' ORDER BY seq DESC LIMIT 1",
+                              (request_id,)).fetchone()
+            last = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_result' ORDER BY seq DESC LIMIT 1",
+                              (request_id,)).fetchone()
+            next_due = max(poll['at'] + policy['interval_seconds'] if poll else 0,
+                           json.loads(last[0])['next_due'] if last else 0)
+            if time.time() < next_due:
+                return False
+            campaign = db.execute('SELECT campaign FROM evaluations WHERE id=?', (row['evaluation'],)).fetchone()[0]
+            budget = self._policy(db, campaign)
+            used = db.execute('SELECT sum(r.charge_storage_bytes) FROM requests r JOIN evaluations e ON r.evaluation=e.id '
+                              'WHERE e.campaign=?', (campaign,)).fetchone()[0]
+            if used + policy['poll_storage_bytes'] > budget['total_storage_bytes']:
+                raise LimitExceeded('No storage for monitoring receipts')
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+? WHERE id=?',
+                       (policy['poll_storage_bytes'], request_id))
+            self._event(db, request_id, 'monitor_poll', dict(storage_bytes=policy['poll_storage_bytes']))
+            return True
+
+    def monitor_result(self, request_id, *, reason='', failed=False):
+        """Keep every poll result and deduplicate user-facing state transitions."""
+        if not isinstance(reason, str) or not re.fullmatch(r'[a-z_]{0,80}', reason) or type(failed) is not bool:
+            raise ValueError('Invalid monitoring result')
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            policy = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_registered'",
+                                (request_id,)).fetchone()
+            if policy is None:
+                raise Conflict('No monitoring policy')
+            previous = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_result' ORDER BY seq DESC LIMIT 1",
+                                  (request_id,)).fetchone()
+            previous = json.loads(previous[0]) if previous else {}
+            failures = previous.get('consecutive_failures', 0) + 1 if failed else 0
+            interval = json.loads(policy[0])['interval_seconds']
+            transition = dict(state=row['state'], accounted=bool(row['accounted']), reason=reason)
+            prior = db.execute("SELECT payload FROM events WHERE request_id=? AND kind='monitor_transition' ORDER BY seq DESC LIMIT 1",
+                               (request_id,)).fetchone()
+            changed = prior is None or json.loads(prior[0]) != transition
+            result = dict(**transition, consecutive_failures=failures,
+                          next_due=time.time() + min(3600, interval * 2 ** min(failures, 8)))
+            self._event(db, request_id, 'monitor_result', result)
+            if changed:
+                self._event(db, request_id, 'monitor_transition', transition)
+            return dict(**result, changed=changed)
 
     def recoverable(self):
         with self._transaction() as db:

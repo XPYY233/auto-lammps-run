@@ -45,7 +45,7 @@ python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-priv
 历史，见 [结果页面](docs/RESULTS_VIEW.md)。读取仅核验保存报告及来源回执，不发起计算。
 
 提交后的受信后台可自动跟进调度、回收输出并完成冻结计划分析，查询额度跨重启保留，见
-[自动跟进](docs/FOLLOWING.md)。已通过合成串联及进程退出恢复检查，尚未在真实 HPC 启用。
+[自动跟进](docs/FOLLOWING.md)。完整跟进已通过合成串联及进程退出恢复检查；独立调度监控现已在真实 B 启用并完成本机监督重启验收，真实自动回收与分析仍待完成。
 
 候选方案已连接已有许可下的上传、一次派发和自动跟进，见
 [受控执行连接](docs/AUTHORIZED_EXECUTION.md)。后台核对许可及精确输入绑定，不自动签发

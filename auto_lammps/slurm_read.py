@@ -5,6 +5,7 @@ Trusted controller API, not a runtime Agent tool or a security sandbox.
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import base64
+import json
 import os
 import re
 import selectors
@@ -197,7 +198,8 @@ class SlurmReader:
     No arbitrary command input. Logs contain private cluster metadata and must
     not be published. An audit write error propagates rather than being ignored.
     """
-    def __init__(self, host_alias, audit_directory, *, timeout=20, max_bytes=1_000_000):
+    def __init__(self, host_alias, audit_directory, *, timeout=20, max_bytes=1_000_000,
+                 retain_queue_identity=False):
         if not isinstance(host_alias, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}', host_alias):
             raise ValueError('Invalid SSH alias')
         if not 0 < timeout <= 60 or type(max_bytes) is not int or not 1024 <= max_bytes <= 4_000_000:
@@ -205,6 +207,65 @@ class SlurmReader:
         self.host_alias = host_alias
         self.audit_directory = private_directory(audit_directory)
         self.timeout, self.max_bytes = timeout, max_bytes
+        if type(retain_queue_identity) is not bool:
+            raise ValueError('Identity retention must be an explicit boolean')
+        self.retain_queue_identity = retain_queue_identity
+
+    def _accounting_identity(self, queue, accounting, request_id, manifest_sha256, queue_proof):
+        """Fill only empty root comments from exact, retained queue evidence.
+
+        The original query receipts are never changed. A different nonempty
+        comment, job, duplicate allocation, or restart is still rejected by interpret.
+        No retained binding is inferred from a job number or task name alone.
+        """
+        from .runtime_launcher import read_regular
+        name, comment = identity(request_id, manifest_sha256)
+        current = interpret(queue, '', request_id, manifest_sha256)
+        folder = private_directory(self.audit_directory / 'identities')
+        binding_path = folder / (request_id + '.json')
+        binding = None
+        if binding_path.exists():
+            binding = json.loads(read_regular(binding_path, 4096, private=True))
+            if (binding.get('request_id') != request_id or binding.get('manifest_sha256') != manifest_sha256
+                    or binding.get('host_alias') != self.host_alias
+                    or not re.fullmatch(r'[a-f0-9]{32}', binding.get('receipt_directory', ''))):
+                raise ValueError('Invalid retained scheduler identity')
+            receipt = read_regular(self.audit_directory / binding['receipt_directory'] / 'result.json',
+                                   6_000_000, private=True)
+            if sha256(receipt) != binding['queue_proof']:
+                raise ValueError('Retained queue receipt changed')
+            record = json.loads(receipt)
+            if record.get('failure') or record.get('returncode') != 0:
+                raise ValueError('Retained queue query was not successful')
+            prior = interpret(base64.b64decode(record['stdout'], validate=True).decode('utf-8'), '',
+                              request_id, manifest_sha256)
+            if prior.state not in {'queued', 'running'} or prior.job_id != binding['job_id']:
+                raise ValueError('Retained queue receipt does not prove identity')
+        if current.state in {'queued', 'running'}:
+            if binding and binding['job_id'] != current.job_id:
+                return accounting, ''  # Never rebind a request to another allocation.
+            if binding is None:
+                receipt_directory = self._last_queue_receipt_directory
+                binding = dict(request_id=request_id, manifest_sha256=manifest_sha256,
+                               host_alias=self.host_alias, job_id=current.job_id,
+                               queue_proof=queue_proof, receipt_directory=receipt_directory)
+                try:
+                    _write_new(binding_path, binding)
+                except FileExistsError:
+                    # Another reader won. Revalidate its exact evidence, never overwrite.
+                    return self._accounting_identity(queue, accounting, request_id, manifest_sha256, queue_proof)
+        if binding is None:
+            return accounting, ''
+        if accounting and not accounting.endswith('\n'):
+            return accounting, ''
+        rows = []
+        for line in accounting.splitlines():
+            fields = line.split('|')
+            if (len(fields) == 8 and fields[0].strip() == binding['job_id']
+                    and fields[2].strip() == name and not fields[3].strip()):
+                fields[3] = comment
+            rows.append('|'.join(fields))
+        return ''.join(row + '\n' for row in rows), sha256(read_regular(binding_path, 4096, private=True))
 
     def _query(self, arguments):
         path = self.audit_directory / uuid.uuid4().hex
@@ -220,6 +281,7 @@ class SlurmReader:
             result = dict(returncode=None, failure=type(exc).__name__, stdout='', stderr='')
         result = {**result, 'intent_sha256': intent, 'finished_utc': datetime.now(timezone.utc).isoformat()}
         digest = _write_new(path / 'result.json', result)
+        self._last_query_receipt_directory = path.name
         if result['failure']:
             return None, digest
         try:
@@ -234,13 +296,23 @@ class SlurmReader:
         datetime.strptime(since_utc, '%Y-%m-%dT%H:%M:%S')
         queue, queue_proof = self._query(['squeue', '--local', '--me', '--noheader', f'--name={name}',
                                         '--format=%i|%T|%j|%k'])
+        self._last_queue_receipt_directory = getattr(self, '_last_query_receipt_directory', '')
         accounting, account_proof = self._query([
             'sacct', '--local', '--noheader', '--parsable2', '--duplicates', f'--name={name}',
             f'--starttime={since_utc}',
             '--format=JobIDRaw,State%40,JobName%80,Comment%160,AllocCPUS,ElapsedRaw,ExitCode,Restarts'])
-        result = (interpret(queue, accounting, request_id, manifest_sha256)
-                  if queue is not None and accounting is not None else Observation('unknown', reason='query_failed'))
+        binding_proof = ''
+        interpreted_accounting = accounting
+        if self.retain_queue_identity and queue is not None and accounting is not None:
+            try:
+                interpreted_accounting, binding_proof = self._accounting_identity(
+                    queue, accounting, request_id, manifest_sha256, queue_proof)
+            except (ValueError, KeyError, TypeError, OSError, RuntimeError):
+                interpreted_accounting = None
+        result = (interpret(queue, interpreted_accounting, request_id, manifest_sha256)
+                  if queue is not None and interpreted_accounting is not None else Observation('unknown', reason='query_failed'))
         proof = dict(request_id=request_id, manifest_sha256=manifest_sha256, since_utc=since_utc,
-                     queue=queue_proof, accounting=account_proof, observation=asdict(result))
+                     queue=queue_proof, accounting=account_proof, retained_identity=binding_proof,
+                     observation=asdict(result))
         digest = _write_new(self.audit_directory / (uuid.uuid4().hex + '.json'), proof)
         return Observation(**{**asdict(result), 'evidence_sha256': digest})
