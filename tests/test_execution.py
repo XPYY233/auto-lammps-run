@@ -38,11 +38,14 @@ class ExecutionTests(unittest.TestCase):
         remote=runtime_fixtures.RuntimeTests();remote.setUp();self.addCleanup(remote.doCleanups);self.remote=remote
         self.resources=replace(runtime_fixtures.RESOURCES,cores=self.cores)
         if self.cores>1: remote.enable_mpi_fixture()
+        if getattr(self,'native_setup',None): self.native_setup(remote)
         self.root=f.root.resolve();self.tasks=TaskStore(self.root/'tasks.sqlite');self.doc=frozen_research(self.tasks)
         f.value['analysis']={'quantity':'synthetic curve','method':'synthetic arithmetic','files':['trajectory.dump'],'plan':deepcopy(PLAN)}
         f.value['workflow']='run 0\nprint "# columns: strain stress" file /output/trajectory.dump'
+        layout=getattr(self,'output_layout','isolated')
+        if layout=='working_directory': f.value['workflow']=f.value['workflow'].replace('/output/','')
         service=CandidateService(self.tasks,f.client,f.adapter,resources=self.resources,
-                                 snapshots=self.root/'snapshots')
+                                 snapshots=self.root/'snapshots',output_layout=layout)
         service.enqueue(self.doc['id'],self.doc['revision']);service.close(wait=True)
         self.assertEqual(service.history.get(self.doc['id'])['state'],'prepared')
         self.ledger=Ledger(self.root/'ledger.sqlite')
@@ -68,13 +71,14 @@ class ExecutionTests(unittest.TestCase):
         auth=ExistingAuthorization(remote.control,**self.pins)
         environment=BatchEnvironment('synthetic',None,str(requests),common['python_path'],str(self.helper),collect_endpoint.helper_sha256)
         self.controller=CandidateExecution(self.tasks,self.ledger,self.root/'snapshots',staging,submission,self.following,auth,environment,
-            runtime_profile_path=remote.profile_path if self.cores>1 else None)
+            runtime_profile_path=remote.profile_path if self.cores>1 or layout=='working_directory' else None)
         self.plan=self.controller.prepare(self.doc['id'],self.evaluation);self.request_id=self.plan['row']['id']
         self.outputs=json.loads((self.plan['snapshot'].path/'analysis.json').read_bytes())['outputs']
         self.payload=dict(request_id=self.request_id,manifest_sha256=self.plan['snapshot'].digest,
             **{k:v for k,v in self.pins.items() if k!='software_sha256'},expires_at=4102444800,
             task_sha256=self.plan['snapshot'].verify()['provenance']['task_sha256'],
             resources=asdict(self.resources),outputs=self.outputs,batch_sha256=self.plan['batch'].sha256)
+        if layout=='working_directory': self.payload.update(execution_scope='trusted_research',formal_isolation=False)
         self.scheduler_binary=remote.root/'not-a-scheduler';self.scheduler_binary.write_bytes(b'never executed')
         self.submit_config=remote.root/'submission.json'
         remote.private(self.submit_config,canonical(dict(runtime_path=str(self.helper),runtime_sha256=sha256(self.helper.read_bytes()),

@@ -51,6 +51,12 @@ class ExistingAuthorization:
             raw=read_file(root,'analysis.json',record['size'])
         if sha256(raw)!=manifest['provenance']['analysis_sha256']:raise Conflict('Wrong frozen analysis')
         outputs=json.loads(raw)['outputs']
+        with root_descriptor(snapshot.path) as root:
+            record=next(item for item in manifest['files'] if item['path']=='generation.json')
+            generation=json.loads(read_file(root,'generation.json',record['size']))
+        if generation['input'].get('output_layout')=='working_directory' and (
+                grant.get('execution_scope')!='trusted_research' or grant.get('formal_isolation') is not False):
+            raise Conflict('Native execution requires an explicit non-isolated research grant')
         if not isinstance(grant.get('outputs'),list) or sorted(grant['outputs'])!=sorted(outputs):
             raise Conflict('Grant outputs differ from frozen plan')
         script=runtime.read_regular(self.directory/(submission.request_id+'.sh'),1000000,private=True)
@@ -113,7 +119,11 @@ class CandidateExecution:
             if sha256(raw)!=self.authorization.pins['profile_sha256']:
                 raise Conflict('Runtime capacity differs from the pinned deployment profile')
             profile=json.loads(raw)
-        runtime.validate_parallelism(profile,resources.cores)
+        runtime.deployment_parallelism(profile,resources.cores)
+        mode=runtime.execution_mode(profile)
+        expected_layout='working_directory' if mode=='native_slurm' else 'isolated'
+        if context.get('output_layout','isolated')!=expected_layout:
+            raise Conflict('Candidate output layout differs from the frozen execution deployment')
         # The key is owned by the controller; callers cannot rename an attempt.
         key='candidate_'+job['id']
         row=self.ledger.reserve(evaluation,key,digest,resources)

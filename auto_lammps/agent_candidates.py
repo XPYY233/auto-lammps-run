@@ -39,7 +39,8 @@ def validate_body(body, outputs, *, output_prefix='/output/'):
     """Conservative syntax/resource screen, NOT a scientific or security verifier.
 
     No subprocess is used. Loops and dynamic dispatch are deliberately unsupported;
-    distinct scientific stages must be explicit. Sandbox deployment remains required.
+    distinct scientific stages must be explicit. Execution needs a separate trusted
+    deployment; this screen never establishes isolation.
     """
     _text(body, 100000)
     if not body.isascii() or '\r' in body or '\\' in body or '&' in body or '"""' in body or "'''" in body:
@@ -99,7 +100,7 @@ def validate_body(body, outputs, *, output_prefix='/output/'):
             'execution_authorized': False}
 
 
-def validate_proposal(value, *, max_atoms):
+def validate_proposal(value, *, max_atoms, output_layout="isolated"):
     fields = {'summary', 'questions', 'structure', 'potential_pin', 'workflow', 'analysis'}
     if not isinstance(value, dict) or set(value) != fields:
         raise CandidateError('Candidate proposal fields are incomplete')
@@ -128,10 +129,17 @@ def validate_proposal(value, *, max_atoms):
         raise CandidateError('Analysis output names must be distinct flat filenames')
     if 'plan' in analysis:
         validate_plan(analysis['plan'],files)
-    return validate_body(value['workflow'], files)
+    return validate_body(value['workflow'], files, output_prefix=output_prefix(output_layout))
 
 
-def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
+def output_prefix(layout):
+    if layout not in ('isolated', 'working_directory'):
+        raise CandidateError('Unsupported frozen output layout')
+    return '/output/' if layout == 'isolated' else ''
+
+
+def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated'):
+    prefix = output_prefix(output_layout)
     _text(task_text, 24000)
     if units not in ('metal', 'real'):
         raise CandidateError('Explicit supported task units are required')
@@ -187,7 +195,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
         'at least three samples and variable x. Do not choose windows after seeing results or silently '
         'change units or scientific methods. Use clarification questions for missing analysis conditions '
         'or unsupported analysis; never substitute numeric-table analysis for required structural analysis. '
-        'Write every analysis file to /output/<flat_filename>; list its basename in analysis.files. '
+        f'Write every analysis file to {prefix}<flat_filename>; list its basename in analysis.files. '
         'Do not use stdout.txt, stderr.txt or log.lammps as analysis outputs. '
         'The result is an unverified proposal, not permission to submit. Never assert scientific success.'
     )
@@ -196,7 +204,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
 
 
 def generate_candidate_draft(client, adapter, *, task_text, units, resources, store, max_atoms=100000,
-                             condition_record_sha256=None, on_stage=None):
+                             condition_record_sha256=None, on_stage=None, output_layout='isolated'):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -208,18 +216,21 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     if condition_record_sha256 is not None and (not isinstance(condition_record_sha256, str)
                                                 or not re.fullmatch('[a-f0-9]{64}', condition_record_sha256)):
         raise CandidateError('Invalid frozen condition record digest')
+    output_prefix(output_layout)
     compatible = adapter.compatible_models(units=units)
     if not compatible:
         raise CandidateError('No allowlisted statically compatible potential; no model request sent')
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
         raise CandidateError('Invalid geometry atom limit')
     runtime = geometry_runtime()
-    messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms)
+    messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms, output_layout=output_layout)
     context = {'generator_version': GENERATOR_VERSION, 'messages': messages,
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'potential_compatibility': adapter.compatibility_policy(),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
                'condition_record_sha256': condition_record_sha256}
+    if output_layout != 'isolated':
+        context['output_layout'] = output_layout
     request_id = sha256(canonical(context))[:32]
     if on_stage:
         on_stage('model_requested')
@@ -228,7 +239,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             or completion['receipt']['output_sha256'] != sha256(canonical(completion['value']))):
         raise ModelError('candidate_generation_not_completed')
     proposal = completion['value']
-    screen = validate_proposal(proposal, max_atoms=max_atoms)
+    screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
     if screen is None:
         return {'status': 'clarification_required', 'proposal': proposal, 'model_receipt': completion['receipt'],
                 'request_id': request_id, 'execution_authorized': False}
@@ -254,6 +265,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                   'execution_authorized': False}
     files = {**binding.files, 'structure.data': geometry.data, 'in.lammps': script,
              'analysis.json': canonical(analysis), 'generation.json': canonical(generation)}
+    if output_layout == 'working_directory':
+        for name in analysis['outputs']:
+            if any(name == path.split('/')[0] for path in files):
+                raise CandidateError('Output collides with a frozen input')
     roles = {**{name: 'potential' for name in binding.files}, 'structure.data': 'structure',
              'in.lammps': 'lammps_input', 'analysis.json': 'analysis_spec', 'generation.json': 'analysis_spec'}
     store = private_directory(store)
@@ -291,10 +306,10 @@ def research_inputs(tasks, identifier, revision):
             'condition_record_sha256': sha256(frozen)}
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None):
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, output_layout='isolated'):
     """Research bridge; reference tasks still need the separate release/isolation gate."""
     inputs = research_inputs(tasks, identifier, revision)
     # Only selected confirmed values; no task title, free prompt, discarded
     # alternatives, source context or reference-side export enters the model.
     return generate_candidate_draft(client, adapter, **inputs, resources=resources,
-                                    store=store, max_atoms=max_atoms, on_stage=on_stage)
+                                    store=store, max_atoms=max_atoms, on_stage=on_stage, output_layout=output_layout)

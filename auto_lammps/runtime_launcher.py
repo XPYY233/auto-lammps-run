@@ -2,7 +2,8 @@
 
 The administrator installs this reviewed file with runtime.json next to it.
 A private controller signs request grants; neither key nor grants are mounted
-inside the sandbox. Tests use synthetic data and never invoke a physics engine.
+inside the default sandbox. Native Slurm is a separately authorized trusted research
+mode without filesystem/network isolation. Tests never invoke a physics engine.
 """
 import argparse
 from contextlib import contextmanager, ExitStack
@@ -712,6 +713,125 @@ def limit_child(memory_bytes, file_bytes):
     resource.setrlimit(resource.RLIMIT_NOFILE,(64,64))
 
 
+def execution_mode(profile):
+    mode = profile.get('execution_mode', 'isolated')
+    if mode not in ('isolated', 'native_slurm'):
+        raise ExecutionDenied('Unknown execution mode; no automatic fallback')
+    return mode
+
+
+def deployment_parallelism(profile, cores):
+    if execution_mode(profile) == 'isolated':
+        return validate_parallelism(profile, cores)
+    native = profile.get('native_slurm')
+    required = {'scope', 'formal_isolation', 'storage_enforcement', 'max_ranks',
+                'shell_path', 'bootstrap_path', 'modules', 'mpi_path', 'engine_path', 'files'}
+    if not isinstance(native, dict) or set(native) != required:
+        raise ExecutionDenied('Explicit native Slurm deployment required')
+    if (native['scope'] != 'trusted_research' or native['formal_isolation'] is not False
+            or native['storage_enforcement'] != 'collection_bound_only'):
+        raise ExecutionDenied('Native research cannot promise isolation or filesystem quotas')
+    if (type(cores) is not int or type(native['max_ranks']) is not int
+            or not 1 <= cores <= native['max_ranks'] <= 65536):
+        raise ExecutionDenied('Native rank count exceeds the pinned deployment')
+    modules = native['modules']
+    if (not isinstance(modules, list) or not 1 <= len(modules) <= 16
+            or any(not isinstance(m, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./+-]{0,159}', m)
+                   or '..' in m.split('/') for m in modules)):
+        raise ExecutionDenied('Invalid native module list')
+    files = native['files']
+    if not isinstance(files, dict) or not 4 <= len(files) <= 128:
+        raise ExecutionDenied('Pin the native launcher, engine and environment files')
+    for path, checksum in files.items():
+        absolute(path); hash_value(checksum)
+        for key in ('requests_root', 'control_root'):
+            parent = absolute(profile[key])
+            if absolute(path) == parent or parent in absolute(path).parents:
+                raise ExecutionDenied('Native executable cannot come from task or grant storage')
+    for key in ('shell_path', 'bootstrap_path', 'mpi_path', 'engine_path'):
+        if native[key] not in files:
+            raise ExecutionDenied('Missing native executable identity')
+    return native
+
+
+def native_command(native, *, entrypoint, cores):
+    # Trusted deployment paths/modules are positional arguments, never shell source.
+    # Native MPI uses the scheduler bootstrap; never copy isolated fork/loopback flags.
+    script = ('set -eo pipefail\nsource "$1"\nshift\nmodule purge\n'
+              'count="$1"\nshift\nfor ((i=0; i<count; i++)); do module load "$1"; shift; done\n'
+              'export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 SLURM_EXPORT_ENV=ALL I_MPI_HYDRA_BOOTSTRAP=slurm\n'
+              'exec "$@"\n')
+    return [native['shell_path'], '--noprofile', '--norc', '-c', script, 'auto-lammps-native',
+            native['bootstrap_path'], str(len(native['modules'])), *native['modules'], native['mpi_path'],
+            '-np', str(cores), native['engine_path'], '-in', relative(entrypoint), '-log', 'log.lammps', '-screen', 'none']
+
+
+def execute_native(profile, profile_data, case, manifest, grant, *, request_id, manifest_sha256,
+                   job_id, cpus, elapsed, query_start):
+    """Explicit trusted research mode, not a security sandbox or blind evaluation.
+
+    Same immutable input/grant/intent and collection layout as isolated execution.
+    Cluster cgroups enforce CPUs/memory/time; storage_bytes bounds collection only.
+    """
+    resources = manifest['resources']; native = deployment_parallelism(profile, resources['cores'])
+    if grant.get('execution_scope') != 'trusted_research' or grant.get('formal_isolation') is not False:
+        raise ExecutionDenied('Native execution requires an explicit non-isolated research grant')
+    generation = json.loads(read_regular(case/'generation.json', 1000000))
+    if generation.get('input', {}).get('output_layout') != 'working_directory':
+        raise ExecutionDenied('Native execution requires a frozen working-directory candidate')
+    analysis_raw = read_regular(case/'analysis.json', 1000000)
+    if (digest(analysis_raw) != manifest['provenance']['analysis_sha256']
+            or json.loads(analysis_raw).get('outputs') != grant['outputs']):
+        raise ExecutionDenied('Native output list differs from frozen analysis')
+    for path, checksum in native['files'].items():
+        if digest(read_regular(path, 1024*1024*1024)) != checksum:
+            raise ExecutionDenied('Native environment file changed')
+    outputs = grant['outputs']
+    inputs = {item['path'].split('/')[0] for item in manifest['files']}
+    if inputs.intersection(outputs):
+        raise ExecutionDenied('Native output collides with a frozen input')
+    argv = native_command(native, entrypoint=manifest['entrypoint'], cores=resources['cores'])
+    write_once(case/'execution-intent.json', dict(request_id=request_id,job_id=job_id,manifest_sha256=manifest_sha256,
+        profile_sha256=digest(profile_data),grant_sha256=digest(canonical(grant)),argv_sha256=digest(canonical(argv)),
+        outputs=outputs,ranks=resources['cores'],cpu_ids=sorted(cpus),output_storage=None,
+        execution_mode='native_slurm',formal_isolation=False,storage_enforcement='collection_bound_only',
+        at=datetime.now(timezone.utc).isoformat()))
+    output = case/'output'; output.mkdir(mode=0o700, exist_ok=False)
+    # Regular, byte-verified copies. Original staged inputs remain immutable.
+    for item in manifest['files']:
+        path = output/relative(item['path'])
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data = read_regular(case/item['path'], item['size'])
+        if len(data) != item['size'] or digest(data) != item['sha256']:
+            raise ExecutionDenied('Native input changed before staging into work directory')
+        fd = os.open(path, os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, 'wb') as target:
+            target.write(data); target.flush(); os.fsync(target.fileno())
+    remaining = resources['wall_seconds'] - elapsed - (time.monotonic()-query_start)
+    if remaining <= 0:
+        raise ExecutionDenied('Preflight exhausted remaining wall time')
+    environment = {k:v for k,v in os.environ.items() if k.startswith('SLURM_')}
+    environment.update(PATH='/usr/bin:/bin',LC_ALL='C')
+    started = time.monotonic(); timed_out = False
+    with (output/'stdout.txt').open('xb') as stdout, (output/'stderr.txt').open('xb') as stderr:
+        process = subprocess.Popen(argv,cwd=output,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,
+            close_fds=True,start_new_session=True,env=environment,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+        try:
+            code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid,signal.SIGKILL); code = process.wait()
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid,signal.SIGKILL); process.wait()
+    result = dict(request_id=request_id,job_id=job_id,returncode=code,timed_out=timed_out,
+                  elapsed_seconds=time.monotonic()-started,scientific_status='not_evaluated',
+                  execution_mode='native_slurm',formal_isolation=False)
+    write_once(case/'execution-result.json', result)
+    return result
+
+
 def execute(profile_path, request_id, manifest_sha256):
     if sys.platform != 'linux':
         raise ExecutionDenied('Only the approved Linux compute-node runtime may execute')
@@ -746,13 +866,13 @@ def execute(profile_path, request_id, manifest_sha256):
         raise ExecutionDenied('Invalid frozen resource limits')
     if resources != grant['resources'] or manifest['provenance']['task_sha256'] != grant['task_sha256']:
         raise ExecutionDenied('Grant resources/task mismatch')
-    validate_parallelism(profile, resources['cores'])
+    deployment_parallelism(profile, resources['cores'])
     cpus = cgroup_cpu_set()
     if len(cpus) != resources['cores'] or set(os.sched_getaffinity(0)) != cpus:
         raise ExecutionDenied('CPU cgroup and affinity must match the exact approved allocation')
     if cgroup_memory_limit() > resources['memory_bytes']:
         raise ExecutionDenied('Memory cgroup exceeds approved ceiling')
-    for prefix in ('bwrap','scontrol'):
+    for prefix in (('bwrap','scontrol') if execution_mode(profile) == 'isolated' else ('scontrol',)):
         if digest(read_regular(absolute(profile[prefix+'_path']),64*1024*1024)) != hash_value(profile[prefix+'_sha256']):
             raise ExecutionDenied('Unverified deployment executable')
     query_start = time.monotonic()
@@ -762,7 +882,7 @@ def execute(profile_path, request_id, manifest_sha256):
         raise ExecutionDenied('Oversized allocation record')
     elapsed = parse_allocation(query.stdout.decode('utf-8'),request_id=request_id,manifest_sha256=manifest_sha256,
                                job_id=job_id,uid=os.getuid(),host=socket.gethostname(),resources=resources)
-    verify_runtime_tree(profile)
+    if execution_mode(profile) == 'isolated': verify_runtime_tree(profile)
     staged = json.loads(read_regular(case/'stage.json',16384))
     if staged.get('state') != 'staged' or staged.get('manifest_sha256') != manifest_sha256 or staged.get('request_id') != request_id:
         raise ExecutionDenied('Missing complete upload receipt')
@@ -779,6 +899,11 @@ def execute(profile_path, request_id, manifest_sha256):
         input_bytes += len(read_regular(case/'job.sh',1000000))
     outputs = grant['outputs']
     per_file = validate_outputs(outputs,storage_bytes=resources['storage_bytes'],input_bytes=input_bytes)
+    if execution_mode(profile) == 'native_slurm':
+        if profile.get('output_volume') is not None:
+            raise ExecutionDenied('Native Slurm does not use isolated output volumes')
+        return execute_native(profile,profile_data,case,manifest,grant,request_id=request_id,
+            manifest_sha256=manifest_sha256,job_id=job_id,cpus=cpus,elapsed=elapsed,query_start=query_start)
     allocation = volume_allocation(profile, storage_bytes=resources['storage_bytes'], input_bytes=input_bytes)
     if allocation:
         per_file = allocation['image_bytes']
