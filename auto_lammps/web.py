@@ -488,6 +488,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def candidate_start(identifier: str, data: Revision):
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
+        if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
         return {'candidate': candidate_service.enqueue(identifier, data.revision)}
 
     @app.get('/api/tasks/{identifier}/candidate/files/{name}')

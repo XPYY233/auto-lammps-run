@@ -20,9 +20,12 @@ LABELS={'queued':'等待执行','running':'核验许可并推进计算','waiting
 
 
 class ExecutionJobs:
-    def __init__(self, controller, bindings):
+    def __init__(self, controller, bindings, *, enrollment=None):
         self.controller=controller;self.tasks=controller.tasks;self.ledger=controller.ledger
         self.bindings=dict(bindings);self.history=CandidateHistory(self.tasks)
+        self.enrollment=enrollment
+        if enrollment is not None and (enrollment.tasks.path!=self.tasks.path or enrollment.ledger.path!=self.ledger.path):
+            raise ValueError('Enrollment must use the same task store and ledger')
         from .runtime_launcher import hash_value
         for key,value in self.bindings.items():task_id(key);hash_value(value)
         # Bind deployment semantics, not unrelated webpage edits or other tasks.
@@ -34,6 +37,7 @@ class ExecutionJobs:
             runtime_profile=str(controller.runtime_profile_path),
             sources={name:sha256((Path(__file__).parent/name).read_bytes())
                      for name in ('execution_jobs.py','execution.py','submission.py','staging.py','slurm_submit.py')})
+        if enrollment is not None:config['enrollment']=enrollment.identity
         self.config_sha256=sha256(canonical(config))
         self.stop=threading.Event();self.wake=threading.Event();self.thread=None
         with self.tasks.transaction() as db:
@@ -45,6 +49,20 @@ class ExecutionJobs:
                 for action in ('UPDATE','DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable execution history'); END")
+
+    def evaluation_for(self, identifier):
+        explicit=self.bindings.get(identifier)
+        registered=self.enrollment.get(identifier) if self.enrollment else None
+        if explicit and registered and explicit!=registered['evaluation']:
+            raise TaskError('任务执行身份冲突，原提交历史保留。')
+        return explicit or (registered['evaluation'] if registered else None)
+
+    def register_for_generation(self, identifier, revision):
+        if identifier in self.bindings:
+            return self.evaluation_for(identifier)
+        if self.enrollment is not None:
+            return self.enrollment.register(identifier,revision)
+        return None
 
     def _event(self, db, job, state, reason=''):
         previous=db.execute('SELECT seq,state,reason FROM execution_job_events WHERE job_id=? ORDER BY seq DESC LIMIT 1',(job,)).fetchone()
@@ -74,20 +92,22 @@ class ExecutionJobs:
                 scientific_status='not_evaluated',reason=job['reason'],
                 events=[dict(at=e['at'],label=LABELS[e['state']],reason=e['reason']) for e in job['events']]))
         candidate=self.history.get(identifier)
-        ready=identifier in self.bindings and candidate is not None and candidate['state']=='prepared'
-        evaluation=self.ledger.evaluation_snapshot(self.bindings[identifier]) if identifier in self.bindings else None
-        return dict(configured=identifier in self.bindings,worker_alive=live,can_start=ready,job=None,
+        binding=self.evaluation_for(identifier)
+        ready=binding is not None and candidate is not None and candidate['state']=='prepared'
+        evaluation=self.ledger.evaluation_snapshot(binding) if binding else None
+        return dict(configured=binding is not None or self.enrollment is not None,worker_alive=live,can_start=ready,job=None,
                     submissions=dict(count=evaluation['dispatch_claims'],maximum=evaluation['max_attempts']) if evaluation else None,
-                    message='方案已准备，可开始计算。' if ready else '计算部署尚未绑定此任务。' if identifier not in self.bindings else '计算方案尚未准备完成。')
+                    message='方案已准备，可开始计算。' if ready else '确认需求并生成方案后可开始计算。' if self.enrollment is not None and binding is None else '计算部署尚未绑定此任务。' if binding is None else '计算方案尚未准备完成。')
 
     def enqueue(self, identifier, revision):
         doc=self.tasks.get(identifier)
         if doc['revision']!=revision:raise StaleTask('任务已变化，请刷新后再开始。')
         job=self.get(identifier)
         if job:return self.status(identifier)
-        if identifier not in self.bindings:raise TaskError('此任务尚未接入已核验的计算部署。')
+        evaluation=self.evaluation_for(identifier)
+        if evaluation is None:raise TaskError('此任务尚未接入已核验的计算部署。')
         # Only the controller can select evaluation and reserve the existing key.
-        plan=self.controller.prepare(identifier,self.bindings[identifier])
+        plan=self.controller.prepare(identifier,evaluation)
         with self.tasks.transaction() as db:
             latest=self.tasks._read(db,identifier)
             if latest['revision']!=revision:raise StaleTask('任务已变化，请刷新后再开始。')
@@ -95,7 +115,7 @@ class ExecutionJobs:
             if row is None:
                 job=uuid.uuid4().hex
                 db.execute('INSERT INTO execution_jobs VALUES (?,?,?,?,?,?)',(job,identifier,revision,
-                    self.bindings[identifier],plan['row']['id'],self.config_sha256))
+                    evaluation,plan['row']['id'],self.config_sha256))
                 self._event(db,job,'queued')
         self.wake.set()
         return self.status(identifier)
@@ -108,7 +128,7 @@ class ExecutionJobs:
             if not acquired:return self.status(identifier)
             job=self.get(identifier)
             if job['state'] not in ACTIVE:return self.status(identifier)
-            if job['config_sha256']!=self.config_sha256 or self.bindings.get(identifier)!=job['evaluation']:
+            if job['config_sha256']!=self.config_sha256 or self.evaluation_for(identifier)!=job['evaluation']:
                 with self.tasks.transaction() as db:self._event(db,job['id'],'attention','deployment_changed')
                 return self.status(identifier)
             if job['state']=='queued':
@@ -164,7 +184,8 @@ def load_execution_jobs(tasks, ledger, path):
     required={'snapshots_directory','collections_directory','reports_directory','audit_directory',
               'stage_endpoint','submit_endpoint','collect_endpoint','environment','authorization',
               'runtime_profile_path','max_polls','interval_seconds','query_max_bytes','task_evaluations'}
-    if set(value) not in (required,required|{'hpc_connection_revision'}):raise ValueError('Invalid execution deployment fields')
+    optional={'hpc_connection_revision','research_enrollment'}
+    if not required<=set(value) or set(value)-required-optional:raise ValueError('Invalid execution deployment fields')
     audit=Path(value['audit_directory'])
     stage=StageEndpoint(**value['stage_endpoint']);submit=StageEndpoint(**value['submit_endpoint']);collect=StageEndpoint(**value['collect_endpoint'])
     transport=None
@@ -187,4 +208,8 @@ def load_execution_jobs(tasks, ledger, path):
         SubmissionService(ledger,SlurmSubmitter(ledger,submit,audit/'dispatch',transport=transport)),following,
         ExistingAuthorization(**value['authorization']),BatchEnvironment(**value['environment']),
         runtime_profile_path=value['runtime_profile_path'])
-    return ExecutionJobs(controller,value['task_evaluations'])
+    enrollment=None
+    if 'research_enrollment' in value:
+        from .research_enrollment import ResearchEnrollment
+        enrollment=ResearchEnrollment(tasks,ledger,**value['research_enrollment'])
+    return ExecutionJobs(controller,value['task_evaluations'],enrollment=enrollment)
