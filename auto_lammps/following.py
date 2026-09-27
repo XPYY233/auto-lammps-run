@@ -31,7 +31,7 @@ class FollowingService:
         config=dict(snapshots=str(self.snapshots),collection=str(collector.directory),reports=str(analysis.directory),
             endpoint=asdict(collector.endpoint),query=dict(host=reader.host_alias,audit=str(reader.audit_directory),
             timeout=reader.timeout,max_bytes=reader.max_bytes),collection_timeout=collector.timeout,
-            analysis=adapter_identity(),follower_sha256=sha256(Path(__file__).read_bytes()))
+            analysis=getattr(analysis,'identity',adapter_identity)(),follower_sha256=sha256(Path(__file__).read_bytes()))
         self.config_sha256=sha256(canonical(config))
 
     def _progress(self, request_id, state, reason=''):

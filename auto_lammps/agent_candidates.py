@@ -13,9 +13,9 @@ from .deepseek import ModelError
 from .ledger import Resources
 from .manifest import canonical, freeze, private_directory, sha256
 from .structures import build_structure, geometry_runtime, validate_structure
-from .analysis import adapter_identity, validate_plan
+from .analysis_v2 import adapter_identity, plan_adapter, validate_plan
 
-GENERATOR_VERSION = 3
+GENERATOR_VERSION = 4
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -174,6 +174,14 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms):
         'Each numeric table must start with exactly "# columns: <space-separated names>" and '
         '"# units: <space-separated units>", then finite numeric rows with those columns. '
         'Use print or fix ave/time scalar title1/title2 to write these headers. '
+        'Alternatively, keep native fix ave/time scalar output: declare table with exactly '
+        '{file,format:"lammps_ave_time_scalar",headers:[exact_first_header,exact_second_header], '
+        'columns:[{name,unit,source},...],steps:{first,last,stride}}. The first column source is '
+        'TimeStep with unit step. headers[1] is "# " followed by the ordered source labels, such as '
+        '"# TimeStep v_strain v_stress". Declare the actual first/last output timestep and positive '
+        'integer stride before execution; all expected samples must be present. Native headers do '
+        'not verify units: declare units from the physical workflow, never infer them from variable names. '
+        'Do not declare vector/block output as scalar. Both table formats may share a plan. '
         'Each operation is {id,method,file,x,y,window:[min,max]}; method is summary, last, or linear_fit. '
         'x selects the inclusive predeclared window; y is the quantity to analyze. linear_fit requires '
         'at least three samples and variable x. Do not choose windows after seeing results or silently '
@@ -210,7 +218,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     context = {'generator_version': GENERATOR_VERSION, 'messages': messages,
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'potential_compatibility': adapter.compatibility_policy(),
-               'geometry_runtime': runtime, 'condition_record_sha256': condition_record_sha256}
+               'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
+               'condition_record_sha256': condition_record_sha256}
     request_id = sha256(canonical(context))[:32]
     if on_stage:
         on_stage('model_requested')
@@ -233,9 +242,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     header = [f'units {units}', 'atom_style atomic', 'boundary ' + ' '.join(proposal['structure']['boundary']),
               'read_data structure.data', *binding.commands]
     script = ('\n'.join(header) + '\n' + proposal['workflow'] + '\n').encode('ascii')
+    implementation, identity = (plan_adapter(proposal['analysis']['plan']) if 'plan' in proposal['analysis']
+                                else ('not_implemented',None))
     analysis = {'proposal': proposal['analysis'], 'outputs': sorted(RESERVED_OUTPUTS) + proposal['analysis']['files'],
-                'implementation_status': 'numeric_tables_v1' if 'plan' in proposal['analysis'] else 'not_implemented',
-                'adapter_identity': adapter_identity() if 'plan' in proposal['analysis'] else None}
+                'implementation_status': implementation, 'adapter_identity': identity}
     generation = {'schema_version': 1, 'status': 'candidate_prepared_review_required',
                   'request_id': request_id, 'input': context, 'proposal': proposal,
                   'model_receipt': completion['receipt'], 'geometry_receipt': geometry.receipt,
