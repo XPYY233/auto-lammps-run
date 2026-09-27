@@ -15,5 +15,7 @@ jobs:
         run: python3 -m pip install -e '.[web,test,geometry]'
       - name: Offline tests
         run: python3 -m unittest discover -s tests -v
+      - name: Result refresh race checks
+        run: node --test tests/js/*.test.cjs
       - name: Public-tree guard
         run: python3 scripts/check_public_tree.py

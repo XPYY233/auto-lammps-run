@@ -6,6 +6,7 @@ let schema, current = null, editing = null, resolving = null, busy = false;
 let literaturePreview = null;
 let paperFilter='all';
 let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
+let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:null};
 let candidateState=null, candidateTask=null, candidatePolling=false;
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
 const literatureColumns = {material:'材料',conditions:'条件',conditions_text:'条件说明'};
@@ -52,7 +53,10 @@ async function listTasks() {
 async function openTask(id) {
   current = await api('/api/tasks/'+id);
   $('#advanced-task').open=false;
-  normalResult=null;workspaceReport=null;
+  normalResult=null;workspaceReport=null;rawResult=null;executionState=null;
+  workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
+  for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
+  renderWorkspaceResults();
   history.replaceState(null, '', '#'+id);
   render();
   $('#results-content').replaceChildren();
@@ -677,7 +681,7 @@ function paperCard(p,statuses,availableTasks) {
 setInterval(()=>{if(location.hash==='#papers'&&!busy&&!document.querySelector('dialog[open]')&&!$('#papers-view').contains(document.activeElement))action(refreshPapers);},15000);
 
 // Researcher workspace. Views read existing evidence; no controls dispatch jobs.
-function hideViews(show){$('.search-box').hidden=!['home-view','tasks-view'].includes(show);for(const id of ['home-view','welcome','tasks-view','papers-view','resources-view','help-view','task-view']) $('#'+id).hidden=id!==show;}
+function hideViews(show){$('#go-home').setAttribute('aria-current',show==='home-view'?'page':'false');$('.search-box').hidden=false;for(const id of ['home-view','welcome','tasks-view','papers-view','resources-view','help-view','task-view']) $('#'+id).hidden=id!==show;}
 function selectNavigation(name){
   for(const [id,key] of Object.entries({'top-new':'new','top-tasks':'tasks','top-papers':'papers','top-resources':'resources','top-help':'help'})){
     $('#'+id).classList.toggle('selected',name===key);
@@ -734,18 +738,33 @@ function potentialResourceRows(p){
    note:details.join('\n')};
  });
 }
+function potentialBundleRows(p){
+ const files=potentialResourceRows(p),used=new Set(),groups=new Map();
+ for(const binding of p.potential_acquisition?.bindings||[]){
+  const paths=[...new Set(Object.values(binding.files||{}))].sort();if(!paths.length)continue;
+  const key=JSON.stringify([paths,binding.elements,binding.pair_style]);if(groups.has(key))continue;
+  const present=files.filter(f=>paths.includes(f.filename));if(!present.length)continue;
+  const first=present[0],missing=paths.filter(path=>!present.some(f=>f.filename===path));
+  present.forEach(f=>used.add(f.filename));
+  groups.set(key,{...first,name:`${(binding.elements||[]).join('–')||'元素待核验'} · ${(binding.pair_style||'类型待核验').toUpperCase()}`,
+   filename:'',companion:paths.join('、'),bundle:true,files:present,tags:[`${present.length} 个配套文件`,missing.length?'存在缺项':'配套文件已取得'],
+   state:missing.length?'缺少 '+missing.join('、'):first.state,
+   note:'元素覆盖不代表所有温度、成分或研究性质适用。\n'+first.note});
+ }
+ return [...groups.values(),...files.filter(f=>!used.has(f.filename))];
+}
 function renderResourceTable(){
- const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter)&&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=rows.length+' 项已登记资源 · 验证范围以来源记录为准';
+ const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter)&&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=`${rows.filter(r=>r.bundle).length} 套势函数 · ${rows.filter(r=>r.kind==='potential').reduce((n,r)=>n+(r.files?.length||1),0)} 个势函数文件 · ${rows.filter(r=>r.kind==='paper').length} 项源码关联 · ${rows.filter(r=>r.kind==='tools').length} 项工具文档`;
  if(!rows.length){box.append(emptyState('没有匹配的资源','调整关键词或资源分类。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['资源','类型 / 元素','版本','验证状态','来源与详情'])hr.append(node('th',label));head.append(hr);table.append(head,body);
- for(const r of rows){const tr=node('tr'),name=node('td');name.append(node('strong',r.name));if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));if(r.tags){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}if(r.companion)name.append(node('small','配套文件：'+r.companion));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version?r.version.slice(0,12):'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}if(r.version)d.append(node('p','固定版本：'+r.version));for(const line of r.note.split('\n'))d.append(node('p',line));if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
+ for(const r of rows){const tr=node('tr'),name=node('td');name.append(node('strong',r.name));if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));if(r.tags){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}if(r.companion&&!r.bundle)name.append(node('small','配套文件：'+r.companion));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version?r.version.slice(0,12):'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}if(r.version)d.append(node('p','固定版本：'+r.version));for(const line of r.note.split('\n'))d.append(node('p',line));if(r.files){d.append(node('h4','配套文件与来源'));for(const f of r.files){d.append(node('p',f.filename,'mono'));if(f.hash)d.append(node('code','SHA-256 '+f.hash));const link=node('a','查看该文件来源');link.href=f.url;link.target='_blank';link.rel='noopener noreferrer';d.append(link);}}else if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
 }
 async function showResources(){
  current=null;hideViews('resources-view');selectNavigation('resources');history.replaceState(null,'','#resources');
  const result=await api('/api/papers');resourceRows=[];
  for(const button of document.querySelectorAll('[data-resource]')){button.classList.toggle('selected',button.dataset.resource===resourceFilter);button.onclick=()=>{resourceFilter=button.dataset.resource;for(const b of document.querySelectorAll('[data-resource]'))b.classList.toggle('selected',b===button);renderResourceTable();};}
  for(const p of result.papers){
-  resourceRows.push(...potentialResourceRows(p));
+  resourceRows.push(...potentialBundleRows(p));
   for(const c of (p.source_discovery?.candidates||[]).filter(c=>c.association==='doi_and_title'))resourceRows.push({kind:'paper',name:c.repository,type:'论文源码',elements:'',version:c.commit?.slice(0,12),paper:p.title,doi:p.doi,url:c.url,state:'题目与 DOI 相符',note:'关联证据不等于作者身份核验。源码仅供参考端验证，不提供给独立评测生成者。'});
  }
  for(const [name,url,note] of [['LAMMPS','https://docs.lammps.org/','模拟引擎；实际版本及能力以任务环境记录为准。'],['OVITO','https://www.ovito.org/','结构与轨迹分析工具；网页交互尚待接入。']])resourceRows.push({kind:'tools',name,type:'工具文档',url,note,state:'官方文档'});
@@ -763,13 +782,13 @@ function addInfo(label,value){$('#task-information').append(node('dt',label),nod
 function bState(report){return report.agent_progress?.stage || '记录暂不可核验';}
 function bCount(report){return report.agent_progress?.available ? `${report.agent_progress.dispatch_claims} / 2` : '暂不可核验';}
 function renderFlow(report){
- const box=$('#execution-flow');box.replaceChildren();const head=node('div',undefined,'flow-heading');head.append(node('h2',report?'作者参考 A · 执行流程':'任务执行流程'),node('span',report?'完整运行 '+duration(report.runtime.elapsed_seconds):'等待模型与执行服务就绪'));box.append(head);
+ let box=$('#execution-flow');box.replaceChildren();if(report){const details=node('details',undefined,'reference-flow');details.append(node('summary','查看作者参考 A 的执行阶段'));box.append(details);box=details;}const head=node('div',undefined,'flow-heading');head.append(node('h2',report?'作者参考 A · 执行流程':'任务执行流程'),node('span',report?'完整运行 '+duration(report.runtime.elapsed_seconds):'等待模型与执行服务就绪'));box.append(head);
  const labels=['需求理解','结构准备','势函数','计算脚本','提交 HPC','运行结束','结果分析'];const steps=node('ol',undefined,'flow-steps');
  for(let i=0;i<labels.length;i++){const done=!!report&&report.stages[i]?.state==='completed';const li=node('li',undefined,done?'done':i===0?'current':'');li.append(node('span',done?'✓':String(i+1)),document.createTextNode(labels[i]));steps.append(li);}box.append(steps,node('p',report?`参考 A 已结束并完成诊断分析；B：${bState(report)}。科学结论仍待核验。`:'需求已保存。缺项会集中说明；当前不会自动提交计算。','flow-note'));
 }
 function metricTable(metrics,compact=false){
  const table=node('table',undefined,'result-table'),head=node('thead'),tr=node('tr'),body=node('tbody');
- for(const label of compact?['性质','P','A','差值']:['性质 / 方法','P','A','abs(P−A)','相对差'])tr.append(node('th',label));head.append(tr);table.append(head,body);
+ for(const label of compact?['性质 / GPa','P','A','|P−A|']:['性质 / 方法','P','A','abs(P−A)','相对差'])tr.append(node('th',label));head.append(tr);table.append(head,body);
  for(const m of metrics){const row=node('tr'),name=node('td',m.label,'metric-name');if(!compact)name.append(node('small',m.method));row.append(name,node('td',number(m.paper),'number'),node('td',number(m.reference),'number'),node('td',number(m.absolute_difference),'number'));if(!compact)row.append(node('td',m.relative_difference_percent===null?'未定义':number(m.relative_difference_percent,3)+'%','number'));body.append(row);}return table;
 }
 function curvePlot(report){
@@ -784,11 +803,17 @@ function curvePlot(report){
 }
 function limitations(report){const d=node('details',undefined,'result-limits');d.append(node('summary','查看结果限制与分析依据'));const ul=node('ul');for(const text of report.limitations)ul.append(node('li',text));d.append(ul);return d;}
 function reportDownloads(report,box){
- for(const f of report.files.filter(f=>f.name!=='analysis.json')){const row=node('div',undefined,'file-row'),a=node('a',f.label+' ↓');a.href=`/api/tasks/${current.id}/reference-result/files/${f.name}`;row.append(a,node('small',number(f.size/1024,1)+' KB'));box.append(row);}
+ const group=node('details',undefined,'download-group');group.open=true;group.append(node('summary','作者参考 A · 分析与报告'));box.append(group);
+ for(const f of report.files.filter(f=>f.name!=='analysis.json')){const row=node('div',undefined,'file-row'),a=node('a',f.label+' ↓');a.href=`/api/tasks/${current.id}/reference-result/files/${f.name}`;row.append(a,node('small',fileSize(f.size)));group.append(row);}
 }
 function taskTimeline(){const list=node('ol',undefined,'task-timeline');for(const item of $('#history-list').children)list.append(item.cloneNode(true));return list;}
 function renderWorkspaceResults(){
  const box=$('#research-results');box.replaceChildren();const r=workspaceReport;
+ const phase=workspaceState.task===current?.id?workspaceState.phase:'loading';
+ if(phase==='loading'&&!workspaceState.updated){box.append(emptyState('正在读取计算记录','正在核对结果与文件，请稍候。'));return;}
+ if(phase==='error'&&!workspaceState.updated){box.append(emptyState('暂时无法核对结果','请刷新重试；这不表示计算失败或没有结果。'));return;}
+ if(phase==='loading'||phase==='error')box.append(node('p',phase==='loading'?'正在更新；下方保留上次核验的结果。':'更新未完成；下方为上次核验的结果，请稍后刷新。','refresh-note'));
+
  if(resultTab==='history'&&!r){box.append(node('h3','任务历史'),taskTimeline());if(!normalResult?.evaluations?.length&&!currentRawFiles().length){box.append(node('p','尚无计算提交记录。','plot-caption'));return;}}
  if(!r && normalResult?.evaluations?.length){for(const group of normalResult.evaluations){box.append(node('h3',`计算记录 · ${group.dispatch_count} / ${group.max_attempts} 次提交`));for(const request of group.requests){box.append(node('p',request.stage));for(const report of request.reports)box.append(resultReport(report,current.id));}}return;}
  if(!r&&currentRawFiles().length){
@@ -799,7 +824,7 @@ function renderWorkspaceResults(){
  }
  if(!r){const empty=emptyState('还没有计算结果',current.status==='conditions_frozen'?'研究条件已保存。方案与计算记录会在服务就绪后显示。':'研究需求已保存。方案、计算与分析就绪后，真实结果会显示在这里。');const button=node('button','查看模型设置','quiet');button.onclick=()=>action(openModel);empty.append(button);box.append(empty);return;}
  if(resultTab==='overview'){
-  const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','应力–应变曲线'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(values,plot);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
+  const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','作者参考 A · 应力–应变曲线'),node('p','当前图为 A 的实际输出；P 的完整曲线与 B 的比较不在此图中。','plot-caption'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(plot,values);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
  }else if(resultTab==='data'){
   box.append(node('h3','论文 P 与作者参考 A 的数值比较'));const scroll=node('div',undefined,'comparison-scroll');scroll.append(metricTable(r.metrics));box.append(scroll,node('p','单位均为 GPa；相对差 = abs(P−A) / abs(P)。本表为参考 A 的诊断结果。','plot-caption'),limitations(r));
  }else if(resultTab==='plots'){
@@ -813,11 +838,21 @@ function renderWorkspaceResults(){
  }
 }
 async function refreshWorkspace(){
- if(!current)return;const id=current.id;workspaceReport=null;rawResult=null;executionState=null;renderFlow(null);renderWorkspaceResults();
- try{const result=await api(`/api/tasks/${id}/reference-result`);if(current?.id!==id)return;workspaceReport=result.report;}catch(error){if(current?.id===id)notice('参考报告暂不可核验，未显示旧数值。',true);}
- if(current?.id!==id)return;
- try{const state=await api(`/api/tasks/${id}/execution`);if(current?.id!==id)return;executionState=state;}
- catch(error){executionState={job:null,message:'执行状态暂不可核验。'};}
+ if(!current)return;
+ const id=current.id, generation=++workspaceGeneration;
+ if(workspaceState.task!==id)workspaceState={task:id,phase:'loading',updated:null};
+ workspaceState.phase='loading';renderWorkspaceResults();renderRefreshStatus();
+ const replies=await Promise.allSettled([
+  api(`/api/tasks/${id}/reference-result`),api(`/api/tasks/${id}/execution`),
+  api(`/api/tasks/${id}/raw-files`),api(`/api/tasks/${id}/results`)
+ ]);
+ if(current?.id!==id||generation!==workspaceGeneration)return;
+ if(replies.some(r=>r.status==='rejected')){
+  workspaceState.phase='error';renderRefreshStatus();renderWorkspaceResults();return;
+ }
+ const [reference,execution,raw,results]=replies.map(r=>r.value);
+ workspaceReport=reference.report;executionState=execution;rawResult={task:id,files:raw.files};normalResult=results;
+ workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();
  const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
@@ -830,7 +865,7 @@ async function refreshWorkspace(){
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?'第一周 · Codex 辅助验证':'应用模型尚未启用';
  const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
- await showRawFiles(id);
+ renderRawFiles(raw);
  if(current?.id!==id)return;
  if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
   $('#task-status').textContent='原始输出已回收';
@@ -880,16 +915,36 @@ $('#hpc-dialog').addEventListener('close',clearHPCSecrets);
 $('#hpc-auth').onchange=()=>{$('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';};
 $('#hpc-form').onsubmit=e=>{e.preventDefault();action(async()=>{const payload={revision:hpcState.revision,label:$('#hpc-label').value.trim(),host:$('#hpc-host').value.trim(),port:Number($('#hpc-port').value),username:$('#hpc-user').value.trim(),work_directory:$('#hpc-work').value.trim(),partition:$('#hpc-partition').value.trim(),account:$('#hpc-account').value.trim(),authentication:$('#hpc-auth').value,private_key:$('#hpc-key').value||null,known_hosts:$('#hpc-known').value||null,certificate:$('#hpc-cert').value||null};try{hpcState=await api('/api/hpc-connection',payload);}finally{clearHPCSecrets();}$('#check-hpc').disabled=false;$('#hpc-status').textContent='已保存第 '+hpcState.revision+' 版连接。运行中的作业仍使用原连接；通用自动提交尚未开放。';});};
 $('#check-hpc').onclick=()=>action(async()=>{const b=$('#check-hpc');b.disabled=true;$('#hpc-status').textContent='正在检查已保存的 SSH 连接…';try{const result=await api('/api/hpc-connection/check',{revision:hpcState.revision});$('#hpc-status').textContent=result.message;}finally{b.disabled=false;}});
-async function showRawFiles(id){
+function renderRefreshStatus(){
+ const status=$('#workspace-refresh-status');
+ status.textContent=workspaceState.phase==='loading'?'正在核对结果与文件…':workspaceState.phase==='error'?'连接暂不可用；未更新结果与文件。':'结果与文件已核对';
+ if(workspaceState.updated)status.textContent+=' · 上次核验 '+workspaceState.updated.toLocaleTimeString('zh-CN');
+ status.className='workspace-freshness '+workspaceState.phase;
+ $('#task-files').setAttribute('aria-busy',String(workspaceState.phase==='loading'));
+}
+function rawFileCategory(file){
+ const name=file.name.toLowerCase();
+ if(/lammpstrj|\.dump$|trajectory/.test(name))return '轨迹';
+ if(/\.data$|^data[.-]|\.xyz$|\.vasp$/.test(name))return '结构';
+ if(/log|stdout|stderr|\.out$|\.err$/.test(name))return '运行日志';
+ return '原始数据';
+}
+function renderRawFiles(result){
  const box=$('#task-files');
- try{
-  const result=await api(`/api/tasks/${id}/raw-files`);if(current?.id!==id)return;
-  rawResult={task:id,files:result.files};
-  if(result.files.length&&!workspaceReport)box.replaceChildren();
-  box.append(node('h3','原始计算输出'));
-  if(!result.files.length){box.append(node('p',result.message,'form-note'));return;}
-  for(const f of result.files){const row=node('div',undefined,'file-row'),a=node('a',f.name+' ↓');a.href=`/api/tasks/${id}/raw-files/${f.id}`;row.append(a,node('small',fileSize(f.size)+' · 作业 '+f.job_id));box.append(row);}
- }catch(error){if(current?.id===id){rawResult=null;box.append(node('p','原始文件暂不可核验，未展示下载链接。','form-note'));}}
+ if(!result.files.length){if(!workspaceReport)box.append(node('p',result.message,'form-note'));return;}
+ const groups=new Map();
+ for(const f of result.files){const key=f.request_id;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(f);}
+ for(const files of groups.values()){
+  const f=files[0],reference=workspaceReport?.evaluation?.requests?.some(q=>q.id===f.request_id),independent=workspaceReport?.agent_progress?.evaluations?.some(e=>e.requests.some(q=>q.id===f.request_id));
+  const group=node('details',undefined,'download-group');
+  group.append(node('summary',`${reference?'作者参考 A':independent?'独立计算 B':'计算输出'} · 作业 ${f.job_id} · ${files.length} 个文件`));
+  for(const kind of ['原始数据','结构','轨迹','运行日志']){
+   const selected=files.filter(f=>rawFileCategory(f)===kind);if(!selected.length)continue;
+   const section=node('div',undefined,'download-category');section.append(node('h4',kind));
+   for(const file of selected){const row=node('div',undefined,'file-row'),a=node('a',file.name);a.href=`/api/tasks/${current.id}/raw-files/${file.id}`;row.append(a,node('small',fileSize(file.size)));section.append(row);}group.append(section);
+  }
+  box.append(group);
+ }
 }
 let connectionState=null;
 async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();$('#model-dialog').showModal();}
@@ -913,15 +968,15 @@ $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();awai
 let taskFilter='all', selectedPlot='full', discussionRequest=null;
 function taskState(t){return t.execution_state||'draft';}
 function taskStateLabel(t){return ({running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',failed:'失败',timeout:'超时',draft:'待准备'})[taskState(t)]||'状态待核对';}
-function statsFor(tasks, box){box.replaceChildren();for(const [label,value] of [['全部任务',tasks.length],['运行中',tasks.filter(t=>taskState(t)==='running').length],['排队中',tasks.filter(t=>['queued','accepted'].includes(taskState(t))).length],['计算结束',tasks.filter(t=>taskState(t)==='completed').length]]){const c=node('div',undefined,'stat');c.append(node('small',label),node('strong',String(value)));box.append(c);}}
+function statsFor(tasks, box){box.replaceChildren();for(const [label,value] of [['全部任务',tasks.length],['运行中',tasks.filter(t=>taskState(t)==='running').length],['排队中',tasks.filter(t=>['queued','accepted'].includes(taskState(t))).length],['计算结束',tasks.filter(t=>taskState(t)==='completed').length]]){const c=node('div',undefined,'stat'),icon=node('span',undefined,'stat-icon');icon.append(uiIcon(label==='运行中'?'play':label==='排队中'?'clock':label==='计算结束'?'check':'tasks'));c.append(icon,node('small',label),node('strong',String(value)));box.append(c);}}
 async function showHome(){current=null;hideViews('home-view');selectNavigation('');history.replaceState(null,'','#home');await listTasks();statsFor(taskCache,$('#home-stats'));const papers=await api('/api/papers');const selected=papers.papers.filter(p=>p.selection==='selected');const box=$('#home-cases-content');box.replaceChildren();for(const p of selected.slice(0,2)){const c=node('article',undefined,'compact-case');c.append(node('span','文献复现验证','badge pending'),node('h3',p.title),node('small','DOI '+p.doi),node('p',p.stage));const go=node('button','查看进度','quiet');go.onclick=()=>action(()=>p.tasks.length?openTask(p.tasks[0].id):showPapers());c.append(go);box.append(c);}if(!selected.length)box.append(node('p','尚未选定验证案例。','subtle'));const status=$('#home-status');status.replaceChildren();for(const [k,v] of [['计算状态',taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准'],['案例清单',selected.length+' 篇已选'],['模型连接','点击模型设置查看'],['存储空间','未连接实时用量查询']])status.append(node('dt',k),node('dd',v));const dl=$('#home-downloads');dl.replaceChildren();const finished=taskCache.filter(t=>t.reference_stage||taskState(t)==='completed');for(const t of finished.slice(0,3)){const b=node('button',t.title,'download-task');b.onclick=()=>action(()=>openTask(t.id));b.append(node('small','打开结果与下载文件'));dl.append(b);}if(!finished.length)dl.append(node('p','结果文件会随任务保存在这里。','subtle'));}
 $('#go-home').onclick=e=>{e.preventDefault();action(showHome);};
 $('#home-start').onclick=()=>{const prompt=$('#home-prompt').value;showNew();$('#create-form [name=prompt]').value=prompt;};
-$('#home-guide').onclick=showNew;$('#home-cases').onclick=()=>action(showPapers);
+$('#home-guide').onclick=()=>{$('#home-start').click();};$('#home-cases').onclick=()=>action(showPapers);
 $('#paper-search').oninput=()=>action(refreshPapers);
 for(const [title,text] of [['合金拉伸响应','研究 300 K 下 NbTiZrMoV 合金的单轴拉伸响应。请整理需要确认的初始结构、势函数和加载条件，输出应力–应变曲线与缺陷分析。'],['晶体弹性性质','计算 SiC 晶体的弹性性质。请先确认晶型、温度和势函数，给出弹性常数与分析图表。'],['点缺陷形成能','研究 W 晶体中的空位形成能。请明确参考体系、边界条件及弛豫方案，保留结构与能量来源。']]){const b=node('button',undefined,'example-task');b.append(node('strong',title),node('small',text));b.onclick=()=>{$('#create-form [name=prompt]').value=text;$('#create-form [name=prompt]').focus();};$('#task-examples').append(b);}
-const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存，尚未确定的科学条件需要进一步明确。当前通用自动执行尚未开放。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部 HPC 设置中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
-function renderHelp(){const query=$('#help-search').value.trim().toLowerCase(),box=$('#help-articles');box.replaceChildren();for(const [title,body] of helpItems.filter(r=>r.join(' ').toLowerCase().includes(query))){const d=node('details',undefined,'panel help-article');d.append(node('summary',title),node('p',body));box.append(d);}if(!box.children.length)box.append(emptyState('未找到相关说明','试试“模型”“计算”或“结果”等关键词。'));}
+const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存，尚未确定的科学条件需要进一步明确。当前通用自动执行尚未开放。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
+function renderHelp(){const query=$('#help-search').value.trim().toLowerCase(),box=$('#help-articles');box.replaceChildren();for(const [title,body] of helpItems.filter(r=>r.join(' ').toLowerCase().includes(query))){const d=node('details',undefined,'panel help-article');d.open=title==='快速开始';d.append(node('summary',title),node('p',body));box.append(d);}if(!box.children.length)box.append(emptyState('未找到相关说明','试试“模型”“计算”或“结果”等关键词。'));}
 $('#help-search').oninput=renderHelp;
 function renderPlotGallery(report,box){
  const options={full:'完整拉伸曲线',virial:'固定体积位力应力',pressure:'瞬时压力口径',elastic05:'弹性区间 0–0.05',elastic06:'弹性区间 0–0.06'};
@@ -931,3 +986,12 @@ function renderPlotGallery(report,box){
 async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(node('strong',m.question),node('p',m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'请先保存模型连接。发送后会保留问题、答复和模型用量；当前助手可解读结果，不能执行新的计算或任意分析代码。':'结果助手尚未启用。可先下载数据或配置模型。';}
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
+
+function uiIcon(name){
+ const paths={new:'M12 5v14M5 12h14',tasks:'M9 5H5v16h14V5h-4M9 3h6v4H9zM8 12h8M8 16h5',cases:'M3 5h7l2 2 2-2h7v15h-7l-2 2-2-2H3zM12 7v15',resources:'M4 6c0-4 16-4 16 0s-16 4-16 0v12c0 4 16 4 16 0V6M4 12c0 4 16 4 16 0',help:'M9 8a3 3 0 0 1 6 0c0 3-3 2-3 5M12 17h.01',play:'M8 4l12 8-12 8z',clock:'M12 7v5l3 2',check:'M6 12l4 4 8-8'};
+ const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('class','ui-icon');svg.setAttribute('aria-hidden','true');
+ if(['clock','check','help'].includes(name)){const circle=document.createElementNS(ns,'circle');circle.setAttribute('cx','12');circle.setAttribute('cy','12');circle.setAttribute('r','10');svg.append(circle);}
+ const path=document.createElementNS(ns,'path');path.setAttribute('d',paths[name]||paths.tasks);svg.append(path);return svg;
+}
+for(const key of ['new','tasks','papers','resources','help'])$('#top-'+key).prepend(uiIcon(key==='papers'?'cases':key));
+$('#task-search').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();action(showTasks);}});
