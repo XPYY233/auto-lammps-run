@@ -65,3 +65,25 @@ collector 复用 [结果回收](OUTPUTS.md)，不新增计算提交。服务检�
 验证使用手算可核对的合成直线、统计样本和真实本地子进程回收链路，没有真实模型调用、
 目标模拟或科学性质复现。首轮集成测试因试图覆盖只读合成 manifest 失败，已修正测试准备；
 没有修改真实冻结输入。
+
+## 原生 LAMMPS 标量表适配（Issue #84）
+
+`scalar_analysis.analyze_scalar(data, table, operations)` 直接读取原始字节，复用上面的
+统计/拟合函数；不改已有 `numeric_tables_v1` 代码和冻结身份，也不为已派发任务替换计划。
+格式依据 [LAMMPS fix ave/time](https://docs.lammps.org/fix_ave_time.html)：scalar 输出每步
+一行，vector 输出为数组块。本适配器只处理显式声明的 scalar 文件，不自动猜格式。
+
+表声明包含 `file`、`format=lammps_ave_time_scalar`、两条精确 `headers`、`columns`
+（每列 `name/unit/source`）与 `steps`（`first/last/stride`）。首列必须对应 TimeStep，
+单位为 step；第二行标题的顺序必须与 source 一致。固定首尾与步距用于识别整行丢失、
+重复、倒退和中途重启，不能只检查最后一行是否换行。操作仍显式指定列和包含端点的窗口。
+
+此原生格式没有单位标题，报告明确标记单位仅来自声明；不推断压力符号、应变、体积或
+换算。保留原始文件 SHA-256、完整列映射、步数约束、选中源行、解析及算术版本。
+整数步数不先转换浮点，避免大步数精度损失。截断、NaN/Inf、列不符、非 ASCII、额外
+标题/注释和 vector 块均拒绝，数据上限沿用数值分析限制，不静默抽样。
+
+这是解析和数值操作接口；报告显式写 `execution_status=not_checked`、
+`plan_status=caller_supplied`、`scientific_status=not_evaluated`。调用方仍须验证输出回执、
+任务身份和预先冻结的计划。不得将离线函数返回 analyzed 当作调度核算、正式评分或完整
+自动跟进已经接通。旧计划继续使用原版本；当前真实 B 不因本次开发更改输入或评分窗口。
