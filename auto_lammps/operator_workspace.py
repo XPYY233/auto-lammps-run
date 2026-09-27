@@ -109,7 +109,8 @@ class ReferenceViews:
                     channel['fits'][metric['window_end']]['values']['slope'])
             if av!=actual:raise ResultUnavailable('Comparison differs from diagnostic result')
             metrics.append({k:metric[k] for k in ('label','paper','reference','unit','method','channel','operation')} |
-                           {'absolute_difference':abs(pv-av),'relative_difference_percent':100*abs(pv-av)/abs(pv) if pv else None})
+                           {'absolute_difference':abs(pv-av),'relative_difference_percent':100*abs(pv-av)/abs(pv) if pv else None,
+                            'window_end':metric.get('window_end')})
         curves=[]
         for curve in report['curves']:
             values=evidence[curve['channel']]['curve']

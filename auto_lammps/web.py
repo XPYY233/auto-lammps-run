@@ -200,6 +200,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     raw_outputs = RawOutputs(store,papers,
         collections=results_reader.collections if results_reader else collections_directory,
         ledger=results_reader.ledger if results_reader else None)
+    from .closeout import CloseoutViews
+    closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -338,7 +340,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def reference_result(identifier: str):
         store.get(identifier)
         if reference_views is None:return {'report':None}
-        try:return {'report':reference_views.get(identifier)}
+        try:
+            report = reference_views.get(identifier)
+            if report is not None:
+                report['closeout'] = closeouts.get(identifier, report)
+            return {'report':report}
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'参考报告与原始记录未通过核验，暂不展示数值。'},status_code=409)
 
@@ -349,6 +355,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'文件不在已核验的报告中。'},status_code=409)
         media={'.png':'image/png','.pdf':'application/pdf','.csv':'text/csv; charset=utf-8','.md':'text/markdown; charset=utf-8','.json':'application/json'}.get(Path(name).suffix,'application/octet-stream')
+        return Response(data,media_type=media,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
+
+    @app.get('/api/tasks/{identifier}/closeout/files/{name}')
+    def closeout_file(identifier: str, name: str):
+        if closeouts is None:return JSONResponse({'detail':'验收资料尚未接入。'},status_code=404)
+        try:data=closeouts.download(identifier,name)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'验收资料未通过来源核验。'},status_code=409)
+        media={'.png':'image/png','.pdf':'application/pdf','.csv':'text/csv; charset=utf-8',
+               '.md':'text/markdown; charset=utf-8','.json':'application/json'}.get(Path(name).suffix,'application/octet-stream')
         return Response(data,media_type=media,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
 
     @app.get('/api/schema')
