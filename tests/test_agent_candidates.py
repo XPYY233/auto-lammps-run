@@ -17,6 +17,17 @@ from test_tasks import evidence
 
 
 class AgentCandidateTests(unittest.TestCase):
+    def test_native_output_layout_is_explicit_and_declared(self):
+        body = ('variable strain equal 0\nvariable strain delete\n'
+                'compute tensor all reduce sum c_stress[1]\n'
+                'run 10\nwrite_data final.data')
+        with self.assertRaises(CandidateError):
+            validate_body(body, ['final.data'])
+        result = validate_body(body, ['final.data'], output_prefix='')
+        self.assertEqual(result['calculation_commands'], 1)
+        with self.assertRaises(CandidateError):
+            validate_body(body.replace('final.data', '../final.data'), ['final.data'], output_prefix='')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

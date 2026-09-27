@@ -21,7 +21,7 @@ COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', '
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
             'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group'}
 FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time'}
-COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom'}
+COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom', 'reduce'}
 RESERVED_OUTPUTS = {'stdout.txt', 'stderr.txt', 'log.lammps'}
 
 
@@ -35,7 +35,7 @@ def _text(value, limit):
     return value
 
 
-def validate_body(body, outputs):
+def validate_body(body, outputs, *, output_prefix='/output/'):
     """Conservative syntax/resource screen, NOT a scientific or security verifier.
 
     No subprocess is used. Loops and dynamic dispatch are deliberately unsupported;
@@ -47,7 +47,11 @@ def validate_body(body, outputs):
     lines = body.splitlines()
     if len(lines) > 2000:
         raise CandidateError('Candidate workflow is too long')
-    paths = {'/output/' + name for name in outputs}
+    if output_prefix not in {'/output/', ''}:
+        raise CandidateError('Unsupported output layout')
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', name) for name in outputs):
+        raise CandidateError('Declared outputs must be flat filenames')
+    paths = {output_prefix + name for name in outputs}
     writes, evaluations = set(), 0
     for line in lines:
         try:
@@ -59,7 +63,8 @@ def validate_body(body, outputs):
         command = tokens[0]
         if command not in COMMANDS:
             raise CandidateError('Unsupported workflow command: ' + command[:40])
-        if command == 'variable' and (len(tokens) < 4 or tokens[2] not in {'equal', 'index', 'string'}):
+        if command == 'variable' and not ((len(tokens)==3 and tokens[2]=='delete') or
+                (len(tokens)>=4 and tokens[2] in {'equal', 'index', 'string'})):
             raise CandidateError('Unsupported variable definition')
         if command == 'fix' and (len(tokens) < 4 or tokens[3] not in FIX_STYLES):
             raise CandidateError('Unsupported fix style')
@@ -83,8 +88,8 @@ def validate_body(body, outputs):
                 targets.append(tokens[i + 1])
         for target in targets:
             if target not in paths:
-                raise CandidateError('Workflow writes must use declared flat /output/ filenames')
-            writes.add(target.removeprefix('/output/'))
+                raise CandidateError('Workflow writes must use declared flat '+output_prefix+' filenames')
+            writes.add(target.removeprefix(output_prefix))
     if not evaluations:
         raise CandidateError('The proposed workflow contains no calculation stage')
     if set(outputs) != writes:

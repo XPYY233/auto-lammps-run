@@ -1,6 +1,8 @@
 # Development rules
 
-最新修订：第一周作者参考 A 可继续提交直至跑通，不限次数；每次失败和费用保留。B 及最终产品最多两次，进入 B 前仍须先汇报策略并获确认。A 使用 32 核、8 GiB 内存、并发 1，遵守集群七天时限；B 累计核时仍按完整 A 的实际小时数 b 计算为 32*b+b²。
+最新用户明确批准（2026-09-27）：B 路径与独立子 Agent 已批准；所有资源额度限制取消，B 仍最多两次。原开发时限、Codex 保留比例和 `32*b+b²` 核时上限不再作为阻塞；集群七天硬限制、32 核/8 GiB 单作业配置、并发 1、完整记账及历史保留继续。实际 API 仍须用户提供本项目密钥，不能借用其他项目凭据。
+
+历史修订（其中核时上限已被 2026-09-27 全额解除取代）：第一周作者参考 A 可继续提交直至跑通，不限次数；每次失败和费用保留。B 及最终产品最多两次，进入 B 前仍须先汇报策略并获确认。A 使用 32 核、8 GiB 内存、并发 1，遵守集群七天时限；B 累计核时仍按完整 A 的实际小时数 b 计算为 32*b+b²。
 
 - For this project, read the locally installed `auto-lammps-stage-guide` skill at
   `~/.codex/skills/auto-lammps-stage-guide/SKILL.md`. It routes current norms and
@@ -50,8 +52,8 @@
 - Latest first-week exception: author reference A may continue until successful
   without an attempt cap; retain all failures and costs. B and the final product
   stay at two submissions. Reference A uses 32 cores with no user-imposed
-  time limit (respect cluster limits). After complete A, its elapsed hours b sets
-  B's cumulative core-hour ceiling to 32*b+b*b; queue time is excluded. Record
+  time limit (respect cluster limits). The former A-derived core-hour ceiling is superseded by the latest user
+  removal of resource quotas; retain its historical record, never reinstate it. Record
   policy amendments without changing identities, old charges or submission history.
 - Separate scheduler completion, output validity and scientific success.
 - Week one: Codex is responsible for the real P-A-B workflow validation. Before B, report the strategy and wait for user confirmation. After the first validation succeeds, request API configuration for week two. From week two onward, model runtime uses the separately configured API. Record Codex-assisted validation separately from API automation acceptance.
@@ -66,13 +68,18 @@
 
 ## Mandatory roadmap and interface review
 
+Latest user update (2026-09-27): the reported B strategy is approved; do not ask for the same approval again. Development time and Codex reserve limits are lifted. Retain B's two-submission evaluation rule unless explicitly amended. The new six-page private UI reference set replaces the old global side navigation. Review the roadmap and all six current UI references each work turn; shared components must follow the home page.
+
+
 Before every new work turn, after restoring compacted context, and before revising the plan, open and visually inspect both user-approved images:
 - Technical roadmap: `~/.local/share/auto-lammps-private/requirements/approved-technical-roadmap.png`.
-- Product interface: `~/.local/share/auto-lammps-private/requirements/approved-product-interface.png`.
+- Product interface authority: `~/.local/share/auto-lammps-private/requirements/approved-ui-home.png`.
+- Related pages in the same private directory: `approved-ui-cases.png`, `approved-ui-help.png`, `approved-ui-tasks.png`, `approved-ui-resources.png`, `approved-ui-new-task.png`.
+- Previous detail layout is retained as `approved-product-interface-20260923.png`; use its result-content requirements, but the new home governs shared navigation.
 
 Do not rely only on remembered summaries. Both images stay private and must not be committed. If either is unavailable, report that rather than claiming to have reviewed it.
 
-The interface reference defines a light blue/white research workspace: task navigation and recent history at left; the natural-language request, execution stages and results in the center; task information, submission count, downloads and resources at right. Results expose data, plots, atomic structures, trajectories, reports and logs. Preserve the reproduction register with full titles, DOI links and statuses. All displayed results and completion states require real evidence; illustrated values, resource counts and dates are not run authorizations. Keep the first real P-A-B validation ahead of the full interface redesign.
+The interface reference defines a light blue/white research workspace: global navigation at the top only; the natural-language request, execution stages and results in the center; task information, submission count, downloads and resources at right. Results expose data, plots, atomic structures, trajectories, reports and logs. Preserve the reproduction register with full titles, DOI links and statuses. All displayed results and completion states require real evidence; illustrated values, resource counts and dates are not run authorizations. Keep the first real P-A-B validation ahead of the full interface redesign.
 
 Then reconcile the roadmap with the latest user corrections, which take precedence:
 - The product is natural-language research computing; paper reproduction is its validation method.
@@ -85,3 +92,5 @@ Then reconcile the roadmap with the latest user corrections, which take preceden
 - Preserve the domain adapter, verified source test library, potential library, progress feedback, analysis/OVITO, paper status list and history requirements. The picture's illustrative numbers and formulas are not frozen scoring criteria.
 
 Use this check to choose the next action; do not repeat the entire roadmap to the user each turn.
+
+Homepage natural-language input also provides a clickable route to the guided new-task page. Model settings require a specific model ID and secure API-key entry. Results offer multiple evidence-backed plots, downloads and a follow-up natural-language analysis window. Runtime AI selects analyses/plots from the research request and real data, not a hardcoded paper figure list. Background job monitoring must survive a closed browser and retain state; do not equate a Codex heartbeat with the final product service.

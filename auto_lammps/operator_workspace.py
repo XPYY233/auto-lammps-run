@@ -121,9 +121,13 @@ class ReferenceViews:
         agents=[e for e in bound if e.get('available') and e['identity']['role']=='agent']
         available=all(e.get('available') for e in bound)
         claims=sum(e['dispatch_claims'] for e in agents) if available else None
+        requests=[r for e in agents for r in e.get('requests',[])]
+        stage=next(({'running':'正在计算','queued':'排队中','accepted':'调度已接受',
+                     'completed':'计算结束，待核验','failed':'计算失败','unknown':'提交状态待核对',
+                     'timeout':'计算超时'}.get(r['state'],'已有计算记录') for r in reversed(requests)),
+                   '已建立评测，尚未提交' if agents else '策略待确认，尚未提交')
         agent_progress=dict(available=available,dispatch_claims=claims,evaluations=agents,
-                            stage=('记录暂不可核验' if not available else
-                                   '已有计算记录' if claims else '已建立评测，尚未提交' if agents else '策略待确认，尚未提交'))
+                            stage=stage if available else '记录暂不可核验')
         public.update(metrics=metrics,curves=curves,files=[{k:f[k] for k in ('name','label','size')} for f in files],
                       runtime={k:evidence['runtime'][k] for k in ('elapsed_seconds','cores','hours','core_hours','B_max_core_hours','prior_failure_core_seconds')},
                       evaluation=matches[0],agent_progress=agent_progress,report_sha256=sha256(raw))

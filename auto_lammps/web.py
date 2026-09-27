@@ -10,7 +10,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, SecretStr
+from fastapi.exceptions import RequestValidationError
 
 from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
@@ -23,6 +24,7 @@ from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError
 from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
+from .model_connections import ModelConnections
 from .runtime_launcher import ExecutionDenied as runtime_denied
 
 ASSETS = Path(__file__).parent/'web_assets'
@@ -138,10 +140,27 @@ class ReferenceDraft(Revision):
     csv_texts: list[str] = Field(min_length=1, max_length=8)
 
 
+class ConnectionInput(Input):
+    provider: str
+    model: str = Field(max_length=100)
+    api_key: SecretStr | None = None
+    remove: bool = False
+
+
+class ProviderInput(Input):
+    provider: str
+
+
+class DiscussionInput(ProviderInput):
+    request_id: str = Field(min_length=32, max_length=32)
+    question: str = Field(min_length=1, max_length=4000)
+
+
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False):
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
+    connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -205,6 +224,41 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def save_model_preference(data: PreferenceInput):
         return preferences.save(data.provider,data.model,data.revision)
 
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation_error(request: Request, exc: RequestValidationError):
+        # Framework validation bodies can contain secret input; never reflect them.
+        return JSONResponse({'detail': '输入格式不正确，请检查字段。'}, status_code=422)
+
+    @app.get('/api/model-connections')
+    def connection_status():
+        return connections.status()
+
+    @app.post('/api/model-connections')
+    def save_connection(data: ConnectionInput):
+        return connections.save(data.provider, data.model,
+            data.api_key.get_secret_value() if data.api_key else None, remove=data.remove)
+
+    @app.post('/api/model-connections/models')
+    def connection_models(data: ProviderInput):
+        return connections.list_models(data.provider)
+
+    @app.get('/api/tasks/{identifier}/discussion')
+    def discussion_history(identifier: str):
+        return {'messages': connections.history(identifier), 'enabled': connections.assistant_enabled}
+
+    @app.post('/api/tasks/{identifier}/discussion')
+    def discuss_result(identifier: str, data: DiscussionInput):
+        store.get(identifier)
+        report = reference_views.get(identifier) if reference_views else None
+        if report:
+            context = {k: report[k] for k in ('scope','metrics','curves','limitations','scientific_status','report_sha256')}
+        elif results_reader:
+            context = results_reader.task(identifier)
+            if not context.get('evaluations'): raise TaskError('尚无可分析的计算结果。')
+        else:
+            raise TaskError('尚无可分析的计算结果。')
+        return connections.discuss(identifier, data.request_id, data.provider, data.question, context)
+
     @app.get('/api/tasks/{identifier}/reference-result')
     def reference_result(identifier: str):
         store.get(identifier)
@@ -259,6 +313,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                     state=('作者参考 A 已结束' if any(r['state']=='completed' and r['accounted'] for e in refs for r in e['requests']) else
                            '作者参考 A 已提交' if any(e['dispatch_claims'] for e in refs) else None)
                     if state:row['reference_stage']=state
+                    agents=[e for e in paper['evaluations'] if e.get('available') and
+                            e['identity']['role']=='agent' and e['task_id']==row['id']]
+                    runs=[r for e in agents for r in e['requests']]
+                    if runs:
+                        row['execution_state']=runs[-1]['state']
+                        row['job_id']=runs[-1]['job_id']
+                        row['submission_count']=sum(e['dispatch_claims'] for e in agents)
         return {'tasks':rows}
 
     @app.get('/api/tasks/{identifier}/results')
@@ -404,6 +465,7 @@ def main():
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
+    parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
@@ -442,7 +504,8 @@ def main():
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
-                          reference_model_client=reference_model_client,reference_views=reference_views), host='127.0.0.1', port=args.port,
+                          reference_model_client=reference_model_client,reference_views=reference_views,
+                          result_assistant_enabled=args.enable_result_assistant), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 
