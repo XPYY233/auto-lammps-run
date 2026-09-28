@@ -13,6 +13,8 @@ python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
   --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
 ```
 
+Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Mesa Vulkan 软件驱动（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应驱动；Python 包无法替代操作系统驱动。
+
 首次安装需要 Python 3.11+ 与网络；当前固定包覆盖 Apple Silicon macOS 和具有匹配 wheel 的 Linux，不能称为免 Python 安装包。
 更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。
 `install-receipt.json` 保存包下载来源/摘要，`installed-packages.json` 保存实际传递依赖版本，

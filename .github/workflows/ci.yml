@@ -29,7 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install application with its analysis runtime
-        run: python3 scripts/install_local.py --runtime "$RUNNER_TEMP/auto-lammps-runtime"
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python3 scripts/install_local.py --runtime "$RUNNER_TEMP/auto-lammps-runtime" --install-system-dependencies
+          else
+            python3 scripts/install_local.py --runtime "$RUNNER_TEMP/auto-lammps-runtime"
+          fi
       - name: Analysis runtime diagnostics
         if: always()
         run: |
