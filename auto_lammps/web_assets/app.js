@@ -1115,7 +1115,7 @@ function renderModelConnections(){
  const entries=Object.entries(connectionState?.connections||{}).filter(([,c])=>c.configured);
  if(!entries.length)box.append(node('p','尚未保存 API。选择模型商并填写密钥后即可添加。','form-note'));
  for(const [provider,c] of entries){
-  const card=node('article',undefined,'connection-card'),preferred=modelPreference.provider===provider&&modelPreference.model===c.model;
+  const card=node('article',undefined,'connection-card'),preferred=Boolean(c.model)&&modelPreference.provider===provider&&modelPreference.model===c.model;
   card.append(node('strong',c.label),node('span',preferred?'首选模型':'已保存','connection-badge'),node('p',c.model||'尚未选择模型 ID','connection-detail'),node('p',c.endpoint+' · 密钥已保存，不回显','form-note'));
   const actions=node('div',undefined,'actions'),edit=node('button','编辑模型 / 更换密钥','quiet');edit.type='button';edit.onclick=()=>{selectModelEditor(provider);$('#model-name').focus();};actions.append(edit);
   if(!preferred&&c.model){const use=node('button','设为首选','quiet');use.type='button';use.onclick=()=>action(async()=>{modelPreference=await api('/api/model-preference',{provider,model:c.model,revision:modelPreference.revision});selectModelEditor(provider);renderModelConnections();});actions.append(use);}
