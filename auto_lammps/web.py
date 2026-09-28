@@ -28,6 +28,7 @@ from .model_connections import ModelConnections
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
+from .session_activity import SessionActivity
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -191,7 +192,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -273,9 +274,34 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/assets/{name}')
     def asset(name: str):
-        if name not in {'app.js', 'app.css'}:
+        if name not in {'app.js', 'app.css', 'session.js'}:
             return JSONResponse({'detail': '文件不存在'}, status_code=404)
         return FileResponse(ASSETS/name)
+
+    # Local-entry page activity. Enabled only by --session-activity-file (desktop entry);
+    # an ordinary launch keeps these routes inert and records nothing.
+    @app.api_route('/api/session/activity', methods=['GET'])
+    def session_state():
+        if session_activity is None:
+            return {'enabled': False, 'updated_at': None, 'sessions': {}}
+        return {'enabled': True, **session_activity.snapshot()}
+
+    def record_session(action):
+        if session_activity is None:
+            return JSONResponse({'detail': '本服务未启用页面活动记录'}, status_code=409)
+        return {'enabled': True, **action}
+
+    @app.api_route('/api/session/heartbeat', methods=['GET', 'POST'])
+    def session_heartbeat(session: str = '', hidden: int = 0):
+        if session_activity is None:
+            return record_session(None)
+        return record_session(session_activity.heartbeat(session, hidden=bool(hidden)))
+
+    @app.api_route('/api/session/close', methods=['GET', 'POST'])
+    def session_close(session: str = ''):
+        if session_activity is None:
+            return record_session(None)
+        return record_session(session_activity.close(session))
 
     @app.get('/api/model-preference')
     def model_preference():
@@ -618,6 +644,7 @@ def main():
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
+    parser.add_argument('--session-activity-file', help='Desktop entry only: record page heartbeat/close activity in this file; otherwise no page activity is recorded')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
@@ -669,7 +696,8 @@ def main():
                           reference_model_client=reference_model_client,reference_views=reference_views,
                           model_connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory),
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
-                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
+                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
+                          session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 
