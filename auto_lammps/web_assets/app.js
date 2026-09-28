@@ -753,24 +753,31 @@ function potentialBundleRows(p){
  }
  return [...groups.values(),...files.filter(f=>!used.has(f.filename))];
 }
+let discoveryLibraryNote='';
 function renderResourceTable(){
- const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter)&&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=`${rows.filter(r=>r.bundle).length} 套势函数 · ${rows.filter(r=>r.kind==='potential').reduce((n,r)=>n+(r.files?.length||1),0)} 个势函数文件 · ${rows.filter(r=>r.kind==='paper').length} 项源码关联 · ${rows.filter(r=>r.kind==='tools').length} 项工具文档`;
+ const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase();const rows=resourceRows.filter(r=>(resourceFilter==='all'||r.kind===resourceFilter||(resourceFilter==='potential'&&r.discovery&&r.hasPotential))&&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));$('#resource-count').textContent=`${rows.filter(r=>r.bundle).length} 套势函数 · ${rows.filter(r=>r.kind==='potential').reduce((n,r)=>n+(r.files?.length||1),0)} 个势函数文件 · ${rows.filter(r=>r.kind==='paper'&&!r.discovery).length} 项已有源码关联 · ${rows.filter(r=>r.discovery).length} 套发现候选 · ${rows.filter(r=>r.kind==='tools').length} 项工具文档`;
+ if(discoveryLibraryNote)box.append(node('p',discoveryLibraryNote,'form-note'));
  if(!rows.length){box.append(emptyState('没有匹配的资源','调整关键词或资源分类。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['资源','类型 / 元素','版本','验证状态','来源与详情'])hr.append(node('th',label));head.append(hr);table.append(head,body);
  for(const r of rows){const tr=node('tr'),name=node('td');tr.dataset.resourceKind=r.kind;name.append(node('strong',r.name));if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));if(r.tags){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}if(r.companion&&!r.bundle)name.append(node('small','配套文件：'+r.companion));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version?r.version.slice(0,12):'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}if(r.version)d.append(node('p','固定版本：'+r.version));for(const line of r.note.split('\n'))d.append(node('p',line));if(r.files){d.append(node('h4','配套文件与来源'));for(const f of r.files){d.append(node('p',f.filename,'mono'));if(f.hash)d.append(node('code','SHA-256 '+f.hash));const link=node('a','查看该文件来源');link.href=f.url;link.target='_blank';link.rel='noopener noreferrer';d.append(link);}}else if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
 }
 async function showResources(){
  current=null;hideViews('resources-view');selectNavigation('resources');history.replaceState(null,'','#resources');
- const result=await api('/api/papers');resourceRows=[];
+ const result=await api('/api/papers');resourceRows=[];let discovered;try{discovered=await api('/api/resource-discoveries');}catch(error){discoveryLibraryNote='发现清单暂时无法读取，已登记的资源仍保留。';}
  for(const button of document.querySelectorAll('[data-resource]')){button.classList.toggle('selected',button.dataset.resource===resourceFilter);button.onclick=()=>{resourceFilter=button.dataset.resource;for(const b of document.querySelectorAll('[data-resource]'))b.classList.toggle('selected',b===button);renderResourceTable();};}
  for(const p of result.papers){
   resourceRows.push(...potentialBundleRows(p));
   for(const c of (p.source_discovery?.candidates||[]).filter(c=>c.association==='doi_and_title'))resourceRows.push({kind:'paper',name:c.repository,type:'论文源码',elements:'',version:c.commit?.slice(0,12),paper:p.title,doi:p.doi,url:c.url,state:'题目与 DOI 相符',note:'关联证据不等于作者身份核验。源码仅供参考端验证，不提供给独立评测生成者。'});
  }
+ if(discovered?.configured){
+  discoveryLibraryNote=`发现目录：${discovered.entries.length} 条主记录 · ${discovered.repository_count} 个仓库（含镜像） · 交接时间 ${discovered.source.generated} · 来源版本 ${discovered.source.sha256.slice(0,12)}。候选分级来自发现方，尚未获得控制端运行验证。`;
+  for(const d of discovered.entries)resourceRows.push({kind:'paper',discovery:true,hasPotential:d.potential_files.length>0||d.pair_styles.length>0,name:d.title,type:'源码 + 势函数候选',elements:d.elements.length?d.elements.join(' · ')+'（发现方标注，待核验）':'元素与类型映射待核验',version:d.commit,paper:d.title,doi:d.doi,url:d.url,state:d.state==='conflict'?'关联冲突':d.state==='missing_resources'?'资源有缺项':'候选 · 待核验',tags:[...d.pair_styles,d.source_tier.replace('tier_','发现方分级 ').toUpperCase()],note:[d.repository,d.description,'关联依据（发现方）：'+d.evidence,'许可标注：'+d.license,'LAMMPS入口：'+(d.input_files.join('、')||'未登记'),'势函数文件：'+(d.potential_files.join('、')||'未登记'),'缺项：'+d.gaps.join('；'),d.mirrors.length?'镜像：'+d.mirrors.join('、'):'','没有纳入独立 B 的答案或源码检索。'].filter(Boolean).join('\n')});
+ }else if(discovered)discoveryLibraryNote='发现目录尚未配置；下方仅为已登记资源。';
  for(const [name,url,note] of [['LAMMPS','https://docs.lammps.org/','模拟引擎；实际版本及能力以任务环境记录为准。'],['OVITO','https://www.ovito.org/','结构与轨迹分析工具；网页交互尚待接入。']])resourceRows.push({kind:'tools',name,type:'工具文档',url,note,state:'官方文档'});
  renderResourceTable();
 }
 $('#resource-search').oninput=renderResourceTable;
+$('#resource-refresh').onclick=()=>action(showResources);
 
 function showHelp(){current=null;hideViews('help-view');selectNavigation('help');history.replaceState(null,'','#help');renderHelp();}
 function emptyState(title,message){const box=node('div',undefined,'empty-result');box.append(node('span','◇','empty-icon'),node('h3',title),node('p',message));return box;}

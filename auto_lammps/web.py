@@ -177,7 +177,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -202,6 +202,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         ledger=results_reader.ledger if results_reader else None)
     from .closeout import CloseoutViews
     closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
+    from .discovery_library import DiscoveryLibrary
+    discoveries = discovery_library or DiscoveryLibrary()
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -381,6 +383,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/papers')
     def paper_list():
         return papers.list()
+
+    @app.get('/api/resource-discoveries')
+    def resource_discoveries():
+        try:
+            return discoveries.get()
+        except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+            return JSONResponse({'detail': '发现清单未通过格式检查，已登记资源仍保留。'}, status_code=409)
 
     @app.get('/api/papers/{identifier}')
     def paper_get(identifier: str):
@@ -582,6 +591,8 @@ def main():
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
+    parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
+    parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
     args = parser.parse_args()
@@ -629,10 +640,12 @@ def main():
             parser.error('Candidate and execution services must share snapshots')
     papers=PaperStore(store,ledger=ledger)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
+    from .discovery_library import DiscoveryLibrary
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs), host='127.0.0.1', port=args.port,
+                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
+                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 
