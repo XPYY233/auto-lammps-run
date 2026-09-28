@@ -58,10 +58,11 @@ def main():
     resolved = subprocess.check_output([str(python), '-I', '-m', 'pip', 'list', '--format=json'],
                                        env=env, cwd=runtime, text=True)
     (runtime / 'installed-packages.json').write_text(resolved, encoding='utf-8')
-    check = subprocess.run([str(python), '-I', '-m', 'auto_lammps.analysis_runtime', '--smoke'],
+    check = subprocess.run([str(python), '-I', '-X', 'faulthandler', '-m', 'auto_lammps.analysis_runtime', '--smoke'],
                            env=env, cwd=runtime, capture_output=True, text=True, timeout=120)
     (runtime / 'analysis-check.json').write_text(check.stdout, encoding='utf-8')
     (runtime / 'analysis-check.stderr.txt').write_text(check.stderr, encoding='utf-8')
+    (runtime / 'analysis-process.json').write_text(json.dumps({'returncode': check.returncode}), encoding='utf-8')
     if check.returncode:
         print('Analysis verification failed. Installation retained for diagnosis; not ready.', file=sys.stderr)
         return 1

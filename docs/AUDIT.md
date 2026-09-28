@@ -525,3 +525,10 @@ Issue #113 Linux 安装 Mesa 驱动后仍无法初始化 Vulkan，stderr 明确�
 恢复上下文时一度误写 Python 3.11 安装路径，实际安装器环境为 3.14；只读定位失败，
 按真实安装目录恢复。查询 GitHub 的未引用 URL 被 shell 通配拒绝，引用后只读查询成功；
 没有触发远程变更。
+
+Issue #113 补充：完整日志显示 latest Linux 探针输出为空且原生 Vulkan apiVersion=0 报错，
+可能为原生进程退出，尚不能归咎用户资料。官方 ovito 元数据要求 PySide6-Essentials~=6.11.2，
+实际安装一致，排除无证据降级 Qt 的做法。将记录子进程返回码和原生栈后再定位。
+本轮只读文件搜索使用不存在的 shell glob，被 zsh 提前拒绝；改用 rg --files 列实际文件，
+无文件变更。协作 heartbeat 首次创建缺 destination/thread 被工具拒绝，未创建任务；
+补目标字段重试，不用手写调度文件替代。

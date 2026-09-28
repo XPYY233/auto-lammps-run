@@ -32,6 +32,7 @@ def smoke_check():
     if sys.platform != 'linux':
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
+    print('Analysis stage: import', file=sys.stderr, flush=True)
     import ovito  # Must precede Qt imports; loads platform runtime libraries.
     import numpy as np
     from ovito.data import DataCollection, Particles, SimulationCell
@@ -42,6 +43,7 @@ def smoke_check():
     matplotlib.use('Agg')
     from matplotlib.figure import Figure
 
+    print('Analysis stage: geometry', file=sys.stderr, flush=True)
     points = [(3*(x+b), 3*(y+b), 3*(z+b))
               for x in range(4) for y in range(4) for z in range(4) for b in (0, .5)]
     data = DataCollection()
@@ -67,12 +69,14 @@ def smoke_check():
             view = Viewport(type=Viewport.Type.Ortho, camera_dir=(-1, -1, -1))
             view.zoom_all(size=(160, 160))
             image = Path(folder) / 'structure.png'
+            print('Analysis stage: render', file=sys.stderr, flush=True)
             view.render_image(filename=str(image), size=(160, 160),
                               renderer=TachyonRenderer(antialiasing=False))
             if not image.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'):
                 raise RuntimeError('Structure PNG export failed')
         finally:
             pipeline.remove_from_scene()
+        print('Analysis stage: plot', file=sys.stderr, flush=True)
         fig = Figure()
         fig.subplots().plot(rdf[:, 0], rdf[:, 1])
         fig.savefig(Path(folder) / 'rdf.png')

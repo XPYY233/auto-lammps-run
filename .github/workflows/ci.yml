@@ -42,7 +42,7 @@ jobs:
           import os
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'auto-lammps-runtime'
-          for name in ('analysis-check.json', 'analysis-check.stderr.txt'):
+          for name in ('analysis-check.json', 'analysis-check.stderr.txt', 'analysis-process.json'):
               path = root / name
               if path.exists():
                   print(name, path.read_text(errors='replace')[-6000:])
