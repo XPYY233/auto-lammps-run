@@ -181,3 +181,21 @@ class CloseoutTests(unittest.TestCase):
     def test_other_task_cannot_retrieve_artifact(self):
         other=self.tasks.create('Other','Synthetic','research')
         self.assertEqual(self.client.get(f"/api/tasks/{other['id']}/closeout/files/figure.png").status_code,409)
+
+    def test_list_shows_scoped_acceptance_without_rewriting_computation(self):
+        row=next(t for t in self.client.get('/api/tasks').json()['tasks'] if t['id']==self.task['id'])
+        self.assertEqual(row['scoped_acceptance']['status'],'accepted_by_user')
+        self.assertEqual(row['execution_state'],'completed')
+        self.source.write_bytes(b'changed')
+        row=next(t for t in self.client.get('/api/tasks').json()['tasks'] if t['id']==self.task['id'])
+        self.assertNotIn('scoped_acceptance',row)
+        self.assertTrue(row['acceptance_unavailable'])
+
+    def test_unfinished_second_request_cannot_be_hidden(self):
+        pending=self.ledger.reserve(self.agent,'b-second',H2,RESOURCE)
+        before=self.ledger.get(pending['id'])
+        doc=self.tasks.get(self.task['id'])
+        reply=self.client.post('/api/tasks/'+self.task['id']+'/lifecycle',headers=HEADERS,
+            json=dict(revision=doc['revision'],lifecycle_revision=0,action='finish'))
+        self.assertEqual(reply.status_code,422,reply.text)
+        self.assertEqual(self.ledger.get(pending['id']),before)

@@ -95,3 +95,51 @@ class TargetPlanningTests(unittest.TestCase):
             self.assertEqual(r.status_code,422)
             self.assertEqual(client.post(url, json={}, headers={'Origin':'https://outside.example'}).status_code,403)
             self.assertEqual(client.post(url+'/inventory',json={},headers=HEADERS).status_code,404)
+
+    def test_preview_lists_all_gaps_and_is_read_only(self):
+        inv=target_inventory()
+        inv['targets'][0].update(criterion='',availability='missing_resources')
+        inv['targets'].append({**inv['targets'][0],'id':'fig-2','condition_group':'second','availability':'new_calculation'})
+        d=self.store.import_target_inventory(self.doc['id'],self.doc['revision'],inv)
+        before=self.store.history(d['id'])
+        with TestClient(create_app(self.store),base_url=ORIGIN) as client:
+            response=client.post(f"/api/tasks/{d['id']}/targets/preview",json=dict(revision=d['revision'],selected_ids=['fig-1-a','fig-2'],exclusion_reason=''),headers=HEADERS)
+            self.assertEqual(response.status_code,200,response.text)
+            state=response.json()
+            self.assertEqual(state['selected_count'],2)
+            self.assertEqual(len(state['groups']),2)
+            self.assertEqual({x['code'] for x in state['blockers']},{'target_unavailable','criterion_missing','multiple_conditions'})
+            self.assertFalse(state['can_freeze']);self.assertFalse(state['execution_authorized'])
+        self.assertEqual(self.store.history(d['id']),before)
+        self.assertEqual(self.store.get(d['id']),d)
+
+    def test_preview_freeze_agreement_and_unsaved_changes(self):
+        from auto_lammps.target_planning import selection_readiness,freeze_plan
+        inv=target_inventory();inv['targets'].append({**inv['targets'][0],'id':'second-figure'})
+        d=self.store.import_target_inventory(self.doc['id'],self.doc['revision'],inv)
+        state=selection_readiness(d,['fig-1-a'],'outside scope')
+        self.assertEqual(state['blockers'],[]);self.assertFalse(state['can_freeze'])
+        d=self.store.select_targets(d['id'],d['revision'],['fig-1-a'],'outside scope')
+        self.assertTrue(selection_readiness(d,['fig-1-a'],'outside scope')['can_freeze'])
+        self.assertFalse(selection_readiness(d,['fig-1-a','second-figure'],'')['can_freeze'])
+        self.assertEqual(freeze_plan(d)['selected_ids'],['fig-1-a'])
+        for availability in ('missing_resources','unresolved','not_simulation'):
+            changed=deepcopy(d);changed['target_inventory']['targets'][0]['availability']=availability
+            from auto_lammps.target_planning import selected_plan
+            changed['target_selection']=selected_plan(changed,['fig-1-a'],'outside scope')
+            self.assertFalse(selection_readiness(changed,['fig-1-a'],'outside scope')['can_freeze'])
+            with self.assertRaises(TaskError):freeze_plan(changed)
+
+    def test_preview_scope_condition_and_revision_guards(self):
+        from auto_lammps.target_planning import selection_readiness
+        d=target_ready(self.store,self.doc)
+        self.assertIn('selection_missing',{b['code'] for b in selection_readiness(d,[],'') ['blockers']})
+        partial=deepcopy(d);partial['fields'][next(iter(FIELDS))]['confirmed']=False
+        state=selection_readiness(partial,['fig-1-a'],'')
+        self.assertIn('conditions_incomplete',{b['code'] for b in state['blockers']})
+        self.assertFalse(state['can_freeze'])
+        with TestClient(create_app(self.store),base_url=ORIGIN) as client:
+            body=dict(revision=d['revision']-1,selected_ids=['fig-1-a'],exclusion_reason='')
+            url=f"/api/tasks/{d['id']}/targets/preview"
+            self.assertEqual(client.post(url,json=body,headers=HEADERS).status_code,409)
+            self.assertEqual(client.post(url,json=body).status_code,403)
