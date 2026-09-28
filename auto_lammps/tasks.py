@@ -180,6 +180,13 @@ class TaskStore:
                      updated_at=d['updated_at'], outstanding=len(issues(d))) for row in rows for d in [json.loads(row['document'])]]
 
     def _write(self, db, document, event):
+        # A selection applies to the conditions inspected at that moment.
+        # Invalidate it in the same revision if any condition evidence changes.
+        # Already frozen records remain immutable and are never backfilled.
+        selection = document.get('target_selection')
+        if (document['status'] != 'conditions_frozen' and selection
+                and selection.get('conditions_sha256') != sha256(canonical(document['fields']))):
+            document.pop('target_selection')
         document['revision'] += 1
         document['updated_at'] = datetime.now(timezone.utc).isoformat()
         db.execute('INSERT INTO revisions VALUES (?,?,?,?,?)', (document['id'], document['revision'], event,

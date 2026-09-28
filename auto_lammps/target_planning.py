@@ -64,6 +64,7 @@ def selected_plan(document, selected_ids, exclusion_reason):
     # Ordered by inventory, not click order; a stable digest binds all exclusions.
     selected = [r for r in source['targets'] if r['id'] in selected_ids]
     return dict(version=1, inventory_sha256=sha256(canonical(source)),
+                conditions_sha256=sha256(canonical(document['fields'])),
                 selected_ids=[r['id'] for r in selected], excluded_ids=excluded,
                 exclusion_reason=reason, condition_groups=sorted({r['condition_group'] for r in selected}),
                 submission_rule='B_max_2_per_frozen_evaluation',
@@ -76,7 +77,7 @@ def freeze_plan(document):
         raise TaskError('尚未选定图表目标和范围，不能冻结复现任务')
     current = selected_plan(document, plan['selected_ids'], plan['exclusion_reason'])
     if plan != current:
-        raise TaskError('图表清单已更新，请重新选择并确认范围')
+        raise TaskError('图表清单或任务条件已更新，请重新选择并确认范围')
     rows = [r for r in document['target_inventory']['targets'] if r['id'] in plan['selected_ids']]
     if any(r['availability'] in {'missing_resources', 'not_simulation', 'unresolved'} for r in rows):
         raise TaskError('所选目标仍有资源或方法缺项，不能冻结')

@@ -51,6 +51,24 @@ class TargetPlanningTests(unittest.TestCase):
         d=self.store.select_targets(d['id'],d['revision'],['fig-1-a','fig-1-b'],'')
         with self.assertRaisesRegex(TaskError,'工况'):self.store.freeze(d['id'],d['revision'])
 
+    def test_condition_change_invalidates_selection_and_preserves_history(self):
+        d=target_ready(self.store,self.doc)
+        selection=deepcopy(d['target_selection'])
+        field=next(iter(FIELDS))
+        changed=self.store.add_candidate(d['id'],d['revision'],field,evidence('New condition'))
+        self.assertNotIn('target_selection',changed)
+        with self.store.transaction() as db:
+            old=json.loads(db.execute('SELECT document FROM revisions WHERE task_id=? AND revision=?',
+                                      (d['id'],d['revision'])).fetchone()[0])
+        self.assertEqual(old['target_selection'],selection)
+        choice=changed['fields'][field]['candidates'][-1]['id']
+        changed=self.store.select(changed['id'],changed['revision'],field,choice,'Changed synthetic scope')
+        changed=self.store.confirm(changed['id'],changed['revision'],[field])
+        with self.assertRaisesRegex(TaskError,'目标'):self.store.freeze(changed['id'],changed['revision'])
+        changed=self.store.select_targets(changed['id'],changed['revision'],['fig-1-a'],'')
+        self.assertNotEqual(selection['conditions_sha256'],changed['target_selection']['conditions_sha256'])
+        self.assertEqual(self.store.freeze(changed['id'],changed['revision'])['status'],'conditions_frozen')
+
     def test_scope_exclusions_shared_condition_and_answers_stay_reference_side(self):
         inv=target_inventory();inv['targets'] += [{**inv['targets'][0],'id':'fig-1-b'}, {**inv['targets'][0],'id':'table-2'}]
         d=self.store.import_target_inventory(self.doc['id'],self.doc['revision'],inv)
