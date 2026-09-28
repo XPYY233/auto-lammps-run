@@ -113,7 +113,9 @@ def discover_modules(results):
         for name in MODULE.findall(item['stdout']):
             if name not in found:
                 found.append(name)
-    return found[:8]
+    # 上限太小会把带 MEAM 的构建截掉（第一周用的 *-omp 正好排在后面），
+    # 从而得出『没有可用引擎』这种与集群实况相反的结论。
+    return found[:24]
 
 
 def parse_engine(item):
