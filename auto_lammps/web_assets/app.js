@@ -823,8 +823,8 @@ function closeoutTable(report){
 function closeoutFigure(report,figure){
  const panel=node('figure',undefined,'paper-figure'),link=node('a');link.href=`/api/tasks/${current.id}/closeout/files/${figure.name}`;link.target='_blank';link.rel='noopener';const img=node('img');img.src=link.href;img.alt=figure.label;img.loading='lazy';link.append(img);panel.append(link,node('figcaption',figure.caption));return panel;
 }
-function closeoutCoverage(report){
- const panel=node('details',undefined,'coverage-panel');panel.append(node('summary',`论文目标覆盖 · ${report.coverage.length} 组图表`));const table=node('table',undefined,'research-table'),body=node('tbody');for(const item of report.coverage){const row=node('tr'),target=node('td');target.append(node('strong',item.target),node('small',item.content));const evidence=node('td');evidence.append(node('strong',item.status),node('p',item.evidence),node('small',item.additional_work));row.append(target,evidence);body.append(row);}table.append(body);panel.append(table);return panel;
+function closeoutCoverage(report,expanded=false){
+ const panel=node('details',undefined,'coverage-panel');panel.open=expanded;panel.append(node('summary',`论文目标覆盖 · ${report.coverage.length} 项图表`));const table=node('table',undefined,'research-table'),body=node('tbody');for(const item of report.coverage){const row=node('tr'),target=node('td');target.append(node('strong',item.target),node('small',item.content));const evidence=node('td');evidence.append(node('strong',item.status),node('p',item.evidence),node('small',item.additional_work));row.append(target,evidence);body.append(row);}table.append(body);panel.append(table);return panel;
 }
 let closeoutPlotChoice='ab';
 function renderCloseout(reference,box){
@@ -855,6 +855,7 @@ function renderWorkspaceResults(){
   return;
  }
  if(!r){const empty=emptyState('还没有计算结果',current.status==='conditions_frozen'?'研究条件已保存。方案与计算记录会在服务就绪后显示。':'研究需求已保存。方案、计算与分析就绪后，真实结果会显示在这里。');const button=node('button','查看模型设置','quiet');button.onclick=()=>action(openModel);empty.append(button);box.append(empty);return;}
+ if(resultTab==='targets'){box.append(node('h2','全篇图表与复现范围'),node('p','逐项查看工况、资源、已有数据及缺项。本次清单是补充审计，未倒填为历史任务的事前计划。','plot-caption'));if(r.closeout)box.append(closeoutCoverage(r.closeout,true));else box.append(node('p','全文图表审计尚未接入。'));return;}
  if(r.closeout && ['overview','data','plots','report'].includes(resultTab)){renderCloseout(r,box);return;}
  if(resultTab==='overview'){
   const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','作者参考 A · 应力–应变曲线'),node('p','当前图为 A 的实际输出；P 的完整曲线与 B 的比较不在此图中。','plot-caption'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(plot,values);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
@@ -885,7 +886,7 @@ async function refreshWorkspace(){
  }
  const [reference,execution,raw,results]=replies.map(r=>r.value);
  workspaceReport=reference.report;executionState=execution;rawResult={task:id,files:raw.files};normalResult=results;
- workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();
+ workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();renderTargetPlanning();
  const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
@@ -897,7 +898,7 @@ async function refreshWorkspace(){
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?'第一周 · Codex 辅助验证':'应用模型尚未启用';
- const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
+ const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
  renderRawFiles(raw);
  if(current?.id!==id)return;
  if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
@@ -1036,7 +1037,16 @@ function renderTargetPlanning() {
   if(box.hidden)return;
   box.append(node('h2','先选复现目标'),node('p','逐项查看论文图表、工况与所需数据；同一工况的多个图表共用计算。'));
   const source=current.target_inventory, frozen=current.status==='conditions_frozen';
-  if(!source){box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'文献图表清单尚未整理完成，暂不能冻结复现任务。'));return;}
+  if(!source){
+    const audit=workspaceReport?.closeout;
+    if(audit){
+      box.replaceChildren(node('h2','论文目标与全篇审计'),node('p',`已整理 ${audit.coverage.length} 项图、子图、表格与补充内容，包含工况、已有数据与后续缺项。`));
+      const show=node('button',`查看全篇 ${audit.coverage.length} 项目标审计`,'primary');
+      show.onclick=()=>{resultTab='targets';for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='论文目标'));renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});};
+      box.append(show,node('p','这是对已完成基准的补充审计；原 PAB 验收、提交次数和历史不变。','form-note'));
+    }else box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'文献图表清单尚未整理完成，暂不能冻结复现任务。'));
+    return;
+  }
   box.append(node('h3',source.paper.title),node('p','DOI: '+source.paper.doi),node('p',source.coverage_note,'subtle'));
   const names={retained_data:'已有数据可分析',new_calculation:'需要新增计算',missing_resources:'缺少资源',not_simulation:'资料核对项目',unresolved:'方法或工况待核对'};
   const selected=new Set(current.target_selection?.selected_ids||[]),checks=[];
