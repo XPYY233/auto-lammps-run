@@ -788,10 +788,30 @@ function potentialBundleRows(p){
  }
  return [...groups.values(),...files.filter(f=>!used.has(f.filename))];
 }
-let discoveryLibraryNote='',resourceTab='potential',resourceFacets={elements:'',style:'',source:'',role:''},resourceStats=[];
+let discoveryLibraryNote='',resourceTab='potential',resourceFacets={elements:'',style:'',source:'',role:'',process:''},resourceStats=[];
+const RESOURCE_TABS=[
+ ['potential','势函数库','按元素体系与势函数类型命名的势函数资源；论文题名与 DOI 保留在来源一列。'],
+ ['paper','论文案例','论文配套源码与可复现任务；只展示题名与 DOI 已匹配的关联，关联证据不等于作者身份核验。'],
+ ['structure','结构模板','可复用结构模板尚未接入：需先取得结构文件并核验来源与许可。'],
+ ['script','脚本片段','脚本片段尚未接入：不展示未经验证的脚本，避免把作者解法或示例当作可复用资产。'],
+ ['dataset','数据集','数据集尚未接入：需先完成来源、许可与摘要核验。'],
+ ['tools','工具与软件','引擎与后处理工具的官方入口；实际版本与能力以任务环境记录为准。'],
+];
+const RESOURCE_COLUMNS={
+ potential:['资源名称','元素体系','势函数类型','来源','验证状态','依据与文件'],
+ paper:['资源名称','研究过程','论文与 DOI','来源','验证状态','依据与文件'],
+ tools:['资源名称','类型','来源','说明'],
+};
+function resourceTabMeta(key){return RESOURCE_TABS.find(t=>t[0]===key)||RESOURCE_TABS[0];}
+function resourceFacetGroups(){
+ if(resourceTab==='potential')return [['elements','元素体系'],['style','势函数类型'],['source','数据来源'],['role','仓库角色']];
+ if(resourceTab==='paper')return [['process','研究过程'],['source','数据来源'],['role','仓库角色']];
+ return [];
+}
 function resourceFacetOf(r,group){
  if(group==='elements'){const n=(r.elementList||[]).length;return n===0?'元素待核验':n===1?'单元素':n===2?'二元':n===3?'三元':'多元（≥4）';}
  if(group==='style'){const s=(r.styles||[])[0];return s?s.toUpperCase():'类型待核验';}
+ if(group==='process'){const p=(r.process||[])[0];return p||'过程待核';}
  if(group==='source'){return ({github:'文献仓库',nist_ipr:'NIST IPR',openkim:'OpenKIM'})[r.sourceType]||'其他来源';}
  if(group==='role'){return ({author_source:'作者源码',validation_tests:'验证测试',example_suite:'示例集',artifact:'论文 artifact',potential_library:'势函数库'})[r.repositoryRole]||'未标注';}
  return '';
@@ -800,20 +820,40 @@ function resourceTabRows(){
  const byTab={potential:r=>r.kind==='potential',paper:r=>r.kind==='paper',tools:r=>r.kind==='tools'};
  const keep=byTab[resourceTab];return keep?resourceRows.filter(keep):[];
 }
+function resourceTabCounts(){
+ const counts={potential:0,paper:0,tools:0};
+ for(const r of resourceRows){if(counts[r.kind]!==undefined)counts[r.kind]+=1;}
+ return counts;
+}
+function renderResourceTabs(){
+ const box=$('#resource-tabs'),counts=resourceTabCounts();box.replaceChildren();
+ for(const [key,label] of RESOURCE_TABS){
+  const button=node('button');button.type='button';button.dataset.resourceTab=key;
+  button.append(node('span',label));
+  if(counts[key]!==undefined)button.append(node('span',String(counts[key]),'resource-tab-count'));
+  button.className=key===resourceTab?'selected':'';
+  button.onclick=()=>{if(resourceTab===key)return;resourceTab=key;resourceFacets={elements:'',style:'',source:'',role:'',process:''};renderResourceTabs();renderResourceTable();};
+  box.append(button);
+ }
+}
 function renderResourceStats(){
- const box=$('#resource-stats');box.replaceChildren();for(const [label,value,note] of resourceStats){const card=node('div',undefined,'resource-stat');card.append(node('strong',value),node('span',label));if(note)card.append(node('small',note));box.append(card);}
+ const box=$('#resource-stats');box.replaceChildren();
+ for(const [label,value,note] of resourceStats){const card=node('div',undefined,'resource-stat');card.append(node('strong',value),node('span',label));if(note)card.append(node('small',note));box.append(card);}
 }
 function renderResourceFacets(rows){
  const box=$('#resource-facets');box.replaceChildren();
- for(const [key,title] of [['elements','元素体系'],['style','势函数类型'],['source','数据来源'],['role','仓库角色']]){
+ const groups=resourceFacetGroups();
+ if(!groups.length){box.append(node('p','该页签没有可筛选的维度。','form-note'));return;}
+ for(const [key,title] of groups){
   const counts=new Map();for(const r of rows){const v=resourceFacetOf(r,key);counts.set(v,(counts.get(v)||0)+1);}
-  if(counts.size<2){continue;}
   const sec=node('section',undefined,'resource-facet');sec.append(node('h3',title));const ul=node('ul');
-  const all=node('li'),allButton=node('button','全部（'+rows.length+'）');allButton.className='facet-value'+(resourceFacets[key]?'':' selected');
-  allButton.onclick=()=>{resourceFacets[key]='';renderResourceTable();};all.append(allButton);ul.append(all);
+  const allButton=node('button','全部（'+rows.length+'）');allButton.type='button';allButton.className='facet-value'+(resourceFacets[key]?'':' selected');
+  allButton.onclick=()=>{resourceFacets[key]='';renderResourceTable();};
+  const all=node('li');all.append(allButton);ul.append(all);
   for(const [value,count] of [...counts.entries()].sort((a,b)=>b[1]-a[1]||String(a[0]).localeCompare(String(b[0]),'zh'))){
-   const li=node('li'),button=node('button',value+'（'+count+'）');button.className='facet-value'+(resourceFacets[key]===value?' selected':'');
-   button.onclick=()=>{resourceFacets[key]=resourceFacets[key]===value?'':value;renderResourceTable();};li.append(button);ul.append(li);
+   const button=node('button',value+'（'+count+'）');button.type='button';button.className='facet-value'+(resourceFacets[key]===value?' selected':'');
+   button.onclick=()=>{resourceFacets[key]=resourceFacets[key]===value?'':value;renderResourceTable();};
+   const li=node('li');li.append(button);ul.append(li);
   }
   sec.append(ul);box.append(sec);
  }
@@ -830,16 +870,26 @@ function resourceDetail(r){
  return d;
 }
 function renderResourceTable(){
- const box=$('#resource-cards'),query=$('#resource-search').value.trim().toLowerCase(),tabRows=resourceTabRows();
+ const box=$('#resource-cards');box.replaceChildren();
+ const meta=resourceTabMeta(resourceTab),tabRows=resourceTabRows();
+ const query=$('#resource-search').value.trim().toLowerCase();
  renderResourceStats();renderResourceFacets(tabRows);
  const rows=tabRows.filter(r=>Object.entries(resourceFacets).every(([k,v])=>!v||resourceFacetOf(r,k)===v)
    &&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));
- const emptyNote={structure:'结构模板尚无真实条目：资源目录当前只收录已核验的势函数与论文源码；结构模板需先取得可复用结构并核验来源。',script:'脚本片段尚无真实条目：不展示未经验证的脚本，避免把作者解法或示例当作可复用资产。',dataset:'数据集尚无真实条目：数据集需先完成许可与来源核验。'}[resourceTab];
- $('#resource-count').textContent=rows.length?`当前页签 ${rows.length} 条（资源目录合计 ${resourceRows.filter(r=>r.discovery).length} 条发现记录 + ${resourceRows.filter(r=>!r.discovery).length} 条已登记资源）`:`0 条`;
+ const notice=node('div',undefined,'resource-tab-notice');
+ notice.append(node('strong',meta[1]),node('p',meta[2]));
+ $('#resource-count').textContent=rows.length
+   ? `当前页签 ${rows.length} 条（筛选前 ${tabRows.length} 条；资源目录合计 ${resourceRows.filter(r=>r.discovery).length} 条发现记录 + ${resourceRows.filter(r=>!r.discovery).length} 条已登记资源）`
+   : `当前页签 0 条（筛选前 ${tabRows.length} 条）`;
+ box.append(notice);
  if(discoveryLibraryNote)box.append(node('p',discoveryLibraryNote,'form-note'));
- if(!rows.length){box.append(emptyNote?emptyState('该页签尚未接入真实条目',emptyNote):emptyState('没有匹配的资源','调整关键词或左侧筛选。'));return;}
- const columns=resourceTab==='potential'?['资源名称','元素体系','势函数类型','来源','验证状态','依据与文件']
-   :resourceTab==='paper'?['资源名称','研究过程','论文与 DOI','来源','验证状态','依据与文件']:['资源名称','类型','来源','说明'];
+ if(!rows.length){
+  box.append(tabRows.length
+    ? emptyState('没有匹配的资源','调整关键词或左侧筛选。')
+    : emptyState('该页签尚未接入真实条目',meta[2]));
+  return;
+ }
+ const columns=RESOURCE_COLUMNS[resourceTab]||RESOURCE_COLUMNS.potential;
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');
  for(const label of columns)hr.append(node('th',label));head.append(hr);table.append(head,body);
  for(const r of rows){
@@ -848,19 +898,18 @@ function renderResourceTable(){
   if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));
   if(r.tags?.length){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}
   if(r.companion&&!r.bundle)name.append(node('small','配套文件：'+r.companion));
-  const source=(r.sourceType?({github:'文献仓库',nist_ipr:'NIST IPR',openkim:'OpenKIM'}[r.sourceType]||r.sourceType):'已登记资源')+(r.repositoryRole&&r.repositoryRole!=='author_source'?' · '+r.repositoryRole:'');
-  if(resourceTab==='tools'){table.append&&tr.append(name,node('td',r.type),node('td',source),resourceDetail(r));body.append(tr);continue;}
-  const elements=node('td',r.elements||'—'),styles=node('td',(r.styles||[]).length?r.styles.join(' / ').toUpperCase():'—');
-  const state=node('td');const chip=node('span',r.state,(r.state||'').includes('候选')?'badge':'badge warn');state.append(chip);
-  if(resourceTab==='paper'){tr.append(name,elements,styles,node('td',source),state,resourceDetail(r));}
-  else{tr.append(name,elements,styles,node('td',source),state,resourceDetail(r));}
+  const source=node('td',(r.sourceType?({github:'文献仓库',nist_ipr:'NIST IPR',openkim:'OpenKIM'}[r.sourceType]||r.sourceType):'已登记资源')
+    +(r.repositoryRole&&r.repositoryRole!=='author_source'?' · '+r.repositoryRole:''));
+  const state=node('td');state.append(node('span',r.state,(r.state||'').includes('候选')?'badge':'badge warn'));
+  if(resourceTab==='tools'){tr.append(name,node('td',r.type),source,resourceDetail(r));}
+  else{
+   const second=resourceTab==='potential'?node('td',r.elements||'—'):node('td',(r.process||[]).join('、')||'过程待核');
+   const third=resourceTab==='potential'?(r.styles||[]).length?r.styles.join(' / ').toUpperCase():'—':(r.paper||'论文待核');
+   tr.append(name,second,node('td',third),source,state,resourceDetail(r));
+  }
   body.append(tr);
  }
  box.append(table);
-}
-function renderResourceTabs(){
- for(const button of document.querySelectorAll('[data-resource-tab]')){const value=button.dataset.resourceTab;button.classList.toggle('selected',value===resourceTab);
-  button.onclick=()=>{resourceTab=value;resourceFacets={elements:'',style:'',source:'',role:''};renderResourceTable();};}
 }
 async function showResources(){
  current=null;hideViews('resources-view');selectNavigation('resources');recordRoute('#resources');
