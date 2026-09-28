@@ -1098,7 +1098,7 @@ function renderRawFiles(result){
  }
 }
 let connectionState=null;
-async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();renderModelConnections();$('#model-dialog').showModal();}
+async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=connectionState.connections[modelPreference.provider]?.model||modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();renderModelConnections();$('#model-dialog').showModal();}
 function selectModelEditor(provider){
  $('#provider-choice').value=provider;$('#model-key').value='';$('#available-models').replaceChildren();
  $('#model-name').value=connectionState?.connections[provider]?.model||'';
