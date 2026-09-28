@@ -104,6 +104,7 @@ function render() {
   $('#import-literature').hidden = frozen;
   $('#import-literature').textContent = current.mode==='reproduction' ? '导入文献证据' : '从文献导入条件';
   renderReference();
+  renderTargetPlanning();
   $('#task-status').textContent = frozen ? '条件已冻结' : '条件草稿';
   $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
   const relevant = Object.entries(current.fields).filter(([key])=>key !== 'reference' || current.mode === 'reproduction');
@@ -192,7 +193,7 @@ function render() {
     row.append(head,content); $('#conditions').append(row);
   }
   $('#freeze').hidden = frozen;
-  $('#freeze').disabled = !!current.issues.length;
+  $('#freeze').disabled = !!current.issues.length || (current.mode==='reproduction' && !current.target_selection);
   $('#export').hidden = !frozen;
   $('#export').href = `/api/tasks/${current.id}/export`;
   $('#package-exports').hidden = !frozen;
@@ -205,7 +206,7 @@ async function renderHistory() {
   const id=current.id;
   const {events,preparation_events=[]} = await api(`/api/tasks/${id}/history`);
   if(current?.id!==id) return;
-  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'};
+  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'};
   $('#history-list').replaceChildren();
   for (const item of events) {
     const [kind,fields] = item.event.split(':');
@@ -643,7 +644,7 @@ function paperCard(p,statuses,availableTasks) {
     const revisions=node('ol');
     for (const e of task.history) {
       const [kind,field]=e.event.split(':');
-      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'}[kind]||kind;
+      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'}[kind]||kind;
       revisions.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · 条件版本 ${e.revision} · ${label}${field?' · '+field.split(',').map(k=>schema.fields[k]||k).join('、'):''}`));
     }
     details.append(revisions);
@@ -1022,3 +1023,24 @@ for(const key of ['new','tasks','papers','resources','help'])$('#top-'+key).prep
 $('#task-search').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();action(showTasks);}});
 
 for(const button of document.querySelectorAll("[data-resource]"))button.prepend(uiIcon(button.dataset.resource==='paper'?'cases':button.dataset.resource==='tools'?'help':'resources'));
+
+function renderTargetPlanning() {
+  const box=$('#target-planning');box.replaceChildren();box.hidden=current.mode!=='reproduction';
+  if(box.hidden)return;
+  box.append(node('h2','先选复现目标'),node('p','逐项查看论文图表、工况与所需数据；同一工况的多个图表共用计算。'));
+  const source=current.target_inventory, frozen=current.status==='conditions_frozen';
+  if(!source){box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'文献图表清单尚未整理完成，暂不能冻结复现任务。'));return;}
+  box.append(node('h3',source.paper.title),node('p','DOI: '+source.paper.doi),node('p',source.coverage_note,'subtle'));
+  const names={retained_data:'已有数据可分析',new_calculation:'需要新增计算',missing_resources:'缺少资源',not_simulation:'资料核对项目',unresolved:'方法或工况待核对'};
+  const selected=new Set(current.target_selection?.selected_ids||[]),checks=[];
+  for(const row of source.targets){
+    const item=node('details',undefined,'target-option'),head=node('summary');
+    const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=selected.has(row.id);checkbox.disabled=frozen;checkbox.setAttribute('aria-label','选择 '+row.label);checkbox.onclick=e=>e.stopPropagation();
+    head.append(checkbox,document.createTextNode(row.label+' · '+names[row.availability]));item.append(head);
+    for(const [label,value] of [['出处',row.locator],['工况',row.conditions],['同工况分组',row.condition_group],['资源',row.resources],['输出',row.outputs],['采样',row.sampling],['分析',row.analysis],['比较标准',row.criterion||'尚未确定，不能冻结'],['限制',row.limitations]])item.append(node('p',label+'：'+value));
+    box.append(item);checks.push([row.id,checkbox]);
+  }
+  const label=node('label','本次范围与未选目标说明'),reason=document.createElement('textarea');reason.rows=2;reason.maxLength=2000;reason.value=current.target_selection?.exclusion_reason||'';reason.disabled=frozen;label.append(reason);box.append(label);
+  if(!frozen){const save=node('button','保存目标选择','primary');save.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/targets`,{revision:current.revision,selected_ids:checks.filter(([,c])=>c.checked).map(([id])=>id),exclusion_reason:reason.value});await afterChange('目标范围已保存；比较标准与条件齐全后才能冻结。');});box.append(save);}
+  box.append(node('p','B 每轮评测最多提交两次；保存或选择不提交计算。缺项或未定比较标准不能冻结。','form-note'));
+}

@@ -615,3 +615,5 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .paper-figure{margin:0;padding:16px;background:#fff;border:1px solid var(--border,#e2eaf4);border-radius:10px;min-width:0}.paper-figure img{display:block;width:100%;height:auto;max-height:480px;object-fit:contain}.paper-figure figcaption{font-size:13px;line-height:1.7;color:#51627d;margin-top:12px}
 .coverage-panel{margin-top:20px;border-top:1px solid #e2eaf4;padding-top:16px;overflow-x:auto}.coverage-panel summary{cursor:pointer;font-weight:600;color:#7356b8}.coverage-panel td{vertical-align:top;min-width:160px}.coverage-panel td:last-child{min-width:300px}.coverage-panel p{line-height:1.7}
 @media(max-width:1100px){.closeout-figures{grid-template-columns:1fr}}
+
+.target-option {border-bottom:1px solid var(--border,#dce4ef);padding:12px 0}.target-option summary{cursor:pointer;font-weight:600}.target-option input[type=checkbox]{width:18px;height:18px;margin-right:12px;vertical-align:middle}.target-option p{margin:8px 0;color:#405572}.target-option[open]{background:#f6f8fc;padding:12px}#target-planning{margin:20px 0}#target-planning textarea{width:100%;margin:8px 0}

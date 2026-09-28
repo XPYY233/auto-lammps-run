@@ -378,6 +378,27 @@ class TaskStore:
                 runtime_actor='independent_api', execution_authorized=False)
             return self._write(db, doc, 'reference_evidence_generated')
 
+    def import_target_inventory(self, identifier, revision, value):
+        """Trusted literature-side adapter; deliberately not a browser write API."""
+        from .target_planning import inventory
+        clean = inventory(value)
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            if doc['mode'] != 'reproduction':
+                raise TaskError('普通研究任务不要求论文目标清单')
+            doc['target_inventory'] = clean
+            doc.pop('target_selection', None)
+            return self._write(db, doc, 'target_inventory_assessed')
+
+    def select_targets(self, identifier, revision, selected_ids, exclusion_reason):
+        from .target_planning import selected_plan
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            if doc['mode'] != 'reproduction':
+                raise TaskError('普通研究任务不要求论文目标清单')
+            doc['target_selection'] = selected_plan(doc, selected_ids, exclusion_reason)
+            return self._write(db, doc, 'targets_selected')
+
     def freeze(self, identifier, revision):
         with self.transaction() as db:
             doc = self._read(db, identifier)
@@ -389,6 +410,9 @@ class TaskStore:
             contract = dict(schema_version=1, purpose='condition_review_record', task_id=doc['id'], mode=doc['mode'],
                             title=doc['title'], prompt=doc['prompt'], conditions=doc['fields'],
                             scientific_validation='not_performed', execution_authorized=False)
+            if doc['mode'] == 'reproduction':
+                from .target_planning import freeze_plan
+                contract['target_plan'] = freeze_plan(doc)
             if doc.get('literature_sources'):
                 contract['literature_sources'] = doc['literature_sources']
             if doc.get('generated_batches'):

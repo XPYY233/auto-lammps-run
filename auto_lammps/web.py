@@ -138,6 +138,11 @@ class PreferenceInput(Input):
     revision: StrictInt = Field(ge=0)
 
 
+class TargetSelection(Revision):
+    selected_ids: list[str] = Field(min_length=1, max_length=256)
+    exclusion_reason: str = Field(max_length=2000)
+
+
 class ReferenceDraft(Revision):
     csv_texts: list[str] = Field(min_length=1, max_length=8)
 
@@ -538,6 +543,10 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.post('/api/tasks/{identifier}/confirm')
     def confirm(identifier: str, data: ConfirmConditions):
         return store.confirm(identifier, data.revision, data.fields)
+
+    @app.post('/api/tasks/{identifier}/targets')
+    def select_targets(identifier: str, data: TargetSelection):
+        return store.select_targets(identifier, data.revision, data.selected_ids, data.exclusion_reason)
 
     @app.post('/api/tasks/{identifier}/freeze')
     def freeze(identifier: str, data: Revision):

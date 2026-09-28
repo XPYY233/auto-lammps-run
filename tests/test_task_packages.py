@@ -8,7 +8,7 @@ import unittest
 from auto_lammps.manifest import canonical, sha256
 from auto_lammps.task_packages import EXECUTION_FIELDS, split_condition_record
 from auto_lammps.tasks import FIELDS, TaskError, TaskStore
-from test_tasks import evidence
+from test_tasks import evidence, target_ready
 
 
 def frozen_task(store):
@@ -18,6 +18,7 @@ def frozen_task(store):
                                   evidence('PRIVATE_REFERENCE_CANARY' if key == 'reference' else 'input-'+key,
                                            origin='code' if key == 'boundary' else 'paper'))
     doc = store.confirm(doc['id'], doc['revision'], list(FIELDS))
+    doc = target_ready(store, doc)
     return store.freeze(doc['id'], doc['revision'])
 
 
