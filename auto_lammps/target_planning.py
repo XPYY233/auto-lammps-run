@@ -71,21 +71,56 @@ def selected_plan(document, selected_ids, exclusion_reason):
                 sharing_rule='same_condition_outputs_share_one_workflow_no_hidden_retries')
 
 
+def selection_readiness(document, selected_ids, exclusion_reason):
+    """Read-only projection of the same rules used by the freezer, no authority grant."""
+    from .tasks import issues
+    source = document.get('target_inventory')
+    blockers=[]
+    if source is None:
+        return dict(selected_count=0,total_count=0,groups=[],blockers=[dict(code='inventory_missing',message='文献图表清单尚未整理完成',target_ids=[])],
+                    selection_saved=False,can_freeze=False,execution_authorized=False)
+    source=inventory(source)
+    if not isinstance(selected_ids,list) or not all(isinstance(x,str) for x in selected_ids) or len(selected_ids)!=len(set(selected_ids)):
+        raise TaskError('目标选择格式无效或重复')
+    by_id={r['id']:r for r in source['targets']}
+    if set(selected_ids)-by_id.keys(): raise TaskError('所选目标不在当前清单中')
+    rows=[r for r in source['targets'] if r['id'] in selected_ids]
+    def add(code,message,targets=()):
+        blockers.append(dict(code=code,message=message,target_ids=list(targets)))
+    if not rows: add('selection_missing','请至少选择一个图表目标')
+    excluded=[r['id'] for r in source['targets'] if r['id'] not in selected_ids]
+    reason=text(exclusion_reason,2000,required=False)
+    if excluded and not reason.strip(): add('scope_missing','请说明本次范围和未选目标的原因')
+    names={'missing_resources':'资源仍有缺项','not_simulation':'属于资料核对项目，不能计为模拟复现','unresolved':'方法或工况尚未明确'}
+    for row in rows:
+        if row['availability'] in names:
+            add('target_unavailable',row['label']+'：'+names[row['availability']],[row['id']])
+        if not row['criterion'].strip():
+            add('criterion_missing',row['label']+'：比较标准尚未明确',[row['id']])
+    groups=[]
+    for key in sorted({r['condition_group'] for r in rows}):
+        matches=[r for r in rows if r['condition_group']==key]
+        groups.append(dict(id=key,target_ids=[r['id'] for r in matches],labels=[r['label'] for r in matches],
+                           conditions=list(dict.fromkeys(r['conditions'] for r in matches))))
+    if len(groups)>1:add('multiple_conditions','所选目标跨越多个工况，请按工况分别规划；不能按图数重复提交')
+    pending=issues(document)
+    if pending:add('conditions_incomplete',f'研究条件还有 {len(pending)} 项缺失、矛盾或未确认')
+    candidate=(selected_plan(document,selected_ids,reason) if rows and (not excluded or reason.strip()) else None)
+    saved=candidate is not None and document.get('target_selection')==candidate
+    return dict(selected_count=len(rows),total_count=len(source['targets']),excluded_count=len(excluded),
+                groups=groups,blockers=blockers,selection_saved=saved,
+                can_freeze=not blockers and saved and document.get('status')!='conditions_frozen',
+                execution_authorized=False)
+
+
 def freeze_plan(document):
     plan = document.get('target_selection')
     if not plan:
         raise TaskError('尚未选定图表目标和范围，不能冻结复现任务')
-    current = selected_plan(document, plan['selected_ids'], plan['exclusion_reason'])
-    if plan != current:
+    state=selection_readiness(document,plan['selected_ids'],plan['exclusion_reason'])
+    if not state['selection_saved']:
         raise TaskError('图表清单或任务条件已更新，请重新选择并确认范围')
-    rows = [r for r in document['target_inventory']['targets'] if r['id'] in plan['selected_ids']]
-    if any(r['availability'] in {'missing_resources', 'not_simulation', 'unresolved'} for r in rows):
-        raise TaskError('所选目标仍有资源或方法缺项，不能冻结')
-    if any(not r['criterion'].strip() for r in rows):
-        raise TaskError('所选目标的比较标准尚未明确，不能冻结')
-    # One TaskStore condition record describes exactly one physical workflow.
-    # Multi-condition planning stays visible but must be split before this gate.
-    if len(plan['condition_groups']) != 1:
-        raise TaskError('所选目标跨越多个工况；请先按工况拆分任务并明确计数')
-    return dict(**current, inventory=document['target_inventory'],
+    if state['blockers']:
+        raise TaskError('；'.join(item['message'] for item in state['blockers']))
+    return dict(**plan, inventory=document['target_inventory'],
                 preregistration='before_new_task_freeze', scientific_validation='not_performed')

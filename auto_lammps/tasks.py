@@ -137,7 +137,9 @@ class TaskStore:
             db.execute('CREATE TABLE IF NOT EXISTS reference_intents (id TEXT PRIMARY KEY, '
                        'task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL, '
                        'operation_sha256 TEXT NOT NULL, at TEXT NOT NULL, document TEXT NOT NULL)')
-            for table in ('revisions', 'frozen', 'reference_intents'):
+            db.execute('CREATE TABLE IF NOT EXISTS task_lifecycle (task_id TEXT NOT NULL REFERENCES tasks(id), '
+                       'sequence INTEGER NOT NULL, action TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
+            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable task evidence'); END")
@@ -172,12 +174,33 @@ class TaskStore:
             document = self._read(db, identifier)
         return {**document, 'issues': issues(document)}
 
+    def lifecycle(self, identifier):
+        with self.transaction() as db:
+            rows = db.execute('SELECT sequence,action,at FROM task_lifecycle WHERE task_id=? ORDER BY sequence', (identifier,)).fetchall()
+        return dict(lifecycle_revision=len(rows), deleted=any(r['action']=='delete' for r in rows),
+                    user_finished=any(r['action']=='finish' for r in rows), lifecycle_events=[dict(r) for r in rows])
+
+    def manage_lifecycle(self, identifier, revision, lifecycle_revision, action):
+        if action not in {'delete', 'finish'}: raise TaskError('未知的任务记录操作')
+        with self.transaction() as db:
+            document = self._read(db, identifier)
+            rows = db.execute('SELECT action FROM task_lifecycle WHERE task_id=? ORDER BY sequence', (identifier,)).fetchall()
+            if document['revision'] != revision or len(rows) != lifecycle_revision:
+                raise StaleTask('任务记录已变化，请刷新后重试')
+            if any(r['action']=='delete' for r in rows): raise TaskError('任务已从列表删除')
+            if action=='finish' and any(r['action']=='finish' for r in rows): raise TaskError('已确认结束')
+            db.execute('INSERT INTO task_lifecycle VALUES (?,?,?,?)',
+                       (identifier, len(rows)+1, action, datetime.now(timezone.utc).isoformat()))
+        return {**self.get(identifier), **self.lifecycle(identifier)}
+
     def list(self):
         with self.transaction() as db:
-            rows = db.execute('SELECT r.document FROM revisions r JOIN tasks t ON t.id=r.task_id AND t.revision=r.revision '
+            rows = db.execute("SELECT r.document FROM revisions r JOIN tasks t ON t.id=r.task_id AND t.revision=r.revision "
+                              "WHERE NOT EXISTS(SELECT 1 FROM task_lifecycle l WHERE l.task_id=t.id AND l.action='delete') "
                               'ORDER BY r.at DESC LIMIT 200').fetchall()
         return [dict(id=d['id'], title=d['title'], mode=d['mode'], status=d['status'], revision=d['revision'],
-                     updated_at=d['updated_at'], outstanding=len(issues(d))) for row in rows for d in [json.loads(row['document'])]]
+                     updated_at=d['updated_at'], outstanding=len(issues(d)), **self.lifecycle(d['id']))
+                for row in rows for d in [json.loads(row['document'])]]
 
     def _write(self, db, document, event):
         # A selection applies to the conditions inspected at that moment.
