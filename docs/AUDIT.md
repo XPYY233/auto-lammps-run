@@ -525,3 +525,11 @@ Issue #113 Linux 实际探针失败已定位为缺少 Vulkan 驱动，而非 OVI
 官方错误明确要求 Mesa Vulkan 软件驱动，即使 CPU 图像导出也需初始化该后端。
 安装器增加显式 Debian/Ubuntu 系统依赖选项及版本记录，CI 由同一安装器准备该依赖；
 不跳过图像检查、不自动寻找开发者桌面程序，其他发行版未冒称受支持。
+
+Issue #113 Linux 安装 Mesa 驱动后仍无法初始化 Vulkan，stderr 明确为 Qt offscreen
+插件不支持 createPlatformVulkanInstance。核对已固定版本 OVITO 的 plugins/__init__.py，
+其 Linux 默认选择 ovitoheadless；应用强设 offscreen 覆盖了该默认行为。移除 Linux 的
+强制覆盖，保留 macOS 已验证设置，由同一真实 CI 探针重新核验，不跳过渲染。
+恢复上下文时一度误写 Python 3.11 安装路径，实际安装器环境为 3.14；只读定位失败，
+按真实安装目录恢复。查询 GitHub 的未引用 URL 被 shell 通配拒绝，引用后只读查询成功；
+没有触发远程变更。

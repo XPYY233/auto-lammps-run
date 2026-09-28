@@ -28,7 +28,9 @@ def versions():
 
 def smoke_check():
     """Real synthetic BCC classification, RDF and PNG export in a clean process."""
-    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # OVITO selects its Vulkan-capable ovitoheadless platform on Linux.
+    if sys.platform != 'linux':
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
     import ovito  # Must precede Qt imports; loads platform runtime libraries.
     import numpy as np
