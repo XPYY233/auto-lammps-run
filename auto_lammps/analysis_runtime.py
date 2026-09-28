@@ -10,8 +10,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 
-REQUIRED = {'ovito': '3.16.1.post1', 'matplotlib': '3.11.2', 'ase': '3.29.0'}
+REQUIRED = {'ovito': '3.16.1.post1' if sys.platform == 'darwin' else '3.16.1', 'matplotlib': '3.11.2', 'ase': '3.29.0'}
 
 
 def versions():

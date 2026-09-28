@@ -21,6 +21,7 @@ jobs:
         run: python3 scripts/check_public_tree.py
   portable-analysis:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}

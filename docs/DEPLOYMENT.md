@@ -13,7 +13,7 @@ python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
   --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
 ```
 
-首次安装需要 Python 3.11+ 与网络；当前支持 macOS/Linux，不能称为免 Python 安装包。
+首次安装需要 Python 3.11+ 与网络；当前固定包覆盖 Apple Silicon macOS 和具有匹配 wheel 的 Linux，不能称为免 Python 安装包。
 更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。
 `install-receipt.json` 保存包下载来源/摘要，`installed-packages.json` 保存实际传递依赖版本，
 `analysis-check.json` 保存功能检查。跨机器须重新安装匹配平台的包，不能直接复制虚拟环境。
