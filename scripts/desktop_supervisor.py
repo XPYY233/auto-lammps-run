@@ -224,12 +224,23 @@ def supervise(args):
     supervised = dict(config)
     if '--session-activity-file' not in supervised['args']:
         supervised['args'] = [*supervised['args'], '--session-activity-file', str(activity_path)]
-    try:
-        result = launch_local.launch(supervised, open_browser=False)
-    except (launch_local.LaunchError, OSError, ValueError) as error:
-        save(role='supervisor', error=str(error), stopped=False)
-        journal.write('启动未完成：' + str(error))
-        announce('Auto-LAMMPS 未能启动', str(error), alert=True, quiet=quiet)
+    # 瞬时冲突（端口刚释放、上一次启动仍在收尾、并发点击）不应表现为"弹窗闪退"：
+    # 有界慢重试，只有连续失败才提示。
+    result, last_error = None, None
+    for attempt in range(3):
+        try:
+            result = launch_local.launch(supervised, open_browser=False)
+            last_error = None
+            break
+        except (launch_local.LaunchError, OSError, ValueError) as error:
+            last_error = error
+            if attempt < 2:
+                journal.write(f'启动未完成（第 {attempt + 1} 次），稍后重试：{error}')
+                time.sleep(4)
+    if result is None:
+        save(role='supervisor', error=str(last_error), stopped=False)
+        journal.write('启动未完成：' + str(last_error))
+        announce('Auto-LAMMPS 未能启动', str(last_error), alert=True, quiet=quiet)
         return 1
     if activity_enabled(config) is None:
         message = ('正在运行的服务未启用页面活动记录（较早的安装）：本次不自动停止，也不重启或关闭它。'
