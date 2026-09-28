@@ -42,7 +42,8 @@ def evidence_views(document, data, figures, metrics):
         for item in images:
             if item['name'] not in figure_names:
                 raise ResultUnavailable('Evidence view figure is not declared')
-            rendered_images.append(dict(name=item['name'], role=item['role']))
+            rendered_images.append(dict(name=item['name'], role=item['role'],
+                                        sha256=sha256(data[item['name']])))
         for item in tables:
             name = item['name']
             if name not in data or not name.endswith('.csv'):

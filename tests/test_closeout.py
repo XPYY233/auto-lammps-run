@@ -86,6 +86,20 @@ class CloseoutTests(unittest.TestCase):
         self.doc['views'][0]['tables'][0]['name']='../other.csv';self.save_closeout()
         self.assertEqual(self.client.get(self.url).status_code,409)
 
+    def test_comparison_image_identity_comes_from_verified_bytes(self):
+        self.assets['second.png']=self.assets['figure.png']
+        self.doc['figures'].append(dict(name='second.png',label='Second',caption='Synthetic'))
+        self.doc['views']=[dict(id='pair',title='Pair',description='Same bytes',figures=[
+            dict(name='figure.png',role='reference',sha256='invented'),
+            dict(name='second.png',role='agent')])]
+        self.save_closeout()
+        figures=self.client.get(self.url).json()['report']['closeout']['views'][0]['figures']
+        self.assertEqual(figures[0]['sha256'],sha256(self.assets['figure.png']))
+        self.assertEqual(figures[0]['sha256'],figures[1]['sha256'])
+        self.assets['second.png']=b'different synthetic image';self.save_closeout()
+        figures=self.client.get(self.url).json()['report']['closeout']['views'][0]['figures']
+        self.assertNotEqual(figures[0]['sha256'],figures[1]['sha256'])
+
     def test_visual_evidence_rejects_unknown_role_metric_or_figure(self):
         valid=dict(id='curve',title='Curve',description='Synthetic',figures=[dict(name='figure.png',role='paper')])
         for change in [dict(figures=[dict(name='unknown.png',role='paper')]),
