@@ -13,7 +13,7 @@ python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
   --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
 ```
 
-Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Mesa Vulkan 软件驱动（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应驱动；Python 包无法替代操作系统驱动。
+Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Qt 导入所需的 GL/EGL、键盘与 D-Bus 共享库（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应共享库；Python 包无法替代操作系统库。Linux 使用固定 OVITO 3.15.5 的 CPU Tachyon 图片导出，macOS 保持 3.16.1.post1；版本与分析设置写入每次回执，不自动切换或覆盖历史结果。
 
 首次安装需要 Python 3.11+ 与网络；当前固定包覆盖 Apple Silicon macOS 和具有匹配 wheel 的 Linux，不能称为免 Python 安装包。
 更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。

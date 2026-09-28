@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 import sys
 
-REQUIRED = {'ovito': '3.16.1.post1' if sys.platform == 'darwin' else '3.16.1', 'matplotlib': '3.11.2', 'ase': '3.29.0'}
+REQUIRED = {'ovito': '3.16.1.post1' if sys.platform == 'darwin' else ('3.15.5' if sys.platform == 'linux' else '3.16.1'), 'matplotlib': '3.11.2', 'ase': '3.29.0'}
 
 
 def versions():
@@ -28,9 +28,8 @@ def versions():
 
 def smoke_check():
     """Real synthetic BCC classification, RDF and PNG export in a clean process."""
-    # OVITO selects its Vulkan-capable ovitoheadless platform on Linux.
-    if sys.platform != 'linux':
-        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # The pinned Linux runtime uses CPU Tachyon rendering without a display.
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
     print('Analysis stage: import', file=sys.stderr, flush=True)
     import ovito  # Must precede Qt imports; loads platform runtime libraries.

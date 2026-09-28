@@ -10,7 +10,7 @@ license = "Apache-2.0"
 web = ["fastapi==0.141.1", "uvicorn==0.52.0"]
 test = ["httpx==0.28.1"]
 geometry = ["ase==3.29.0"]
-analysis = ["ovito==3.16.1.post1; sys_platform == 'darwin'", "ovito==3.16.1; sys_platform != 'darwin'", "matplotlib==3.11.2"]
+analysis = ["ovito==3.16.1.post1; sys_platform == 'darwin'", "ovito==3.15.5; sys_platform == 'linux'", "ovito==3.16.1; sys_platform != 'darwin' and sys_platform != 'linux'", "matplotlib==3.11.2"]
 
 [project.scripts]
 auto-lammps-doctor = "auto_lammps.analysis_runtime:main"

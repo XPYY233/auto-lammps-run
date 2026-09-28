@@ -42,9 +42,8 @@ def analyze(plan, destination):
         if (not isinstance(cutoff, (int, float)) or not math.isfinite(cutoff) or cutoff <= 0
                 or type(bins) is not int or not 2 <= bins <= 10000):
             raise ValueError('Invalid RDF settings')
-    # OVITO selects its Vulkan-capable ovitoheadless platform on Linux.
-    if sys.platform != 'linux':
-        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # The pinned Linux runtime uses CPU Tachyon rendering without a display.
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
     import ovito
     import numpy as np
