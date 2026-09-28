@@ -591,11 +591,25 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .discussion-panel{background:linear-gradient(120deg,#fff,#f6f3fc);border-color:#e6ddf1}
 .discussion-panel h2{color:#634796}.task-rail .panel:nth-child(2){border-top:3px solid #a092ca}
 .resource-tags .badge{background:var(--violet-soft);color:#66518d}
-#resource-filters{gap:8px;padding-bottom:14px;border-bottom:1px solid var(--line)}
-#resource-filters button{display:inline-flex;align-items:center;gap:8px;background:white;border:1px solid var(--line);padding:10px 16px}
-#resource-filters button[data-resource=potential]{color:var(--violet)}
-#resource-filters button[data-resource=paper]{color:var(--teal)}
-#resource-filters button[data-resource=tools]{color:#8b6527}
+#resource-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:20px 0 0;padding-bottom:0}
+#resource-tabs button{border:1px solid transparent;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;padding:10px 16px;color:var(--muted);background:transparent}
+#resource-tabs button.selected{color:var(--blue);border-bottom-color:var(--blue);background:var(--blue-soft);font-weight:600}
+.resource-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
+.resource-stat{background:white;border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:2px}
+.resource-stat strong{font-size:22px;line-height:1.25}
+.resource-stat span{color:var(--muted);font-size:13px}
+.resource-stat small{color:var(--muted);font-size:11px}
+.resource-layout{display:grid;grid-template-columns:216px minmax(0,1fr);gap:20px;align-items:start}
+.resource-facets{background:white;border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+.resource-facet{margin-bottom:16px}
+.resource-facet h3{font-size:13px;margin-bottom:8px;color:var(--ink)}
+.resource-facet ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.facet-value{width:100%;text-align:left;padding:6px 8px;border-radius:6px;font-size:12px;color:var(--muted)}
+.facet-value.selected{background:var(--blue-soft);color:var(--blue);font-weight:600}
+.resource-toolbar{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.resource-toolbar .resource-search-label{flex:1 1 320px;margin:0 0 4px}
+.resource-main #resource-count{margin:12px 0 10px}
+@media(max-width:860px){.resource-layout{grid-template-columns:1fr}.resource-facets{order:2}}
 #resource-filters button.selected{background:var(--blue-soft);border-color:#8eb6f8;color:var(--blue)}
 .research-table tr[data-resource-kind=potential] td:first-child strong{color:#624a93}
 .research-table tr[data-resource-kind=paper] td:first-child strong{color:#246f79}
