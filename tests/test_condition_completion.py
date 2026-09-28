@@ -99,6 +99,27 @@ class CompletionTests(unittest.TestCase):
             with self.assertRaises(TaskError):
                 validate_completion(['units'], payload)
 
+
+    def test_not_applicable_is_accepted_for_an_optional_field_only(self):
+        payload=dict(proposals=[dict(field='defects_loading', value='用户需求未涉及缺陷或加载',
+                                     unit='', basis='需求只要求弹性常数', applicability='not_applicable')])
+        accepted=validate_completion(['defects_loading'], payload)
+        self.assertEqual(accepted[0]['applicability'], 'not_applicable')
+        self.assertIn('未涉及', accepted[0]['value'])
+        with self.assertRaises(TaskError):
+            validate_completion(['resources'], dict(proposals=[dict(field='resources', value='不适用',
+                unit='', basis='政策默认', applicability='not_applicable')]))
+        with self.assertRaises(TaskError):
+            validate_completion(['units'], dict(proposals=[dict(field='units', value='metal',
+                unit='', basis='惯例', applicability='sometimes')]))
+
+    def test_the_user_request_reaches_the_completion_request(self):
+        messages=completion_messages(['resources','scope'], [], 'research', '研究铜在 300 K 下的弹性常数')
+        user=__import__('json').loads(messages[1]['content'])
+        self.assertEqual(user['user_request'], '研究铜在 300 K 下的弹性常数')
+        self.assertEqual(sorted(user['essential_fields']), ['resources','scope'])
+        self.assertIn('政策默认', messages[0]['content'])
+
     def test_message_contract_forbids_claiming_the_source(self):
         messages=completion_messages(ALL_FIELDS, [], 'research')
         system=messages[0]['content']
