@@ -800,14 +800,15 @@ function renderResourceStats(){
 }
 function renderResourceFacets(rows){
  const box=$('#resource-facets');box.replaceChildren();
+ if(!rows.length){box.append(node('p','当前页签没有可筛选的条目。','form-note'));return;}
  for(const [key,title] of [['elements','元素体系'],['style','势函数类型'],['source','数据来源'],['role','仓库角色']]){
   const counts=new Map();for(const r of rows){const v=resourceFacetOf(r,key);counts.set(v,(counts.get(v)||0)+1);}
-  if(counts.size<2){continue;}
+  if(counts.size<1){continue;}
   const sec=node('section',undefined,'resource-facet');sec.append(node('h3',title));const ul=node('ul');
-  const all=node('li'),allButton=node('button','全部（'+rows.length+'）');allButton.className='facet-value'+(resourceFacets[key]?'':' selected');
+  const all=node('li'),allButton=node('button','全部（'+rows.length+'）');allButton.type='button';allButton.className='facet-value'+(resourceFacets[key]?'':' selected');
   allButton.onclick=()=>{resourceFacets[key]='';renderResourceTable();};all.append(allButton);ul.append(all);
   for(const [value,count] of [...counts.entries()].sort((a,b)=>b[1]-a[1]||String(a[0]).localeCompare(String(b[0]),'zh'))){
-   const li=node('li'),button=node('button',value+'（'+count+'）');button.className='facet-value'+(resourceFacets[key]===value?' selected':'');
+   const li=node('li'),button=node('button',value+'（'+count+'）');button.type='button';button.className='facet-value'+(resourceFacets[key]===value?' selected':'');
    button.onclick=()=>{resourceFacets[key]=resourceFacets[key]===value?'':value;renderResourceTable();};li.append(button);ul.append(li);
   }
   sec.append(ul);box.append(sec);
@@ -825,7 +826,7 @@ function resourceDetail(r){
  return d;
 }
 function renderResourceTable(){
- const box=$('#resource-cards'),query=$('#resource-search').value.trim().toLowerCase(),tabRows=resourceTabRows();
+ const box=$('#resource-cards');box.replaceChildren();const query=$('#resource-search').value.trim().toLowerCase(),tabRows=resourceTabRows();
  renderResourceStats();renderResourceFacets(tabRows);
  const rows=tabRows.filter(r=>Object.entries(resourceFacets).every(([k,v])=>!v||resourceFacetOf(r,k)===v)
    &&[r.name,r.filename,r.type,r.paper,r.doi,r.elements,r.companion,...(r.tags||[])].join(' ').toLowerCase().includes(query));
