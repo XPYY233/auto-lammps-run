@@ -13,7 +13,7 @@ from auto_lammps.potentials import PotentialAdapter, PotentialCatalog
 from test_deepseek import response
 from test_structures import SPEC
 from auto_lammps.tasks import TaskStore, FIELDS
-from test_tasks import evidence
+from test_tasks import evidence, target_ready
 
 
 class AgentCandidateTests(unittest.TestCase):
