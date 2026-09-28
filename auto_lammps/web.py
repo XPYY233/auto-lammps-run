@@ -638,6 +638,14 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
+    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
+    if model_client is not None:
+        # Wire the saved connection before any service is built from it: the candidate
+        # service and the runtime route must hold the same client object, and the
+        # environment key stays the fallback while no connection is configured.
+        saved=connections.status().get('connections',{}).get('deepseek-official',{})
+        if saved.get('configured'):
+            model_client=connections.client('deepseek-official', calls=model_client.calls)
     reference_model_client = (DeepSeekClient(ModelCalls.open_existing(args.reference_model_ledger),
         key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
@@ -673,14 +681,6 @@ def main():
     papers=PaperStore(store,ledger=ledger)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
     from .discovery_library import DiscoveryLibrary
-    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
-    if model_client is not None:
-        # The runtime route prefers the connection saved in the product settings and
-        # keeps using the same ledger; the environment key stays the fallback while
-        # no connection is configured.
-        saved=connections.status().get('connections',{}).get('deepseek-official',{})
-        if saved.get('configured'):
-            model_client=connections.client('deepseek-official', calls=model_client.calls)
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
