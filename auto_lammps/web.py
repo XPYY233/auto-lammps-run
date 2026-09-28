@@ -96,6 +96,11 @@ class Revision(Input):
     revision: StrictInt = Field(ge=1)
 
 
+class TaskLifecycleInput(Revision):
+    lifecycle_revision: StrictInt = Field(ge=0)
+    action: str
+
+
 class AddCondition(Revision):
     value: str
     unit: str
@@ -140,6 +145,11 @@ class PreferenceInput(Input):
 
 class TargetSelection(Revision):
     selected_ids: list[str] = Field(min_length=1, max_length=256)
+    exclusion_reason: str = Field(max_length=2000)
+
+
+class TargetPreview(Revision):
+    selected_ids: list[str] = Field(max_length=256)
     exclusion_reason: str = Field(max_length=2000)
 
 
@@ -430,6 +440,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def paper_task(identifier: str, data: LinkPaperTask):
         return papers.link_task(identifier, data.revision, data.task_id)
 
+    # Serialize browser lifecycle changes with browser start intents in this process.
+    from threading import RLock
+    from functools import wraps
+    task_management_lock=RLock()
+
+    def serialized_task_action(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            with task_management_lock:
+                return fn(*args, **kwargs)
+        return wrapped
+
+    def require_open_task(identifier):
+        state=store.lifecycle(identifier)
+        if state['deleted'] or state['user_finished']:
+            raise TaskError('此任务记录已结束或删除，请新建任务开展后续计算。')
+
     @app.get('/api/tasks')
     def tasks():
         rows=store.list()
@@ -448,7 +475,38 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                         row['execution_state']=runs[-1]['state']
                         row['job_id']=runs[-1]['job_id']
                         row['submission_count']=sum(e['dispatch_claims'] for e in agents)
+        if closeouts:
+            for row in rows:
+                try:
+                    report=closeouts.get(row['id'])
+                    if report:row['scoped_acceptance']=report['acceptance']
+                except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+                    row['acceptance_unavailable']=True
         return {'tasks':rows}
+
+    @app.post('/api/tasks/{identifier}/lifecycle')
+    @serialized_task_action
+    def task_lifecycle(identifier: str, data: TaskLifecycleInput):
+        store.get(identifier)
+        if workflow and (workflow.status(identifier).get('workflow') or {}).get('state') in {'queued','preparing'}:
+            raise TaskError('任务仍在自动准备，不能删除或确认结束。')
+        preparation=preparations.get(identifier)
+        if preparation and preparation['state'] in {'queued','running','model_requested','preparing_files','interrupted'}:
+            raise TaskError('方案仍在准备或状态待核对，不能删除或确认结束。')
+        if execution_jobs:
+            job=execution_jobs.status(identifier).get('job')
+            if job and job['state'] in {'queued','running','waiting','attention'}:
+                raise TaskError('计算仍在处理或状态待核对，不能删除或确认结束。')
+        terminal={'completed','failed','cancelled','timeout','rejected','cancelled_before_dispatch'}
+        evaluations=[]
+        for paper in papers.list()['papers']:
+            evaluations.extend(e for e in paper['evaluations'] if e['task_id']==identifier)
+        if results_reader:evaluations.extend(results_reader.task(identifier)['evaluations'])
+        for evaluation in evaluations:
+            if evaluation.get('available') is False:raise TaskError('计算记录待核对，暂不能修改结束状态。')
+            if any(r['state'] not in terminal for r in evaluation['requests']):
+                raise TaskError('仍有未结束或待核对的计算；本操作不会取消作业。')
+        return store.manage_lifecycle(identifier,data.revision,data.lifecycle_revision,data.action)
 
     @app.get('/api/tasks/{identifier}/results')
     def task_results(identifier: str):
@@ -519,7 +577,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/history')
     def history(identifier: str):
         preparation = preparations.reconcile(identifier)
-        return {'events': store.history(identifier), 'preparation_events': preparation['events'] if preparation else []}
+        return {'events': store.history(identifier), 'preparation_events': preparation['events'] if preparation else [], 'lifecycle_events':store.lifecycle(identifier)['lifecycle_events']}
 
     @app.get('/api/tasks/{identifier}/execution')
     def execution_status(identifier: str):
@@ -531,7 +589,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return result
 
     @app.post('/api/tasks/{identifier}/execution',status_code=202)
+    @serialized_task_action
     def execution_start(identifier: str,data: Revision):
+        require_open_task(identifier)
         if execution_jobs is None:
             return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
         from .ledger import LedgerError
@@ -540,7 +600,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
 
     @app.post('/api/tasks/{identifier}/workflow',status_code=202)
+    @serialized_task_action
     def workflow_start(identifier: str,data: Revision):
+        require_open_task(identifier)
         if workflow is None:
             return JSONResponse({'detail':'自动计算服务尚未就绪。'},status_code=422)
         return workflow.enqueue(identifier,data.revision)
@@ -550,7 +612,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return {'candidate': preparations.reconcile(identifier), 'downloads_enabled': candidate_service is not None}
 
     @app.post('/api/tasks/{identifier}/candidate', status_code=202)
+    @serialized_task_action
     def candidate_start(identifier: str, data: Revision):
+        require_open_task(identifier)
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
         if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
@@ -574,6 +638,15 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.post('/api/tasks/{identifier}/confirm')
     def confirm(identifier: str, data: ConfirmConditions):
         return store.confirm(identifier, data.revision, data.fields)
+
+    @app.post('/api/tasks/{identifier}/targets/preview')
+    def preview_targets(identifier: str, data: TargetPreview):
+        from .target_planning import selection_readiness
+        from .tasks import StaleTask, TaskError
+        document=store.get(identifier)
+        if document['mode']!='reproduction': raise TaskError('普通研究不要求论文目标')
+        if document['revision']!=data.revision: raise StaleTask('任务已更新，请刷新后选择')
+        return selection_readiness(document,data.selected_ids,data.exclusion_reason)
 
     @app.post('/api/tasks/{identifier}/targets')
     def select_targets(identifier: str, data: TargetSelection):
