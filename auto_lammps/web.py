@@ -545,6 +545,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                         row['execution_state']=runs[-1]['state']
                         row['job_id']=runs[-1]['job_id']
                         row['submission_count']=sum(e['dispatch_claims'] for e in agents)
+        if preparations:
+            # 任务列表必须反映"方案准备"的真实进展，否则冻结后无论准备成功、失败还是
+            # 需要补充条件，都会一律显示为"待准备"。
+            for row in rows:
+                try:
+                    job = preparations.get(row['id'])
+                except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+                    job = None
+                if job is not None:
+                    row['preparation_state'] = job.get('state')
+                    row['preparation_label'] = job.get('label')
         if closeouts:
             for row in rows:
                 try:
