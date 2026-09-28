@@ -26,6 +26,12 @@ def versions():
     return result
 
 
+def renderer_settings():
+    # Linux Tachyon crashes in ambient-occlusion grid traversal on CI. Keep
+    # real CPU geometry rendering and record the lighting choice in receipts.
+    return {'ambient_occlusion': sys.platform != 'linux'}
+
+
 def smoke_check():
     """Real synthetic BCC classification, RDF and PNG export in a clean process."""
     # The pinned Linux runtime uses CPU Tachyon rendering without a display.
@@ -70,7 +76,7 @@ def smoke_check():
             image = Path(folder) / 'structure.png'
             print('Analysis stage: render', file=sys.stderr, flush=True)
             view.render_image(filename=str(image), size=(160, 160),
-                              renderer=TachyonRenderer(antialiasing=False))
+                              renderer=TachyonRenderer(antialiasing=False, **renderer_settings()))
             if not image.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'):
                 raise RuntimeError('Structure PNG export failed')
         finally:
@@ -81,7 +87,8 @@ def smoke_check():
         fig.savefig(Path(folder) / 'rdf.png')
     return {'bcc_atoms': len(points), 'rdf_bins': len(rdf), 'structure_png': True,
             'plot_png': True, 'engine_version': ovito.version_string,
-            'physics_simulation': False}
+            'physics_simulation': False, 'renderer': 'Tachyon',
+            'renderer_settings': renderer_settings()}
 
 
 def main():

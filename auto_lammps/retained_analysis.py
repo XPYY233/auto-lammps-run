@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import sys
 
-from .analysis_runtime import versions
+from .analysis_runtime import versions, renderer_settings
 
 
 def digest(path):
@@ -110,7 +110,7 @@ def analyze(plan, destination):
                 view = Viewport(type=Viewport.Type.Ortho, camera_dir=(-1, -1, -1))
                 view.zoom_all(size=(640, 480))
                 view.render_image(filename=str(folder / f'frame-{frame}.png'), size=(640, 480),
-                                  frame=frame, background=(1, 1, 1), renderer=TachyonRenderer())
+                                  frame=frame, background=(1, 1, 1), renderer=TachyonRenderer(**renderer_settings()))
             finally:
                 pipeline.remove_from_scene()
     fig = Figure(figsize=(7, 4.5), layout='constrained')
@@ -151,7 +151,8 @@ def analyze(plan, destination):
                    frames=frames, input_frame_count=pipeline.source.num_frames,
                    files=[dict(name=p.name, size=p.stat().st_size, sha256=digest(p))
                           for p in sorted(folder.iterdir())],
-                   physics_simulation=False, scientific_pass=None)
+                   physics_simulation=False, scientific_pass=None,
+                   renderer='Tachyon', renderer_settings=renderer_settings())
     (folder / 'receipt.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
     for file in folder.iterdir():
         file.chmod(0o600)
