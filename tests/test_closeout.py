@@ -68,6 +68,56 @@ class CloseoutTests(unittest.TestCase):
         download=self.client.get(f"/api/tasks/{self.task['id']}/closeout/files/figure.png")
         self.assertEqual(download.content,b'synthetic image')
 
+    def test_visual_evidence_uses_declared_files_and_does_not_change_ledger(self):
+        self.assets['values.csv']=b'time_ps,temperature_K\n0,100\n1,200\n'
+        self.doc['views']=[dict(id='thermal',title='Temperature',description='Synthetic diagnostic',
+            figures=[dict(name='figure.png',role='paper')],metric_labels=[],
+            tables=[dict(name='values.csv',role='reference',label='Temperature data',
+                         columns=[dict(key='time_ps',label='Time (ps)'),
+                                  dict(key='temperature_K',label='Temperature (K)')])])]
+        self.save_closeout()
+        before=self.ledger.events(self.b['id'])
+        reply=self.client.get(self.url);self.assertEqual(reply.status_code,200,reply.text)
+        view=reply.json()['report']['closeout']['views'][0]
+        self.assertEqual(view['tables'][0]['rows'],[['0','100'],['1','200']])
+        self.assertEqual(view['tables'][0]['total_rows'],2)
+        self.assertFalse(view['tables'][0]['truncated'])
+        self.assertEqual(self.ledger.events(self.b['id']),before)
+        self.doc['views'][0]['tables'][0]['name']='../other.csv';self.save_closeout()
+        self.assertEqual(self.client.get(self.url).status_code,409)
+
+    def test_comparison_image_identity_comes_from_verified_bytes(self):
+        self.assets['second.png']=self.assets['figure.png']
+        self.doc['figures'].append(dict(name='second.png',label='Second',caption='Synthetic'))
+        self.doc['views']=[dict(id='pair',title='Pair',description='Same bytes',figures=[
+            dict(name='figure.png',role='reference',sha256='invented'),
+            dict(name='second.png',role='agent')])]
+        self.save_closeout()
+        figures=self.client.get(self.url).json()['report']['closeout']['views'][0]['figures']
+        self.assertEqual(figures[0]['sha256'],sha256(self.assets['figure.png']))
+        self.assertEqual(figures[0]['sha256'],figures[1]['sha256'])
+        self.assets['second.png']=b'different synthetic image';self.save_closeout()
+        figures=self.client.get(self.url).json()['report']['closeout']['views'][0]['figures']
+        self.assertNotEqual(figures[0]['sha256'],figures[1]['sha256'])
+
+    def test_visual_evidence_rejects_unknown_role_metric_or_figure(self):
+        valid=dict(id='curve',title='Curve',description='Synthetic',figures=[dict(name='figure.png',role='paper')])
+        for change in [dict(figures=[dict(name='unknown.png',role='paper')]),
+                       dict(figures=[dict(name='figure.png',role='invented')]),
+                       dict(metric_labels=['fabricated metric'])]:
+            self.doc['views']=[dict(valid,**change)];self.save_closeout()
+            self.assertEqual(self.client.get(self.url).status_code,409)
+
+    def test_visual_table_preview_is_explicitly_bounded(self):
+        self.assets['values.csv']=('x\n'+''.join(f'{i}\n' for i in range(30))).encode()
+        self.doc['views']=[dict(id='samples',title='Samples',description='Synthetic',
+            tables=[dict(name='values.csv',role='agent',label='Data',columns=[dict(key='x',label='x')])])]
+        self.save_closeout();reply=self.client.get(self.url)
+        self.assertEqual(reply.status_code,200,reply.text)
+        table=reply.json()['report']['closeout']['views'][0]['tables'][0]
+        self.assertEqual(table['total_rows'],30);self.assertTrue(table['truncated'])
+        self.assertEqual(table['rows'],[[str(i)] for i in [*range(6),*range(24,30)]])
+
     def test_tampered_raw_bytes_refuse_display_and_download(self):
         self.source.write_bytes(b'changed')
         self.assertEqual(self.client.get(self.url).status_code,409)
