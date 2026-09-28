@@ -199,12 +199,13 @@ class SlurmReader:
     not be published. An audit write error propagates rather than being ignored.
     """
     def __init__(self, host_alias, audit_directory, *, timeout=20, max_bytes=1_000_000,
-                 retain_queue_identity=False):
+                 retain_queue_identity=False, transport=None):
         if not isinstance(host_alias, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}', host_alias):
             raise ValueError('Invalid SSH alias')
         if not 0 < timeout <= 60 or type(max_bytes) is not int or not 1024 <= max_bytes <= 4_000_000:
             raise ValueError('Invalid query bounds')
         self.host_alias = host_alias
+        self.transport = transport
         self.audit_directory = private_directory(audit_directory)
         self.timeout, self.max_bytes = timeout, max_bytes
         if type(retain_queue_identity) is not bool:
@@ -274,6 +275,8 @@ class SlurmReader:
                    '-o', 'ConnectTimeout=10', '-o', 'ClearAllForwardings=yes',
                    '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'PermitLocalCommand=no',
                    self.host_alias, shlex.join(['env', 'TZ=UTC', 'LC_ALL=C', *arguments])]
+        if self.transport is not None:
+            command = self.transport.command(self.host_alias,['env','TZ=UTC','LC_ALL=C',*arguments])
         intent = _write_new(path / 'intent.json', dict(argv=command, started_utc=datetime.now(timezone.utc).isoformat()))
         try:
             result = _capture(command, timeout=self.timeout, max_bytes=self.max_bytes)

@@ -5,7 +5,7 @@ from pathlib import Path
 import signal
 import threading
 
-from .analysis import AnalysisService
+from .analysis_v2 import VersionedAnalysisService
 from .following import FollowingService
 from .ledger import Ledger
 from .monitoring import MonitoringService
@@ -59,7 +59,7 @@ def main(argv=None):
         reader=SlurmReader(args.ssh_alias,args.audit_directory,max_bytes=config['query_max_bytes'])
         collector=OutputCollector(ledger,StageEndpoint(**config['endpoint']),config['collections_directory'])
         following=FollowingService(ledger,ReconciliationService(ledger,reader),
-            AnalysisService(collector,config['reports_directory']),config['snapshots_directory'],
+            VersionedAnalysisService(collector,config['reports_directory']),config['snapshots_directory'],
             max_polls=config['max_polls'],interval_seconds=config['interval_seconds'])
         stop=threading.Event()
         old={sig:signal.signal(sig,lambda *_:stop.set()) for sig in (signal.SIGINT,signal.SIGTERM)}

@@ -1,5 +1,59 @@
 # 部署与配置
 
+## 应用自带分析运行环境（Issue #113）
+
+不探测开发者桌面安装的 OVITO，不调用桌面程序路径，也不继承开发者 Python 包。
+安装器创建独立环境，非 editable 安装本项目及 `web,geometry,analysis` 依赖，
+检查版本、包依赖、128 原子合成 BCC 识别、RDF、结构与曲线 PNG 导出。
+后两项实际执行，不以 import 成功代替工具就绪。所有检查只处理几何，无物理计算。
+
+```sh
+python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
+"$HOME/Auto-LAMMPS-runtime-v1/bin/python" -I -m auto_lammps.web \
+  --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
+```
+
+Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Mesa Vulkan 软件驱动（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应驱动；Python 包无法替代操作系统驱动。
+
+首次安装需要 Python 3.11+ 与网络；当前固定包覆盖 Apple Silicon macOS 和具有匹配 wheel 的 Linux，不能称为免 Python 安装包。
+更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。
+`install-receipt.json` 保存包下载来源/摘要，`installed-packages.json` 保存实际传递依赖版本，
+`analysis-check.json` 保存功能检查。跨机器须重新安装匹配平台的包，不能直接复制虚拟环境。
+Python 解释器与操作系统仍是明确前置依赖；独立打包、数据路径迁移和另一台真实用户机器验收尚待完成。
+
+HPC 的 SSH、Slurm、MPI/LAMMPS 是用户连接的远端能力，随连接配置核验；不得把某个开发者的
+别名作为默认环境。模型需要用户提供供应商、模型 ID 和本项目密钥。Zotero 是可选文献来源，
+不应成为无论文科研任务的启动前提。后续分析统一调用应用模块，不能借用个人脚本和桌面应用。
+
+已实现 `auto_lammps.retained_analysis`：从已回收输出的明确 SHA-256、元素映射、帧和分析设置
+执行 OVITO 自适应 CNA、结构导出与单帧 RDF；保留计划、包版本、输出摘要。
+这是控制端分析组件，网页自动调度和模型分析选择尚未接通。CNA 分类参数未在论文中完整指定时，
+结果须标注为追加诊断；单帧 RDF 不声称时间平均或整篇复现。
+
+官方安装说明：https://www.ovito.org/manual/python/introduction/installation.html
+无图形桌面的系统仍可能有平台图形依赖；安装时用实际图片导出检查，失败保留诊断并停止声明就绪。
+
+## 当前原生部署验收（2026-09-27，Issue #105）
+
+已将提交 `ddbd3da859eeeb46fe101741d3849917ade9c97a` 的既有上传、提交和运行/回收
+辅助程序安装到真实集群的独立版本目录，未改运行中任务。复用已运行验证的
+LAMMPS/MPI 模块；没有下载、构建或启动引擎。安装目录按 runtime、control、requests
+分开，逐文件摘要、私有权限、配置和本地/远端签名密钥一致性核验通过。
+
+实际登录端核验包括：装载安装后的 Python 程序、拒绝无效签名、在执行端同样的
+空环境中初始化模块，并确认 MPI/引擎路径与配置一致。模块核验仅运行 Python 元数据
+查询，没有启动 MPI 或 LAMMPS。请求目录为空，没有任务许可或调度提交。
+
+这是候选部署，不是已启用服务：尚未提供任务上传政策与执行批准/评分/审查绑定，
+也未连接生产网页。不能虚构这些身份以让配置通过。下一步复用实际部署资料完成
+控制端绑定，并在原任务结束后验证计算节点上的资源约束和同一产品执行链路。
+当前首篇独立计算继续原监控和冻结程序，不在运行中迁移。
+
+本版本的真实计算节点执行、完整自动科研及正式盲测隔离仍未验收。原生模式明确
+为 trusted research；存储限制只约束回收，不是文件系统硬配额。
+
+以下为早期部署记录；其中“尚未安装/未接入”的历史状态由上文和 PROGRESS 当前条目更新。
+
 当前有文献发现 CLI、本机任务页和可选 DeepSeek 条件整理代码，尚无完成真实验收的计算 worker 或模型服务。文献 CLI 使用 Python 3.11+ 标准库；网页需安装可选依赖，步骤与边界见 [TASKS.md](TASKS.md) 和 [模型配置](MODEL_RUNTIME.md)。
 
 Zotero 保持运行并启用本地 API；API 不可用时检查客户端设置，不尝试修改或解锁数据库。读取端参照 [Zotero API v3](https://www.zotero.org/support/dev/web_api/v3/basics)。检索仅覆盖已有索引，完整 PDF 覆盖未知。分页检查总量、重复和版本；缺少版本时明确标为 count_only，不声称原子快照。输出是本机私人审计，不可直接发布。

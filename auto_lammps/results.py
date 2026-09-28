@@ -92,13 +92,15 @@ class ResultsReader:
             if any(v is not None and (type(v) not in (int,float) or not math.isfinite(v)) for v in values.values()):
                 raise ResultUnavailable('Invalid numeric result')
             results.append({key:item[key] for key in ('id','method','file','x','y','window','sample_count',
-                                                       'source_line_ranges','values','value_units')})
+                                                       'source_line_ranges','values','value_units','units_origin')})
         return dict(id=identifier,status='analyzed',label='数值分析已完成',at=event['at'],
                     quantity=report['declared_quantity'],results=results,
                     sources=[{key:item[key] for key in ('file','sha256','columns')} for item in report['sources']],
                     scientific_status='not_evaluated',
                     notes=['尚未核验科学结论；数值处理完成不等于研究目标已达成。',
-                           '单位已与表头核对，仍需核验物理定义和脚本中的单位处理。',
+                           ('原生标量表不含单位；单位来自预先声明，需核验物理定义和脚本中的单位处理。'
+                            if any(r['units_origin']=='declared_only_not_present_in_scalar_header' for r in results)
+                            else '单位已与表头核对，仍需核验物理定义和脚本中的单位处理。'),
                            '样本标准差描述数据波动，不代表独立重复实验的不确定度。'])
 
     def task(self, identifier):

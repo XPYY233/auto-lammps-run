@@ -177,24 +177,49 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None):
+    if execution_jobs:
+        if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
+        controller=execution_jobs.controller
+        if results_reader is None:
+            results_reader=ResultsReader(store,execution_jobs.ledger,controller.following.analysis.collector.directory,controller.following.analysis.directory)
+        elif (results_reader.ledger.path!=execution_jobs.ledger.path or
+              results_reader.collections!=controller.following.analysis.collector.directory or
+              results_reader.reports!=controller.following.analysis.directory):
+            raise ValueError('Execution and results must share the ledger and artifact directories')
+        if candidate_service and candidate_service.snapshots!=controller.snapshots:
+            raise ValueError('Candidate and execution services must share snapshots')
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
     hpc = hpc_connections or HPCConnections(store)
-    raw_outputs = RawOutputs(store,papers)
+    if results_reader and results_reader.tasks.path!=store.path:
+        raise ValueError('Results must belong to the same task store')
+    if results_reader and collections_directory is not None and Path(collections_directory).absolute()!=results_reader.collections:
+        raise ValueError('Raw downloads and results must share the same collection directory')
+    raw_outputs = RawOutputs(store,papers,
+        collections=results_reader.collections if results_reader else collections_directory,
+        ledger=results_reader.ledger if results_reader else None)
+    from .closeout import CloseoutViews
+    closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
+    from .discovery_library import DiscoveryLibrary
+    discoveries = discovery_library or DiscoveryLibrary()
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
-    if results_reader and results_reader.tasks.path!=store.path:
-        raise ValueError('Results must belong to the same task store')
+    from .research_workflow import ResearchWorkflow
+    workflow = ResearchWorkflow(candidate_service, execution_jobs) if candidate_service and execution_jobs else None
     @asynccontextmanager
     async def lifespan(app):
         if candidate_service:
             candidate_service.start()
+        if execution_jobs:execution_jobs.start()
+        if workflow:workflow.start()
         try:
             yield
         finally:
+            if workflow:workflow.close()
+            if execution_jobs:execution_jobs.close()
             if candidate_service:
                 candidate_service.close()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -317,7 +342,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def reference_result(identifier: str):
         store.get(identifier)
         if reference_views is None:return {'report':None}
-        try:return {'report':reference_views.get(identifier)}
+        try:
+            report = reference_views.get(identifier)
+            if report is not None:
+                report['closeout'] = closeouts.get(identifier, report)
+            return {'report':report}
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'参考报告与原始记录未通过核验，暂不展示数值。'},status_code=409)
 
@@ -330,12 +359,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         media={'.png':'image/png','.pdf':'application/pdf','.csv':'text/csv; charset=utf-8','.md':'text/markdown; charset=utf-8','.json':'application/json'}.get(Path(name).suffix,'application/octet-stream')
         return Response(data,media_type=media,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
 
+    @app.get('/api/tasks/{identifier}/closeout/files/{name}')
+    def closeout_file(identifier: str, name: str):
+        if closeouts is None:return JSONResponse({'detail':'验收资料尚未接入。'},status_code=404)
+        try:data=closeouts.download(identifier,name)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'验收资料未通过来源核验。'},status_code=409)
+        media={'.png':'image/png','.pdf':'application/pdf','.csv':'text/csv; charset=utf-8',
+               '.md':'text/markdown; charset=utf-8','.json':'application/json'}.get(Path(name).suffix,'application/octet-stream')
+        return Response(data,media_type=media,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
+
     @app.get('/api/schema')
     def schema():
         status = model_client.calls.status() if model_client else None
         reference_status = reference_model_client.calls.status() if reference_model_client else None
         return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': False,
+                'automatic_workflow': workflow.availability() if workflow else {'configured':False,'enabled':False},
                 'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else
                     {'enabled': False, 'reason': '方案准备服务尚未配置。'}}
@@ -343,6 +383,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/papers')
     def paper_list():
         return papers.list()
+
+    @app.get('/api/resource-discoveries')
+    def resource_discoveries():
+        try:
+            return discoveries.get()
+        except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+            return JSONResponse({'detail': '发现清单未通过格式检查，已登记资源仍保留。'}, status_code=409)
 
     @app.get('/api/papers/{identifier}')
     def paper_get(identifier: str):
@@ -447,6 +494,30 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         preparation = preparations.reconcile(identifier)
         return {'events': store.history(identifier), 'preparation_events': preparation['events'] if preparation else []}
 
+    @app.get('/api/tasks/{identifier}/execution')
+    def execution_status(identifier: str):
+        store.get(identifier)
+        if execution_jobs is None:
+            return dict(configured=False,worker_alive=False,can_start=False,job=None,message='自动执行服务尚未接入，任务已保存。')
+        result=execution_jobs.status(identifier)
+        if workflow:result['automatic_workflow']=workflow.status(identifier)
+        return result
+
+    @app.post('/api/tasks/{identifier}/execution',status_code=202)
+    def execution_start(identifier: str,data: Revision):
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        from .ledger import LedgerError
+        try:return execution_jobs.enqueue(identifier,data.revision)
+        except (ValueError,OSError,LedgerError,runtime_denied):
+            return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
+
+    @app.post('/api/tasks/{identifier}/workflow',status_code=202)
+    def workflow_start(identifier: str,data: Revision):
+        if workflow is None:
+            return JSONResponse({'detail':'自动计算服务尚未就绪。'},status_code=422)
+        return workflow.enqueue(identifier,data.revision)
+
     @app.get('/api/tasks/{identifier}/candidate')
     def candidate_get(identifier: str):
         return {'candidate': preparations.reconcile(identifier), 'downloads_enabled': candidate_service is not None}
@@ -455,6 +526,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def candidate_start(identifier: str, data: Revision):
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
+        if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
         return {'candidate': candidate_service.enqueue(identifier, data.revision)}
 
     @app.get('/api/tasks/{identifier}/candidate/files/{name}')
@@ -509,15 +581,18 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Local task conditions; no simulation or model execution.')
+    parser = argparse.ArgumentParser(description='Local research workspace with explicitly configured model and execution services.')
     parser.add_argument('--data-directory', required=True)
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--ledger', help='Existing private ledger for operator history; no submission endpoint')
+    parser.add_argument('--ledger', help='Existing private ledger shared by execution and operator history')
     parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
     parser.add_argument('--reference-model-ledger', help='Explicit existing reference-side model policy; no automatic enablement')
+    parser.add_argument('--execution-config',type=Path,help='Private deployment with fixed task/evaluation bindings and existing grants')
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
+    parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
+    parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
     args = parser.parse_args()
@@ -535,8 +610,10 @@ def main():
         key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
     results_reader=None
-    if args.collections_directory or args.reports_directory:
-        if not (ledger and args.collections_directory and args.reports_directory):
+    if args.collections_directory and not ledger:
+        parser.error('Raw downloads require an existing ledger')
+    if args.reports_directory:
+        if not (ledger and args.collections_directory):
             parser.error('Result viewing requires an existing ledger and both artifact directories')
         results_reader=ResultsReader(store,ledger,args.collections_directory,args.reports_directory)
     if args.candidate_config:
@@ -547,19 +624,28 @@ def main():
         config_path = Path(args.candidate_config).expanduser()
         with root_descriptor(config_path.parent) as root:
             config = json.loads(read_file(root, config_path.name, 100000))
-        if set(config) - {'legacy_snap_pins'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
+        if set(config) - {'legacy_snap_pins', 'output_layout'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
             parser.error('Invalid candidate configuration fields')
         adapter = PotentialAdapter(PotentialCatalog(config['potential_catalog']), allowed_pins=config['allowed_pins'],
                     software_sha256=config['software_sha256'], packages=config['packages'],
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
-                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'])
+                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'))
+    execution_jobs=None
+    if args.execution_config:
+        if ledger is None:parser.error('Execution requires an existing ledger')
+        from .execution_jobs import load_execution_jobs
+        execution_jobs=load_execution_jobs(store,ledger,args.execution_config)
+        if candidate_service and candidate_service.snapshots!=execution_jobs.controller.snapshots:
+            parser.error('Candidate and execution services must share snapshots')
     papers=PaperStore(store,ledger=ledger)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
+    from .discovery_library import DiscoveryLibrary
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          result_assistant_enabled=args.enable_result_assistant), host='127.0.0.1', port=args.port,
+                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
+                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

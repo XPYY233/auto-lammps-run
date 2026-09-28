@@ -115,7 +115,7 @@ class HPCConnections:
             return str(path)
         argv=['ssh','-F','/dev/null','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
               '-o','ConnectTimeout=10','-o','ConnectionAttempts=1','-o','ClearAllForwardings=yes',
-              '-o','ForwardAgent=no','-o','PermitLocalCommand=no','-o','ControlMaster=no','-o','ControlPath=none']
+              '-o','ForwardAgent=no','-o','ForwardX11=no','-o','PermitLocalCommand=no','-o','ControlMaster=no','-o','ControlPath=none']
         if secrets['known_hosts'].strip(): argv+=['-o','UserKnownHostsFile='+materialize('known_hosts',secrets['known_hosts'])]
         if profile['authentication']=='private_key':
             argv+=['-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-i',materialize('key',secrets['private_key'])]

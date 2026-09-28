@@ -10,7 +10,7 @@ from pathlib import Path
 import stat
 import uuid
 
-from .agent_candidates import CandidateError, generate_research_candidate, research_inputs
+from .agent_candidates import CandidateError, generate_research_candidate, research_inputs, output_prefix
 from .deepseek import ModelError
 from .manifest import ManifestError, Snapshot, canonical, private_directory, read_file, root_descriptor, sha256
 from .potentials import PotentialError
@@ -98,7 +98,9 @@ class CandidateHistory:
 
 
 class CandidateService:
-    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000):
+    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000, output_layout='isolated'):
+        output_prefix(output_layout)
+        self.output_layout = output_layout
         self.tasks, self.client, self.adapter = tasks, client, adapter
         self.resources, self.max_atoms = resources, max_atoms
         self.snapshots = private_directory(snapshots)
@@ -110,6 +112,7 @@ class CandidateService:
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
                     for name in ('candidate_jobs.py', 'agent_candidates.py', 'analysis.py', 'structures.py', 'potentials.py')}}
+        if output_layout != 'isolated': config['output_layout'] = output_layout
         self.config_sha256 = sha256(canonical(config))
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-preparation')
 
@@ -168,7 +171,7 @@ class CandidateService:
                     self.history._event(db, job['id'], state)
             try:
                 result = generate_research_candidate(self.client, self.tasks, identifier, job['revision'], self.adapter,
-                            resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage)
+                            resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage, output_layout=self.output_layout)
                 if result['status'] == 'clarification_required':
                     state, payload = 'clarification', {'summary': result['proposal']['summary'],
                         'questions': result['proposal']['questions'], 'request_id': result['request_id']}
