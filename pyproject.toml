@@ -1,0 +1,26 @@
+[project]
+name = "auto-lammps-run"
+version = "0.0.1"
+description = "Literature, task review and accounted HPC execution foundations"
+requires-python = ">=3.11"
+dependencies = []
+license = "Apache-2.0"
+
+[project.optional-dependencies]
+web = ["fastapi==0.141.1", "uvicorn==0.52.0"]
+test = ["httpx==0.28.1"]
+geometry = ["ase==3.29.0"]
+analysis = ["ovito==3.16.1.post1; sys_platform == 'darwin'", "ovito==3.16.1; sys_platform != 'darwin'", "matplotlib==3.11.2"]
+
+[project.scripts]
+auto-lammps-doctor = "auto_lammps.analysis_runtime:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["auto_lammps*"]
+
+[tool.setuptools.package-data]
+auto_lammps = ["web_assets/*.html", "web_assets/*.css", "web_assets/*.js", "worker_licenses/*.txt"]
