@@ -8,6 +8,10 @@ from .manifest import canonical, sha256
 from .tasks import ESSENTIAL, FIELDS, TaskError, candidate, text
 
 
+class ModelOutputError(TaskError):
+    """The model's answer failed validation; only this class is worth one repair call."""
+
+
 def source_bundle(sources):
     if not isinstance(sources, list) or not 1 <= len(sources) <= 32:
         raise TaskError('需要 1 至 32 段来源文本')
@@ -47,24 +51,51 @@ def condition_messages(sources, mode='research'):
             {'role': 'user', 'content': canonical({'sources': sources}).decode()}]
 
 
+# 模型偶尔会多给一个无关键（例如 units/notes/summary）。这些被忽略而不是被采纳，
+# 但未知的额外键仍然拒绝——报错要指名道姓，用户才知道到底哪里不对。
+IGNORED_TOP_KEYS = {'units', 'notes', 'summary', 'comment', 'comments'}
+
+
 def validate_conditions(sources, result):
     sources = source_bundle(sources)
     by_id = {source['id']: source for source in sources}
-    if (not isinstance(result, dict) or set(result) != {'conditions', 'questions'}
-            or not isinstance(result['conditions'], list) or len(result['conditions']) > 80
+    if not isinstance(result, dict):
+        raise ModelOutputError('模型条件输出不是 JSON 对象，收到：' + type(result).__name__)
+    keys = set(result)
+    if not {'conditions', 'questions'} <= keys:
+        missing = sorted({'conditions', 'questions'} - keys)
+        raise ModelOutputError('模型条件输出缺少必要键：' + '、'.join(missing) + '；实际收到：' + '、'.join(sorted(keys)))
+    unknown = sorted(keys - {'conditions', 'questions'} - IGNORED_TOP_KEYS)
+    if unknown:
+        raise ModelOutputError('模型条件输出含未知键：' + '、'.join(unknown) + '；可用：conditions、questions')
+    if (not isinstance(result['conditions'], list) or len(result['conditions']) > 80
             or not isinstance(result['questions'], list) or len(result['questions']) > 40):
-        raise TaskError('模型条件输出格式不完整')
+        raise ModelOutputError('模型条件输出的 conditions/questions 必须是列表，且条目数受限'
+                        f"（收到 conditions={type(result['conditions']).__name__}"
+                        f"、questions={type(result['questions']).__name__}）")
     choices, questions = [], []
-    for item in result['conditions']:
-        if not isinstance(item, dict) or set(item) != {'field', 'value', 'unit', 'source_id', 'quote'}:
-            raise TaskError('模型条件条目包含缺失或额外字段')
-        if (not isinstance(item['field'], str) or item['field'] not in FIELDS
-                or not isinstance(item['source_id'], str) or item['source_id'] not in by_id):
-            raise TaskError('模型引用了未知条件或来源')
+    for index, item in enumerate(result['conditions']):
+        if not isinstance(item, dict):
+            raise ModelOutputError(f'模型条件第 {index} 条不是对象，收到：{type(item).__name__}')
+        extra = sorted(set(item) - {'field', 'value', 'unit', 'source_id', 'quote'})
+        missing = sorted({'field', 'value', 'unit', 'source_id', 'quote'} - set(item))
+        if extra or missing:
+            detail = []
+            if missing: detail.append('缺少 ' + '、'.join(missing))
+            if extra: detail.append('多出 ' + '、'.join(extra))
+            raise ModelOutputError(f"模型条件第 {index} 条字段不符（{'；'.join(detail)}）")
+        if not isinstance(item['field'], str) or item['field'] not in FIELDS:
+            raise ModelOutputError(f"模型条件第 {index} 条的 field 无效：{str(item['field'])[:40]}")
+        if not isinstance(item['source_id'], str) or item['source_id'] not in by_id:
+            raise ModelOutputError(f"模型条件第 {index} 条引用了未知来源：{str(item['source_id'])[:40]}")
         source = by_id[item['source_id']]
         quote, value, unit = text(item['quote'], 6000), text(item['value'], 4000), text(item['unit'], 80, required=False)
-        if quote not in source['text'] or value not in quote or (unit and unit not in quote):
-            raise TaskError('模型引用与原文不一致，未导入条件')
+        if quote not in source['text']:
+            raise ModelOutputError(f"模型条件第 {index} 条的 quote 不在 {item['source_id']} 原文中：{quote[:60]}")
+        if value not in quote:
+            raise ModelOutputError(f"模型条件第 {index} 条的 value 不在其 quote 内：{value[:40]}")
+        if unit and unit not in quote:
+            raise ModelOutputError(f"模型条件第 {index} 条的 unit 不在其 quote 内：{unit[:20]}")
         choice = candidate(dict(value=value, unit=unit, origin=source['origin'],
                                 source_locator=source['locator'], applicability='required', evidence_role='input'))
         choice['generated_evidence'] = dict(source_id=source['id'], quote=quote,
@@ -73,9 +104,11 @@ def validate_conditions(sources, result):
         entry = {'field': item['field'], 'candidate': choice}
         if entry not in choices:
             choices.append(entry)
-    for item in result['questions']:
+    for index, item in enumerate(result['questions']):
         if not isinstance(item, dict) or set(item) != {'field', 'question'}:
-            raise TaskError('模型缺项说明格式无效')
+            raise ModelOutputError(f'模型缺项说明第 {index} 条格式无效，收到键：'
+                            + '、'.join(sorted(item)) if isinstance(item, dict) else
+                            f'模型缺项说明第 {index} 条不是对象')
         if not isinstance(item['field'], str) or item['field'] not in FIELDS:
             raise TaskError('模型缺项说明引用未知条件')
         questions.append(dict(field=item['field'], question=text(item['question'], 2000)))
@@ -83,7 +116,13 @@ def validate_conditions(sources, result):
 
 
 def generate_condition_draft(client, store, identifier, revision, sources, request_id):
-    """One accounted model call, then all-or-nothing draft import; no retry."""
+    """One accounted model call plus at most one repair call, then all-or-nothing import.
+
+    The provenance rules are not relaxed: a quote must still be a contiguous piece of the
+    source. When the model normalises the text (for example quoting ``T=0 K`` for ``(T=0) K``)
+    the failure is reported precisely and the model is given exactly one chance to fix that
+    item, so a trivial formatting slip does not stall the whole task.
+    """
     current = store.get(identifier)
     if current['revision'] != revision or current['status'] == 'conditions_frozen':
         raise TaskError('任务已更新或冻结，请先核对当前版本')
@@ -92,10 +131,24 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
     completion = client.complete_json(request_id, messages)
     if completion['receipt']['state'] != 'completed':
         raise ModelError('condition_generation_not_completed')
-    # Store validates quote provenance again within the import path. If the
-    # task changed during the request, its revision guard rejects the whole
-    # import; the already-issued model call remains in the separate ledger.
-    return store.import_generated_conditions(identifier, revision, bundle, completion)
+    try:
+        # Store validates quote provenance again within the import path. If the
+        # task changed during the request, its revision guard rejects the whole
+        # import; the already-issued model call remains in the separate ledger.
+        return store.import_generated_conditions(identifier, revision, bundle, completion)
+    except ModelOutputError as error:
+        repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+        repair_messages = messages + [
+            {'role': 'assistant', 'content': canonical(completion['value']).decode()},
+            {'role': 'user', 'content': canonical({
+                'correction': '上一次输出未通过校验，请只修正被指出的问题后重新输出同一格式。'
+                              'quote 必须是所给来源文本中**连续出现**的原文片段（包含标点与括号），'
+                              'value 必须出现在该 quote 内。不要新增其他改动。',
+                'failure': str(error)[:400]}).decode()}]
+        repair = client.complete_json(repair_id, repair_messages)
+        if repair['receipt']['state'] != 'completed':
+            raise ModelError('condition_repair_not_completed')
+        return store.import_generated_conditions(identifier, revision, bundle, repair)
 
 def completion_messages(missing, extracted, mode='research', request=''):
     """Ask for confirmable defaults instead of extracting unsupported facts."""
@@ -131,23 +184,23 @@ def validate_completion(missing, result):
     allowed = set(missing)
     if (not isinstance(result, dict) or set(result) != {'proposals'}
             or not isinstance(result['proposals'], list) or len(result['proposals']) > 40):
-        raise TaskError('模型补全输出格式不完整')
+        raise ModelOutputError('模型补全输出格式不完整')
     proposals, seen = [], set()
     for item in result['proposals']:
         if not isinstance(item, dict) or set(item) != {'field', 'value', 'unit', 'basis'} | (
                 {'applicability'} if 'applicability' in item else set()):
-            raise TaskError('模型补全条目包含缺失或额外字段')
+            raise ModelOutputError('模型补全条目包含缺失或额外字段')
         field = item['field']
         if field not in FIELDS or field not in allowed:
-            raise TaskError('模型补全字段不在缺失列表中')
+            raise ModelOutputError('模型补全字段不在缺失列表中')
         if field in seen:
-            raise TaskError('模型补全字段重复')
+            raise ModelOutputError('模型补全字段重复')
         seen.add(field)
         applicability = item.get('applicability', 'required')
         if applicability not in {'required', 'not_applicable'}:
-            raise TaskError('模型补全适用性无效')
+            raise ModelOutputError('模型补全适用性无效')
         if applicability == 'not_applicable' and field in ESSENTIAL:
-            raise TaskError('必要字段不能标记为不适用')
+            raise ModelOutputError('必要字段不能标记为不适用')
         proposals.append(dict(field=field, value=text(item['value'], 4000),
                               unit=text(item['unit'], 80, required=False),
                               basis=text(item['basis'], 1000), applicability=applicability))

@@ -56,7 +56,8 @@ class GenerationTests(unittest.TestCase):
         with self.assertRaises(TaskError): self.generate()
         self.assertEqual(self.store.get(self.doc['id']), self.doc)
         self.assertEqual(self.calls.history()[0]['receipt']['structured_output'], bad)
-        self.assertEqual(self.transport.call_count, 1)
+        # 不合法输出会触发一次有界修复（共 2 次调用），但仍不改变任何条件。
+        self.assertEqual(self.transport.call_count, 2)
 
     def test_generated_conflict_preserves_manual_evidence_and_revokes_confirmation(self):
         self.doc = self.store.add_candidate(self.doc['id'], self.doc['revision'], 'temperature', evidence('400'))
