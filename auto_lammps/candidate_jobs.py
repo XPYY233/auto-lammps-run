@@ -188,7 +188,9 @@ class CandidateService:
                     code = str(error) if str(error) in ERRORS else 'model_generation_failed'
                 elif isinstance(error, (CandidateError, PotentialError, StructureError, TaskError, ManifestError)):
                     code = 'candidate_validation_failed'
-                state, payload = 'failed', {'error': code, 'message': ERRORS[code]}
+                # 具体原因必须可见：只说"检查未通过"用户无法定位。
+                state, payload = 'failed', {'error': code, 'message': ERRORS[code],
+                                            'detail': str(error)[:400]}
             with self.tasks.transaction() as db:
                 self.history._event(db, job['id'], state, payload)
 

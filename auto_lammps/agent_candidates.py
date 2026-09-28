@@ -151,6 +151,9 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'lattice constants, masses, temperature, strain, seeds, steps or other missing scientific choices. '
         'If a necessary condition is missing or the supported tools cannot express the task, give questions '
         'and set structure, potential_pin, workflow, analysis to null. Do not reduce the scientific scope. '
+        'The two modes are mutually exclusive and this is checked: when questions is non-empty every one of '
+        'structure, potential_pin, workflow and analysis must be null, and when a plan is given questions must '
+        'be an empty list. Never return questions together with a runnable plan. '
         'Otherwise questions is empty. For conventional cubic builders, structure has exactly crystal, elements, a_angstrom, repeat, '
         'orientation, boundary, vacancies, substitutions, type_elements, masses_amu. crystal is fcc, bcc, '
         'diamond, rocksalt or zincblende; elements contains base species (two for rocksalt/zincblende); '
@@ -239,7 +242,29 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             or completion['receipt']['output_sha256'] != sha256(canonical(completion['value']))):
         raise ModelError('candidate_generation_not_completed')
     proposal = completion['value']
-    screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
+    try:
+        screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
+    except CandidateError as error:
+        # 契约被违反时（例如同时给出提问与可执行方案）给模型恰好一次修正机会；
+        # 校验本身不放宽，原始回答仍保留在账本里。
+        repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+        repair_messages = messages + [
+            {'role': 'assistant', 'content': canonical(proposal).decode()},
+            {'role': 'user', 'content': canonical({
+                'correction': '上一次输出未通过校验。请只修正被指出的问题并重新输出同一 JSON 契约：'
+                              'questions 非空时 structure/potential_pin/workflow/analysis 必须全部为 null；'
+                              '给出可执行方案时 questions 必须是空列表。不要改变科研范围。',
+                'failure': str(error)[:400]}).decode()}]
+        try:
+            repaired = client.complete_json(repair_id, repair_messages)
+        except ModelError:
+            # 没有额度做修复时，用户应当看到真正的校验失败原因，而不是"额度耗尽"。
+            raise error
+        if (repaired['receipt']['state'] != 'completed'
+                or repaired['receipt']['output_sha256'] != sha256(canonical(repaired['value']))):
+            raise error
+        proposal = repaired['value']
+        screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
     if screen is None:
         return {'status': 'clarification_required', 'proposal': proposal, 'model_receipt': completion['receipt'],
                 'request_id': request_id, 'execution_authorized': False}

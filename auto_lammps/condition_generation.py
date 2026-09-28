@@ -150,13 +150,18 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
             raise ModelError('condition_repair_not_completed')
         return store.import_generated_conditions(identifier, revision, bundle, repair)
 
-def completion_messages(missing, extracted, mode='research', request=''):
+def completion_messages(missing, extracted, mode='research', request='', resources=None):
     """Ask for confirmable defaults instead of extracting unsupported facts."""
     missing = sorted(missing)
     if not missing or len(missing) > len(FIELDS) or any(key not in FIELDS for key in missing):
         raise TaskError('补全字段列表无效')
     labels = {key: FIELDS[key] for key in missing}
     essential = sorted(key for key in missing if key in ESSENTIAL)
+    resources_rule = ''
+    if resources:
+        resources_rule = ('已装可用的势函数资源（potential 字段必须从中选用其一，并写出其格式与元素；'
+                          '不得提出未在此列表中的势函数格式，例如列表只有 MEAM 时不得写 EAM）：'
+                          + canonical(resources).decode())
     system = (
         '你为科研计算提出待用户确认的默认建议，用于补齐尚未确定的输入条件。'
         '这些建议不是从原文抽取的事实：不得声称来自原文，不得编造论文结果、实验数据或待预测结果，'
@@ -169,7 +174,8 @@ def completion_messages(missing, extracted, mode='research', request=''):
         'resources 与 scope 属于用户/政策决策：请给出保守且明确的可执行默认值（例如按项目已批准的'
         '基准资源包络或单一基准工况验收范围），并在 basis 中写明这是政策默认、需用户确认，不得夸大。'
         '无法给出合理建议的字段不要输出，留给用户填写。'
-        '示例 JSON：{"proposals":[{"field":"units","value":"metal","unit":"",'
+        + resources_rule
+        + '示例 JSON：{"proposals":[{"field":"units","value":"metal","unit":"",'
         '"basis":"金属体系常用 metal 单位制","applicability":"required"}]}。示例不是本任务建议，不要复制。'
         '缺失字段如下：' + canonical(labels).decode()
     )
@@ -177,10 +183,11 @@ def completion_messages(missing, extracted, mode='research', request=''):
             {'role': 'user', 'content': canonical({'mode': mode, 'user_request': text(request, 12000, required=False),
                                                    'extracted_conditions': extracted,
                                                    'missing_fields': labels,
-                                                   'essential_fields': essential}).decode()}]
+                                                   'essential_fields': essential,
+                                                   'available_resources': resources or []}).decode()}]
 
 
-def validate_completion(missing, result):
+def validate_completion(missing, result, resources=None):
     allowed = set(missing)
     if (not isinstance(result, dict) or set(result) != {'proposals'}
             or not isinstance(result['proposals'], list) or len(result['proposals']) > 40):
@@ -201,13 +208,23 @@ def validate_completion(missing, result):
             raise ModelOutputError('模型补全适用性无效')
         if applicability == 'not_applicable' and field in ESSENTIAL:
             raise ModelOutputError('必要字段不能标记为不适用')
-        proposals.append(dict(field=field, value=text(item['value'], 4000),
+        value = text(item['value'], 4000)
+        if resources and field == 'potential':
+            formats = {str(r.get('format', '')).upper() for r in resources}
+            words = {w.upper() for w in __import__('re').findall(r'[A-Za-z]{2,}', value)}
+            unsupported = sorted(word for word in words
+                                 if word in {'EAM', 'MEAM', 'SNAP', 'TERSOFF', 'SW', 'ADP', 'COMB'}
+                                 and not any(word in declared for declared in formats))
+            if unsupported:
+                raise ModelOutputError('potential 提出了未提供的势函数格式：' + '、'.join(unsupported)
+                                       + '；可用：' + '、'.join(sorted(formats)))
+        proposals.append(dict(field=field, value=value,
                               unit=text(item['unit'], 80, required=False),
                               basis=text(item['basis'], 1000), applicability=applicability))
     return proposals
 
 
-def complete_condition_draft(client, store, identifier, revision, request_id):
+def complete_condition_draft(client, store, identifier, revision, request_id, resources=None):
     """One accounted model call, then append the proposals as unconfirmed candidates."""
     current = store.get(identifier)
     if current['revision'] != revision or current['status'] == 'conditions_frozen':
@@ -218,11 +235,11 @@ def complete_condition_draft(client, store, identifier, revision, request_id):
         raise TaskError('没有需要补全的条件字段')
     extracted = [dict(field=key, value=value['candidates'][0]['value'], unit=value['candidates'][0]['unit'])
                  for key, value in current['fields'].items() if value['candidates']]
-    messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''))
+    messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''), resources)
     completion = client.complete_json(request_id, messages)
     if completion['receipt']['state'] != 'completed':
         raise ModelError('condition_completion_not_completed')
-    proposals = validate_completion(missing, completion['value'])
+    proposals = validate_completion(missing, completion['value'], resources)
     accepted, skipped = [], []
     for proposal in proposals:
         current = store.get(identifier)

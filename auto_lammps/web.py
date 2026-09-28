@@ -689,9 +689,20 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def complete_conditions(identifier: str, data: Revision):
         if model_client is None:
             return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
+        # The completion must know which potentials are actually installed, otherwise it
+        # invents a format the cluster cannot run (for example EAM for a W task while the
+        # only available W resource is MEAM) and the later preparation has to refuse it.
+        resources = None
+        if candidate_service is not None:
+            try:
+                resources = [{'elements': model['elements'], 'format': model['format'],
+                              'units': model['units'], 'applicability': model.get('applicability')}
+                             for model in candidate_service.adapter.compatible_models()]
+            except (ValueError, KeyError, TypeError, OSError):
+                resources = None
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
                                            operation='complete-conditions-v1')))[:32]
-        return complete_condition_draft(model_client, store, identifier, data.revision, request_id)
+        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources)
 
     @app.post('/api/tasks/{identifier}/conditions/{field}')
     def add(identifier: str, field: str, data: AddCondition):
