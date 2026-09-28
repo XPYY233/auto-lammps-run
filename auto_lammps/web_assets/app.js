@@ -1023,16 +1023,49 @@ function renderExecutionControls(){
   if(executionState.can_start){const button=node('button','开始计算','primary');button.onclick=()=>action(async()=>{const id=current.id;button.disabled=true;await api(`/api/tasks/${id}/execution`,{revision:current.revision});if(current?.id===id){await refreshResults();await refreshWorkspace();}});box.append(button);}
  }
 }
-let hpcState=null;
-async function openHPC(){hpcState=await api('/api/hpc-connection');const p=hpcState.profile||{};for(const [id,key] of Object.entries({'hpc-label':'label','hpc-host':'host','hpc-user':'username','hpc-work':'work_directory','hpc-partition':'partition','hpc-account':'account'}))$('#'+id).value=p[key]||'';$('#hpc-port').value=p.port||22;$('#hpc-auth').value=p.authentication||'agent';clearHPCSecrets();$('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';$('#hpc-dialog .dialog-error').hidden=true;$('#check-hpc').disabled=!hpcState.configured;$('#hpc-status').textContent=hpcState.configured?'连接已保存；SSH 检查仅验证登录，计算环境与自动提交另行验证。':'填写你自己的计算连接。应用不预设其他用户的超算地址。';$('#hpc-dialog').showModal();}
+let hpcState=null,hpcEditingId=null;
+function editHPC(entry){
+ hpcEditingId=entry?.id||null;const p=entry?.profile||{};
+ for(const [id,key] of Object.entries({'hpc-label':'label','hpc-host':'host','hpc-user':'username','hpc-work':'work_directory','hpc-partition':'partition','hpc-account':'account'}))$('#'+id).value=p[key]||'';
+ $('#hpc-port').value=p.port||22;$('#hpc-auth').value=p.authentication||'agent';clearHPCSecrets();
+ $('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';$('#check-hpc').disabled=!entry;
+ $('#hpc-editor-title').textContent=entry?'编辑：'+p.label:'添加 HPC 连接';
+ $('#hpc-status').textContent=entry?'已有认证可留空保留；更换地址或用户名时需要重新提供认证。':'填写新连接，保存不会提交计算。';
+}
+function removalButton(label,confirmed,run){
+ const button=node('button',label,'quiet connection-remove');button.type='button';let armed=false;
+ button.onclick=()=>{if(!armed){armed=true;button.textContent=confirmed;return;}action(run);};return button;
+}
+function renderHPCConnections(){
+ const box=$('#saved-hpc-list');box.replaceChildren();
+ const entries=hpcState.connections||[];
+ if(!entries.length)box.append(node('p','尚未保存 HPC 连接。','form-note'));
+ for(const entry of entries){
+  const card=node('article',undefined,'connection-card'),p=entry.profile;
+  card.append(node('strong',p.label),node('span',entry.archived?'已移除':entry.active?'首选连接':'已保存','connection-badge'));
+  card.append(node('p',`${p.username}@${p.host}:${p.port} · ${p.partition||'未指定分区'}`,'connection-detail'));
+  card.append(node('p',entry.archived?'不再用于新任务；旧任务认证与历史保留。':`版本 ${entry.revision} · ${entry.last_check?(entry.last_check.connected?'最近 SSH 检查成功':'最近 SSH 检查未成功'):'尚未检查 SSH'} · 保存不等于可提交计算`,'form-note'));
+  const actions=node('div',undefined,'actions');
+  const manage=async operation=>{hpcState=await api('/api/hpc-connection/manage',{connection_id:entry.id,operation,management_revision:hpcState.management_revision});renderHPCConnections();editHPC(hpcState.connections.find(x=>x.id===hpcState.active_id));};
+  if(entry.archived){const restore=node('button','恢复连接','quiet');restore.type='button';restore.onclick=()=>action(()=>manage('restore'));actions.append(restore);}
+  else{
+   const edit=node('button','编辑','quiet');edit.type='button';edit.onclick=()=>editHPC(entry);actions.append(edit);
+   if(!entry.active){const use=node('button','设为首选','quiet');use.type='button';use.onclick=()=>action(()=>manage('select'));actions.append(use);}
+   actions.append(removalButton('移出列表','确认移除（保留旧任务）',()=>manage('archive')));
+  }
+  card.append(actions);box.append(card);
+ }
+}
+async function openHPC(){hpcState=await api('/api/hpc-connection');renderHPCConnections();editHPC(hpcState.connections?.find(x=>x.active));$('#hpc-dialog .dialog-error').hidden=true;$('#hpc-dialog').showModal();}
+$('#new-hpc').onclick=()=>{editHPC(null);$('#hpc-label').focus();};
 function clearHPCSecrets(){for(const id of ['hpc-key','hpc-known','hpc-cert'])$('#'+id).value='';}
 $('#open-hpc').onclick=()=>action(async()=>{$('#model-key').value='';$('#model-dialog').close();await openHPC();});
 $('#switch-model').onclick=()=>action(async()=>{clearHPCSecrets();$('#hpc-dialog').close();await openModel();});
 $('#close-hpc').onclick=()=>{clearHPCSecrets();$('#hpc-dialog').close();};
 $('#hpc-dialog').addEventListener('close',clearHPCSecrets);
 $('#hpc-auth').onchange=()=>{$('#hpc-key-label').hidden=$('#hpc-auth').value!=='private_key';};
-$('#hpc-form').onsubmit=e=>{e.preventDefault();action(async()=>{const payload={revision:hpcState.revision,label:$('#hpc-label').value.trim(),host:$('#hpc-host').value.trim(),port:Number($('#hpc-port').value),username:$('#hpc-user').value.trim(),work_directory:$('#hpc-work').value.trim(),partition:$('#hpc-partition').value.trim(),account:$('#hpc-account').value.trim(),authentication:$('#hpc-auth').value,private_key:$('#hpc-key').value||null,known_hosts:$('#hpc-known').value||null,certificate:$('#hpc-cert').value||null};try{hpcState=await api('/api/hpc-connection',payload);}finally{clearHPCSecrets();}$('#check-hpc').disabled=false;$('#hpc-status').textContent='已保存第 '+hpcState.revision+' 版连接。运行中的作业仍使用原连接；通用自动提交尚未开放。';});};
-$('#check-hpc').onclick=()=>action(async()=>{const b=$('#check-hpc');b.disabled=true;$('#hpc-status').textContent='正在检查已保存的 SSH 连接…';try{const result=await api('/api/hpc-connection/check',{revision:hpcState.revision});$('#hpc-status').textContent=result.message;}finally{b.disabled=false;}});
+$('#hpc-form').onsubmit=e=>{e.preventDefault();action(async()=>{const payload={revision:hpcState.revision,management_revision:hpcState.management_revision,connection_id:hpcEditingId,as_new:!hpcEditingId,label:$('#hpc-label').value.trim(),host:$('#hpc-host').value.trim(),port:Number($('#hpc-port').value),username:$('#hpc-user').value.trim(),work_directory:$('#hpc-work').value.trim(),partition:$('#hpc-partition').value.trim(),account:$('#hpc-account').value.trim(),authentication:$('#hpc-auth').value,private_key:$('#hpc-key').value||null,known_hosts:$('#hpc-known').value||null,certificate:$('#hpc-cert').value||null};try{hpcState=await api('/api/hpc-connection',payload);}finally{clearHPCSecrets();}renderHPCConnections();editHPC(hpcState.connections.find(x=>x.active));$('#hpc-status').textContent='已保存。旧任务继续使用原连接；运行服务绑定不会随设置变更。';});};
+$('#check-hpc').onclick=()=>action(async()=>{const b=$('#check-hpc');b.disabled=true;$('#hpc-status').textContent='正在检查已保存的 SSH 连接…';try{const result=await api('/api/hpc-connection/check',{revision:hpcState.connections.find(x=>x.id===hpcEditingId).revision});hpcState=await api('/api/hpc-connection');renderHPCConnections();$('#hpc-status').textContent=result.message;}finally{b.disabled=false;}});
 function renderRefreshStatus(){
  const status=$('#workspace-refresh-status');
  status.textContent=workspaceState.phase==='loading'?'正在核对结果与文件…':workspaceState.phase==='error'?'连接暂不可用；未更新结果与文件。':'结果与文件已核对';
@@ -1065,12 +1098,36 @@ function renderRawFiles(result){
  }
 }
 let connectionState=null;
-async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();$('#model-dialog').showModal();}
+async function openModel(){modelPreference=await api('/api/model-preference');connectionState=await api('/api/model-connections');$('#provider-choice').value=modelPreference.provider;$('#model-name').value=modelPreference.model;$('#model-key').value='';$('#model-dialog .dialog-error').hidden=true;refreshConnectionLabel();renderModelConnections();$('#model-dialog').showModal();}
+function selectModelEditor(provider){
+ $('#provider-choice').value=provider;$('#model-key').value='';$('#available-models').replaceChildren();
+ $('#model-name').value=connectionState?.connections[provider]?.model||'';
+ $('#model-editor-title').textContent=(connectionState?.connections[provider]?.configured?'编辑：':'添加：')+(connectionState?.connections[provider]?.label||provider);
+ refreshConnectionLabel();
+}
+async function removeModelConnection(provider){
+ connectionState=await api('/api/model-connections',{provider,model:'',remove:true});
+ if(modelPreference.provider===provider)modelPreference=await api('/api/model-preference',{provider,model:'',revision:modelPreference.revision});
+ selectModelEditor(provider);renderModelConnections();
+}
+function renderModelConnections(){
+ const box=$('#saved-model-list');box.replaceChildren();
+ const entries=Object.entries(connectionState?.connections||{}).filter(([,c])=>c.configured);
+ if(!entries.length)box.append(node('p','尚未保存 API。选择模型商并填写密钥后即可添加。','form-note'));
+ for(const [provider,c] of entries){
+  const card=node('article',undefined,'connection-card'),preferred=modelPreference.provider===provider&&modelPreference.model===c.model;
+  card.append(node('strong',c.label),node('span',preferred?'首选模型':'已保存','connection-badge'),node('p',c.model||'尚未选择模型 ID','connection-detail'),node('p',c.endpoint+' · 密钥已保存，不回显','form-note'));
+  const actions=node('div',undefined,'actions'),edit=node('button','编辑模型 / 更换密钥','quiet');edit.type='button';edit.onclick=()=>{selectModelEditor(provider);$('#model-name').focus();};actions.append(edit);
+  if(!preferred&&c.model){const use=node('button','设为首选','quiet');use.type='button';use.onclick=()=>action(async()=>{modelPreference=await api('/api/model-preference',{provider,model:c.model,revision:modelPreference.revision});selectModelEditor(provider);renderModelConnections();});actions.append(use);}
+  actions.append(removalButton('移除连接','确认移除 API 密钥',()=>removeModelConnection(provider)));card.append(actions);box.append(card);
+ }
+}
+$('#new-model').onclick=()=>{const provider=Object.entries(connectionState.connections).find(([,c])=>!c.configured)?.[0];if(provider)selectModelEditor(provider);$('#model-editor-title').textContent=provider?'添加模型 API':'各模型商已有连接；可编辑或更换密钥';$('#provider-choice').focus();};
 function refreshConnectionLabel(){const c=connectionState?.connections[$('#provider-choice').value];$('#connection-status').textContent=c?.configured?'已保存密钥，留空可保留；连接可用性以实际响应为准。':'尚未保存该模型商的密钥。';$('#fetch-models').disabled=!c?.configured||!c?.model_listing;$('#remove-key').disabled=!c?.configured;if(c&&!c.model_listing)$('#connection-status').textContent+=' 此模型商请手动填写模型 ID。';}
-$('#provider-choice').onchange=()=>{$('#model-key').value='';$('#available-models').replaceChildren();$('#model-name').value=connectionState?.connections[$('#provider-choice').value]?.model||'';refreshConnectionLabel();};
-$('#model-form').onsubmit=e=>{e.preventDefault();action(async()=>{const provider=$('#provider-choice').value,model=$('#model-name').value.trim(),key=$('#model-key').value;try{connectionState=await api('/api/model-connections',{provider,model,api_key:key||null});}finally{$('#model-key').value='';}modelPreference=await api('/api/model-preference',{provider,model,revision:modelPreference.revision});$('#open-model').title='模型与计算连接 · '+modelPreference.providers[provider];refreshConnectionLabel();notice('模型连接已保存。可读取模型目录，或在结果页发送分析问题。保存本身不调用模型。');});};
+$('#provider-choice').onchange=()=>selectModelEditor($('#provider-choice').value);
+$('#model-form').onsubmit=e=>{e.preventDefault();action(async()=>{const provider=$('#provider-choice').value,model=$('#model-name').value.trim(),key=$('#model-key').value;try{connectionState=await api('/api/model-connections',{provider,model,api_key:key||null});}finally{$('#model-key').value='';}modelPreference=await api('/api/model-preference',{provider,model,revision:modelPreference.revision});$('#open-model').title='模型与计算连接 · '+modelPreference.providers[provider];refreshConnectionLabel();renderModelConnections();notice('模型连接已保存。可读取模型目录，或在结果页发送分析问题。保存本身不调用模型。');});};
 $('#fetch-models').onclick=()=>action(async()=>{const result=await api('/api/model-connections/models',{provider:$('#provider-choice').value});$('#available-models').replaceChildren(...result.models.map(id=>new Option(id,id)));$('#connection-status').textContent=`已取得 ${result.models.length} 个模型 ID${result.has_more?'（目录还有后续页，可手动输入）':''}。点击模型输入框选择。`});
-$('#remove-key').onclick=()=>action(async()=>{connectionState=await api('/api/model-connections',{provider:$('#provider-choice').value,model:'',remove:true});$('#model-key').value='';refreshConnectionLabel();});
+$('#remove-key').onclick=()=>{const provider=$('#provider-choice').value;const card=[...$('#saved-model-list').children].find(x=>x.querySelector('strong')?.textContent===connectionState.connections[provider].label);card?.querySelector('.connection-remove')?.focus();$('#connection-status').textContent='请在上方已保存连接中点击“移除连接”并确认。';};
 $('#close-model').onclick=()=>{$('#model-key').value='';$('#model-dialog').close();};for(const id of ['open-model','home-model','rail-model','discussion-model'])$('#'+id).onclick=()=>action(openModel);
 for(const id of ['top-tasks','back-tasks','home-tasks'])$('#'+id).onclick=()=>requestRoute('#tasks');
 for(const id of ['top-new','tasks-new'])$('#'+id).onclick=showNew;

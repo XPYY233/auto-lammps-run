@@ -641,3 +641,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .evidence-data{border-left:4px solid var(--source-ink,#64748b);background:var(--source-wash,#f7f9fc);padding:16px;margin:12px 0;border-radius:8px}
 .evidence-data .result-table th{background:var(--source-wash,#f7f9fc)}
 .evidence-equality{padding:12px 16px;background:#f1f5f9;color:#334155;border-left:3px solid #64748b;border-radius:6px;font-size:13px;line-height:1.7}
+
+/* Saved connection management: source identity remains readable without secrets. */
+.saved-connections{border-bottom:1px solid var(--line,#dce4ef);padding-bottom:18px;margin-bottom:18px}
+.connection-card{border:1px solid #dce4ef;border-radius:10px;background:#f8faff;padding:14px;margin:10px 0}
+.connection-card strong{color:#172b4d}.connection-badge{display:inline-block;margin-left:12px;font-size:12px;color:#185adb;background:#e9f0ff;border-radius:5px;padding:2px 7px}
+.connection-detail{overflow-wrap:anywhere;margin:8px 0 4px}.connection-card .form-note{margin:5px 0 10px}.connection-card .actions{flex-wrap:wrap}.connection-remove{color:#9d2941}
