@@ -15,6 +15,8 @@ import venv
 def main():
     parser = argparse.ArgumentParser(description='Install Auto-LAMMPS with its analysis tools')
     parser.add_argument('--runtime', required=True, type=Path)
+    parser.add_argument('--install-system-dependencies', action='store_true',
+                        help='Install declared Debian/Ubuntu graphics runtime using apt (requires admin rights)')
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         parser.error('Python 3.11 or later is required')
@@ -24,6 +26,17 @@ def main():
         parser.error('Runtime already exists; choose a new directory to preserve rollback')
     if runtime.resolve().is_relative_to(root):
         parser.error('Keep installed runtime and private data outside the source checkout')
+    if args.install_system_dependencies:
+        if sys.platform != 'linux':
+            parser.error('System dependency installation is only supported on Debian/Ubuntu')
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
+                       if '=' in line)
+        if release.get('ID', '').strip('\"') not in {'debian', 'ubuntu'}:
+            parser.error('This Linux distribution requires its native Vulkan driver installer')
+        prefix = [] if os.geteuid() == 0 else ['sudo']
+        subprocess.run(prefix + ['apt-get', 'update'], check=True)
+        subprocess.run(prefix + ['apt-get', 'install', '-y', '--no-install-recommends',
+                                 'mesa-vulkan-drivers'], check=True)
     os.umask(0o077)
     runtime.mkdir(parents=True, mode=0o700)
     env = dict(os.environ)
@@ -31,6 +44,11 @@ def main():
     for name in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'):
         env.pop(name, None)
     env['PYTHONNOUSERSITE'] = '1'
+    if sys.platform == 'linux':
+        details = subprocess.run(['dpkg-query', '-W', 'mesa-vulkan-drivers'],
+                                 capture_output=True, text=True, check=False) if args.install_system_dependencies else None
+        if details is not None:
+            (runtime / 'system-dependencies.txt').write_text(details.stdout, encoding='utf-8')
     venv.EnvBuilder(with_pip=True, system_site_packages=False).create(runtime)
     python = runtime / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
     subprocess.run([str(python), '-I', '-m', 'pip', 'install',
