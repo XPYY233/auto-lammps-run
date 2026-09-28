@@ -19,3 +19,15 @@ jobs:
         run: node --test tests/js/*.test.cjs
       - name: Public-tree guard
         run: python3 scripts/check_public_tree.py
+  portable-analysis:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install application with its analysis runtime
+        run: python3 scripts/install_local.py --runtime "$RUNNER_TEMP/auto-lammps-runtime"
+      - name: Verify retained-output analysis
+        run: '"$RUNNER_TEMP/auto-lammps-runtime/bin/python" -m unittest discover -s tests -p test_retained_analysis.py -v'

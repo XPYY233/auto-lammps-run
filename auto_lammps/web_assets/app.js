@@ -854,7 +854,7 @@ function renderWorkspaceResults(){
  }else if(resultTab==='plots'){
   renderPlotGallery(r,box);
  }else if(resultTab==='structure'||resultTab==='trajectory'){
-  box.append(emptyState(resultTab==='structure'?'原子结构视图待接入':'轨迹播放待接入','真实结构与轨迹已保留在超算。OVITO 分析和网页交互尚未接入，本页不以示意图替代计算结果。'));
+  const structures=r.closeout?.figures.filter(f=>f.kind==='structure')||[];if(structures.length){box.append(node('p','由已回收轨迹生成的 OVITO 结构快照。颜色为局部结构分类，不是元素颜色；自适应 CNA 是追加诊断。','plot-caption'));for(const figure of structures)box.append(closeoutFigure(r.closeout,figure));if(resultTab==='trajectory')box.append(node('p','当前展示代表帧；连续动画与交互旋转尚未接入，可下载原始轨迹。','plot-caption'));}else box.append(emptyState('结构分析尚未发布','原始结构与轨迹可在文件下载中获取。'));
  }else if(resultTab==='report'){
   const article=node('article',undefined,'report-text');article.append(node('h3','作者参考 A · 诊断报告'),node('p',r.title,'paper-title'));const link=node('a','DOI '+r.doi);link.href='https://doi.org/'+r.doi;link.target='_blank';link.rel='noopener noreferrer';article.append(link,node('p',r.scope),node('p',r.summary),limitations(r));const linkReport=node('a','下载完整分析报告 ↓','quiet');linkReport.href=`/api/tasks/${current.id}/reference-result/files/report.md`;article.append(linkReport);box.append(article);
  }else{

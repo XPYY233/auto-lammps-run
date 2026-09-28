@@ -1,5 +1,36 @@
 # 部署与配置
 
+## 应用自带分析运行环境（Issue #113）
+
+不探测开发者桌面安装的 OVITO，不调用桌面程序路径，也不继承开发者 Python 包。
+安装器创建独立环境，非 editable 安装本项目及 `web,geometry,analysis` 依赖，
+检查版本、包依赖、128 原子合成 BCC 识别、RDF、结构与曲线 PNG 导出。
+后两项实际执行，不以 import 成功代替工具就绪。所有检查只处理几何，无物理计算。
+
+```sh
+python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
+"$HOME/Auto-LAMMPS-runtime-v1/bin/python" -I -m auto_lammps.web \
+  --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
+```
+
+首次安装需要 Python 3.11+ 与网络；当前支持 macOS/Linux，不能称为免 Python 安装包。
+更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。
+`install-receipt.json` 保存包下载来源/摘要，`installed-packages.json` 保存实际传递依赖版本，
+`analysis-check.json` 保存功能检查。跨机器须重新安装匹配平台的包，不能直接复制虚拟环境。
+Python 解释器与操作系统仍是明确前置依赖；独立打包、数据路径迁移和另一台真实用户机器验收尚待完成。
+
+HPC 的 SSH、Slurm、MPI/LAMMPS 是用户连接的远端能力，随连接配置核验；不得把某个开发者的
+别名作为默认环境。模型需要用户提供供应商、模型 ID 和本项目密钥。Zotero 是可选文献来源，
+不应成为无论文科研任务的启动前提。后续分析统一调用应用模块，不能借用个人脚本和桌面应用。
+
+已实现 `auto_lammps.retained_analysis`：从已回收输出的明确 SHA-256、元素映射、帧和分析设置
+执行 OVITO 自适应 CNA、结构导出与单帧 RDF；保留计划、包版本、输出摘要。
+这是控制端分析组件，网页自动调度和模型分析选择尚未接通。CNA 分类参数未在论文中完整指定时，
+结果须标注为追加诊断；单帧 RDF 不声称时间平均或整篇复现。
+
+官方安装说明：https://www.ovito.org/manual/python/introduction/installation.html
+无图形桌面的系统仍可能有平台图形依赖；安装时用实际图片导出检查，失败保留诊断并停止声明就绪。
+
 ## 当前原生部署验收（2026-09-27，Issue #105）
 
 已将提交 `ddbd3da859eeeb46fe101741d3849917ade9c97a` 的既有上传、提交和运行/回收

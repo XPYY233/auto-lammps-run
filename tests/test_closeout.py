@@ -73,6 +73,26 @@ class CloseoutTests(unittest.TestCase):
         self.assertEqual(self.client.get(self.url).status_code,409)
         self.assertEqual(self.client.get(f"/api/tasks/{self.task['id']}/closeout/files/figure.png").status_code,409)
 
+    def test_postprocessing_bound_to_retained_source_and_derived_bytes(self):
+        source=dict(self.doc['source'], request_id=self.b['id'])
+        receipt=dict(status='posthoc_diagnostic', physics_simulation=False, scientific_pass=None,
+                     plan=dict(source=source), files=[dict(name='render.png', size=len(self.assets['figure.png']),
+                     sha256=sha256(self.assets['figure.png']))])
+        self.assets['derived.json']=canonical(receipt)
+        self.doc['postprocessing']=[dict(receipt_file='derived.json',
+                                         artifacts=[dict(name='figure.png',source_name='render.png')])]
+        self.doc['figures'][0]['kind']='structure'
+        self.save_closeout()
+        reply=self.client.get(self.url)
+        self.assertEqual(reply.status_code,200,reply.text)
+        self.assertEqual(reply.json()['report']['closeout']['figures'][0]['kind'],'structure')
+        self.assertEqual(reply.json()['report']['closeout']['source_sha256'],source['sha256'])
+        source['request_id']='other-request';self.assets['derived.json']=canonical(receipt);self.save_closeout()
+        self.assertEqual(self.client.get(self.url).status_code,409)
+        source['request_id']=self.b['id'];self.assets['derived.json']=canonical(receipt)
+        self.assets['figure.png']=b'different';self.save_closeout()
+        self.assertEqual(self.client.get(self.url).status_code,409)
+
     def test_wrong_job_or_manifest_rejected(self):
         for key in ('job_id','manifest_sha256'):
             original=self.doc[key];self.doc[key]='wrong';self.save_closeout()

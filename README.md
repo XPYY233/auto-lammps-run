@@ -22,6 +22,10 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 
 ## 本机研究工作台
 
+需分析和结构可视化时，使用[应用专用运行环境](docs/DEPLOYMENT.md)：安装器统一准备网页、
+ASE、OVITO Python 和绘图库，并实际检查结构识别与图片导出。不要求电脑预先装 OVITO
+桌面软件；当前仍需 Python 3.11+，完整用户迁移验收尚未完成。
+
 ```sh
 python3 -m auto_lammps.web --data-directory "$HOME/.local/share/auto-lammps-private/workbench" --port 8785
 ```
