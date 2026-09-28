@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 import sys
 
-REQUIRED = {'ovito': '3.16.1.post1' if sys.platform == 'darwin' else '3.16.1', 'matplotlib': '3.11.2', 'ase': '3.29.0'}
+REQUIRED = {'ovito': '3.16.1.post1' if sys.platform == 'darwin' else ('3.15.5' if sys.platform == 'linux' else '3.16.1'), 'matplotlib': '3.11.2', 'ase': '3.29.0'}
 
 
 def versions():
@@ -26,12 +26,18 @@ def versions():
     return result
 
 
+def renderer_settings():
+    # Linux Tachyon crashes in ambient-occlusion grid traversal on CI. Keep
+    # real CPU geometry rendering and record the lighting choice in receipts.
+    return {'ambient_occlusion': sys.platform != 'linux'}
+
+
 def smoke_check():
     """Real synthetic BCC classification, RDF and PNG export in a clean process."""
-    # OVITO selects its Vulkan-capable ovitoheadless platform on Linux.
-    if sys.platform != 'linux':
-        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # The pinned Linux runtime uses CPU Tachyon rendering without a display.
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
+    print('Analysis stage: import', file=sys.stderr, flush=True)
     import ovito  # Must precede Qt imports; loads platform runtime libraries.
     import numpy as np
     from ovito.data import DataCollection, Particles, SimulationCell
@@ -42,6 +48,7 @@ def smoke_check():
     matplotlib.use('Agg')
     from matplotlib.figure import Figure
 
+    print('Analysis stage: geometry', file=sys.stderr, flush=True)
     points = [(3*(x+b), 3*(y+b), 3*(z+b))
               for x in range(4) for y in range(4) for z in range(4) for b in (0, .5)]
     data = DataCollection()
@@ -67,18 +74,21 @@ def smoke_check():
             view = Viewport(type=Viewport.Type.Ortho, camera_dir=(-1, -1, -1))
             view.zoom_all(size=(160, 160))
             image = Path(folder) / 'structure.png'
+            print('Analysis stage: render', file=sys.stderr, flush=True)
             view.render_image(filename=str(image), size=(160, 160),
-                              renderer=TachyonRenderer(antialiasing=False))
+                              renderer=TachyonRenderer(antialiasing=False, **renderer_settings()))
             if not image.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'):
                 raise RuntimeError('Structure PNG export failed')
         finally:
             pipeline.remove_from_scene()
+        print('Analysis stage: plot', file=sys.stderr, flush=True)
         fig = Figure()
         fig.subplots().plot(rdf[:, 0], rdf[:, 1])
         fig.savefig(Path(folder) / 'rdf.png')
     return {'bcc_atoms': len(points), 'rdf_bins': len(rdf), 'structure_png': True,
             'plot_png': True, 'engine_version': ovito.version_string,
-            'physics_simulation': False}
+            'physics_simulation': False, 'renderer': 'Tachyon',
+            'renderer_settings': renderer_settings()}
 
 
 def main():

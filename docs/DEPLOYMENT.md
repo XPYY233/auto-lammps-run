@@ -13,7 +13,7 @@ python3 scripts/install_local.py --runtime "$HOME/Auto-LAMMPS-runtime-v1"
   --data-directory "$HOME/Auto-LAMMPS-data" --port 8785
 ```
 
-Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Mesa Vulkan 软件驱动（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应驱动；Python 包无法替代操作系统驱动。
+Debian/Ubuntu 无桌面环境可在安装命令加 `--install-system-dependencies`，由安装器通过系统软件源准备 Qt 导入所需的 GL/EGL、键盘与 D-Bus 共享库（需要管理员权限），并记录包版本。其他发行版须用其系统软件管理器准备对应共享库；Python 包无法替代操作系统库。Linux 使用固定 OVITO 3.15.5 的 CPU Tachyon 图片导出，macOS 保持 3.16.1.post1；版本与分析设置写入每次回执，不自动切换或覆盖历史结果。
 
 首次安装需要 Python 3.11+ 与网络；当前固定包覆盖 Apple Silicon macOS 和具有匹配 wheel 的 Linux，不能称为免 Python 安装包。
 更新使用新运行目录，旧环境与科研数据保留；安装器拒绝覆盖已有目录。
@@ -83,3 +83,8 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 已增加已核算作业的只读结果回收接口及一次回收命令，见 [结果回收](OUTPUTS.md)。新版
 启动器需保存声明输出清单；下载副本另占原有批次存储预算。尚未在真实集群验收，也未接入
 持续 worker、网页结果页或科学分析，不能把传输完整性当作计算成功。
+
+Linux Tachyon 的原生故障发生在环境遮蔽光照路径；应用渲染配置显式关闭该装饰性光照，
+仍保留CPU原子图、结构快照和拼图实际导出检查。配置写入分析回执，不能将旧图片静默
+替换为新渲染。此配置已通过Linux/macOS独立安装、分类/RDF、结构PNG与文件分析快照导出的CI验证；
+完整用户环境迁移和科研/API自动化仍需分别验收。

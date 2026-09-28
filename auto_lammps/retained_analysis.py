@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import sys
 
-from .analysis_runtime import versions
+from .analysis_runtime import versions, renderer_settings
 
 
 def digest(path):
@@ -42,9 +42,8 @@ def analyze(plan, destination):
         if (not isinstance(cutoff, (int, float)) or not math.isfinite(cutoff) or cutoff <= 0
                 or type(bins) is not int or not 2 <= bins <= 10000):
             raise ValueError('Invalid RDF settings')
-    # OVITO selects its Vulkan-capable ovitoheadless platform on Linux.
-    if sys.platform != 'linux':
-        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    # The pinned Linux runtime uses CPU Tachyon rendering without a display.
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     os.environ.setdefault('OVITO_THREAD_COUNT', '2')
     import ovito
     import numpy as np
@@ -111,7 +110,7 @@ def analyze(plan, destination):
                 view = Viewport(type=Viewport.Type.Ortho, camera_dir=(-1, -1, -1))
                 view.zoom_all(size=(640, 480))
                 view.render_image(filename=str(folder / f'frame-{frame}.png'), size=(640, 480),
-                                  frame=frame, background=(1, 1, 1), renderer=TachyonRenderer())
+                                  frame=frame, background=(1, 1, 1), renderer=TachyonRenderer(**renderer_settings()))
             finally:
                 pipeline.remove_from_scene()
     fig = Figure(figsize=(7, 4.5), layout='constrained')
@@ -152,7 +151,8 @@ def analyze(plan, destination):
                    frames=frames, input_frame_count=pipeline.source.num_frames,
                    files=[dict(name=p.name, size=p.stat().st_size, sha256=digest(p))
                           for p in sorted(folder.iterdir())],
-                   physics_simulation=False, scientific_pass=None)
+                   physics_simulation=False, scientific_pass=None,
+                   renderer='Tachyon', renderer_settings=renderer_settings())
     (folder / 'receipt.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
     for file in folder.iterdir():
         file.chmod(0o600)

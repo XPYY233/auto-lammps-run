@@ -32,11 +32,12 @@ def main():
         release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                        if '=' in line)
         if release.get('ID', '').strip('\"') not in {'debian', 'ubuntu'}:
-            parser.error('This Linux distribution requires its native Vulkan driver installer')
+            parser.error('This Linux distribution requires its native graphics library installer')
         prefix = [] if os.geteuid() == 0 else ['sudo']
         subprocess.run(prefix + ['apt-get', 'update'], check=True)
         subprocess.run(prefix + ['apt-get', 'install', '-y', '--no-install-recommends',
-                                 'mesa-vulkan-drivers'], check=True)
+                                 'libgl1', 'libegl1', 'libopengl0', 'libxkbcommon0',
+                                 'libdbus-1-3'], check=True)
     os.umask(0o077)
     runtime.mkdir(parents=True, mode=0o700)
     env = dict(os.environ)
@@ -45,7 +46,8 @@ def main():
         env.pop(name, None)
     env['PYTHONNOUSERSITE'] = '1'
     if sys.platform == 'linux':
-        details = subprocess.run(['dpkg-query', '-W', 'mesa-vulkan-drivers'],
+        details = subprocess.run(['dpkg-query', '-W', 'libgl1', 'libegl1', 'libopengl0',
+                                  'libxkbcommon0', 'libdbus-1-3'],
                                  capture_output=True, text=True, check=False) if args.install_system_dependencies else None
         if details is not None:
             (runtime / 'system-dependencies.txt').write_text(details.stdout, encoding='utf-8')
@@ -58,10 +60,11 @@ def main():
     resolved = subprocess.check_output([str(python), '-I', '-m', 'pip', 'list', '--format=json'],
                                        env=env, cwd=runtime, text=True)
     (runtime / 'installed-packages.json').write_text(resolved, encoding='utf-8')
-    check = subprocess.run([str(python), '-I', '-m', 'auto_lammps.analysis_runtime', '--smoke'],
+    check = subprocess.run([str(python), '-I', '-X', 'faulthandler', '-m', 'auto_lammps.analysis_runtime', '--smoke'],
                            env=env, cwd=runtime, capture_output=True, text=True, timeout=120)
     (runtime / 'analysis-check.json').write_text(check.stdout, encoding='utf-8')
     (runtime / 'analysis-check.stderr.txt').write_text(check.stderr, encoding='utf-8')
+    (runtime / 'analysis-process.json').write_text(json.dumps({'returncode': check.returncode}), encoding='utf-8')
     if check.returncode:
         print('Analysis verification failed. Installation retained for diagnosis; not ready.', file=sys.stderr)
         return 1

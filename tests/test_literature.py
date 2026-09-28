@@ -9,7 +9,7 @@ import unittest
 from auto_lammps.literature import preview_csv
 from auto_lammps.manifest import sha256
 from auto_lammps.tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
-from test_tasks import evidence
+from test_tasks import evidence, target_ready
 
 
 def export_csv(**changes):
@@ -99,6 +99,7 @@ class LiteratureTests(unittest.TestCase):
         for field in FIELDS:
             if field!='timestep': self.doc=self.store.add_candidate(self.doc['id'],self.doc['revision'],field,evidence())
         self.doc=self.store.confirm(self.doc['id'],self.doc['revision'],list(FIELDS))
+        self.doc=target_ready(self.store,self.doc)
         self.doc=self.store.freeze(self.doc['id'],self.doc['revision'])
         exported=self.store.export(self.doc['id'])
         self.assertEqual(sha256(exported),self.doc['record_sha256'])

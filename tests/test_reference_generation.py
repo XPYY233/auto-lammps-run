@@ -12,7 +12,7 @@ from auto_lammps.reference_generation import generate_reference_draft, reference
 from auto_lammps.tasks import FIELDS, TaskError, TaskStore
 from test_deepseek import response
 from test_literature import export_csv
-from test_tasks import evidence
+from test_tasks import evidence, target_ready
 
 
 class ReferenceGenerationTests(unittest.TestCase):
@@ -161,6 +161,7 @@ class ReferenceGenerationTests(unittest.TestCase):
             if field != 'temperature':
                 doc = self.store.add_candidate(doc['id'], doc['revision'], field, evidence('synthetic input'))
         doc = self.store.confirm(doc['id'], doc['revision'], list(FIELDS))
+        doc = target_ready(self.store, doc)
         self.store.freeze(doc['id'], doc['revision'])
         packages = self.store.export_packages(doc['id'])
         self.assertIn(b'7.654321', packages['reference'])

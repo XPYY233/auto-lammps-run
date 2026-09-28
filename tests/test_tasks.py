@@ -17,6 +17,21 @@ def evidence(value='合成条件', origin='user', **changes):
                 evidence_role='input', **changes)
 
 
+def target_inventory():
+    return dict(version=1, paper={'title':'PRIVATE_TARGET_TITLE', 'doi':'10.9999/synthetic'},
+        source_sha256='a'*64, coverage_note='All synthetic figure and table entries checked.', targets=[dict(
+            id='fig-1-a', label='Synthetic figure 1(a)', parent='figure-1', locator='PRIVATE_TARGET_SOURCE',
+            kind='subfigure', condition_group='condition-one', conditions='synthetic declared condition',
+            resources='synthetic source and potential receipt', outputs='synthetic table', sampling='fixed interval',
+            analysis='synthetic deterministic metric', criterion='PRIVATE_SCORE_CANARY',
+            availability='new_calculation', limitations='Synthetic fixture only; no physics.')])
+
+
+def target_ready(store, doc):
+    doc = store.import_target_inventory(doc['id'], doc['revision'], target_inventory())
+    return store.select_targets(doc['id'], doc['revision'], ['fig-1-a'], '')
+
+
 class TaskTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -95,6 +110,7 @@ class TaskTests(unittest.TestCase):
     def test_frozen_record_survives_restart_and_cannot_be_edited(self):
         for field in FIELDS: self.add(field)
         self.doc=self.store.confirm(self.doc['id'],self.doc['revision'],list(FIELDS))
+        self.doc=target_ready(self.store,self.doc)
         self.doc=self.store.freeze(self.doc['id'],self.doc['revision'])
         content=self.store.export(self.doc['id'])
         self.assertEqual(sha256(content),self.doc['record_sha256'])

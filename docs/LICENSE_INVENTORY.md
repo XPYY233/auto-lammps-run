@@ -16,7 +16,7 @@
 | FastAPI 0.141.1 / Uvicorn 0.52.0 / HTTPX 0.28.1 | PyPI 元数据分别为 MIT / BSD-3-Clause / BSD-3-Clause；HTTPX 仅测试使用 | 通过官方包安装，不内嵌第三方源码；发行前继续核查完整传递依赖 |
 | Bubblewrap / libseccomp | 仅调用系统安装版本的程序/API，无源码或二进制内嵌；部署版本、依赖及许可证仍需固定审计 | 不随原创代码重新许可，不打包分发 |
 | ASE 3.29.0 | PyPI 元数据与已安装包 LICENSE 均为 LGPL-2.1-or-later；官方建模与 LAMMPS data 接口已核对 | 作为 geometry 可选依赖独立安装，仅几何和序列化；无源码复制、不嵌入计算器；发行前继续核对传递依赖和许可义务 |
-| OVITO Python 3.16.1（macOS ARM64 为 3.16.1.post1） | 官方 PyPI 包元数据 License-Expression 为 MIT；依赖 PySide6-Essentials/NumPy/traits | 通过 analysis 依赖安装，保留上游包许可；不调用桌面 Basic/Pro、不重新许可或复制其应用程序 |
+| OVITO Python（Linux 3.15.5，macOS ARM64 3.16.1.post1，其他平台 3.16.1） | 官方 PyPI 包元数据 License-Expression 为 MIT；依赖 PySide6-Essentials/NumPy/traits | 通过 analysis 依赖安装，保留上游包许可；不调用桌面 Basic/Pro、不重新许可或复制其应用程序 |
 | Matplotlib 3.11.2 | 已安装包带 Matplotlib/PSF 许可及所含第三方声明 | 从官方包安装，不复制实现；安装收据保存传递依赖 |
 | PySide6-Essentials 6.11.2 | 包元数据 LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only | OVITO 的独立共享库依赖；保留官方包及许可，不套用项目 Apache-2.0；未来再分发包仍需完整核查 |
 | LAMMPS、PyMuPDF | 无本地引擎内嵌或重新打包 | 远端引擎和文献工具分别配置；不套用项目原创许可 |

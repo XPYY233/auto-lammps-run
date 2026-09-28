@@ -11,7 +11,7 @@ from auto_lammps.papers import PaperStore
 from auto_lammps.tasks import FIELDS, StaleTask, TaskError, TaskStore
 from auto_lammps.web import create_app
 from test_ledger import H1, H2, POLICY, RESOURCE
-from test_tasks import evidence
+from test_tasks import evidence, target_ready
 from test_web import HEADERS, ORIGIN
 
 
@@ -30,6 +30,7 @@ class PaperTests(unittest.TestCase):
         for field in FIELDS:
             task = self.tasks.add_candidate(task['id'], task['revision'], field, evidence())
         task = self.tasks.confirm(task['id'], task['revision'], list(FIELDS))
+        task = target_ready(self.tasks, task)
         self.tasks.freeze(task['id'], task['revision'])
         self.paper = self.papers.select(self.paper['id'], self.paper['revision'])
         self.paper = self.papers.link_task(self.paper['id'], self.paper['revision'], task['id'])

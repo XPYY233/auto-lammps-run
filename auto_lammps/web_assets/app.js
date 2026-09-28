@@ -104,6 +104,7 @@ function render() {
   $('#import-literature').hidden = frozen;
   $('#import-literature').textContent = current.mode==='reproduction' ? '导入文献证据' : '从文献导入条件';
   renderReference();
+  renderTargetPlanning();
   $('#task-status').textContent = frozen ? '条件已冻结' : '条件草稿';
   $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
   const relevant = Object.entries(current.fields).filter(([key])=>key !== 'reference' || current.mode === 'reproduction');
@@ -192,7 +193,7 @@ function render() {
     row.append(head,content); $('#conditions').append(row);
   }
   $('#freeze').hidden = frozen;
-  $('#freeze').disabled = !!current.issues.length;
+  $('#freeze').disabled = !!current.issues.length || (current.mode==='reproduction' && !current.target_selection);
   $('#export').hidden = !frozen;
   $('#export').href = `/api/tasks/${current.id}/export`;
   $('#package-exports').hidden = !frozen;
@@ -205,7 +206,7 @@ async function renderHistory() {
   const id=current.id;
   const {events,preparation_events=[]} = await api(`/api/tasks/${id}/history`);
   if(current?.id!==id) return;
-  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'};
+  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'};
   $('#history-list').replaceChildren();
   for (const item of events) {
     const [kind,fields] = item.event.split(':');
@@ -643,7 +644,7 @@ function paperCard(p,statuses,availableTasks) {
     const revisions=node('ol');
     for (const e of task.history) {
       const [kind,field]=e.event.split(':');
-      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'}[kind]||kind;
+      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'}[kind]||kind;
       revisions.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · 条件版本 ${e.revision} · ${label}${field?' · '+field.split(',').map(k=>schema.fields[k]||k).join('、'):''}`));
     }
     details.append(revisions);
@@ -890,34 +891,89 @@ function curvePlot(report){
  for(let i=0;i<=5;i++){const x=i*xmax/5;el('line',{x1:sx(x),y1:top,x2:sx(x),y2:bottom,stroke:'#edf1f7'});el('text',{x:sx(x),y:bottom+18,'text-anchor':'middle',fill:'#8c9ab1','font-size':10},number(x,3));}
  for(let i=0;i<=4;i++){const y=low+(max-low)*i/4;el('line',{x1:left,y1:sy(y),x2:right,y2:sy(y),stroke:'#e6edf7'});el('text',{x:left-10,y:sy(y)+4,'text-anchor':'end',fill:'#8c9ab1','font-size':10},number(y,1));}
  el('text',{x:240,y:284,'text-anchor':'middle',fill:'#677f9f','font-size':11},'应变');el('text',{x:15,y:140,transform:'rotate(-90 15 140)','text-anchor':'middle',fill:'#677f9f','font-size':11},'应力 (GPa)');
- curves.forEach((c,i)=>el('polyline',{points:c.points.map(p=>`${sx(p[0])},${sy(p[1])}`).join(' '),fill:'none',stroke:i?'#a96815':'#087f8c','stroke-width':i?1.25:2,'stroke-linejoin':'round'}));return svg;
+ curves.forEach((c,i)=>el('polyline',{points:c.points.map(p=>`${sx(p[0])},${sy(p[1])}`).join(' '),fill:'none',stroke:i?'#a21caf':'#185adb','stroke-dasharray':i?'7 4':'none','stroke-width':2,'stroke-linejoin':'round'}));return svg;
 }
 function limitations(report){const d=node('details',undefined,'result-limits');d.append(node('summary','查看结果限制与分析依据'));const ul=node('ul');for(const text of report.limitations)ul.append(node('li',text));d.append(ul);return d;}
 function reportDownloads(report,box){
- if(report.closeout){const accepted=node('details',undefined,'download-group');accepted.open=true;accepted.append(node('summary','P–A–B 对照与验收'));for(const f of report.closeout.files){const row=node('div',undefined,'file-row'),a=node('a',f.label+' ↓');a.href=`/api/tasks/${current.id}/closeout/files/${f.name}`;row.append(a,node('small',fileSize(f.size)));accepted.append(row);}box.append(accepted);}
+ if(report.closeout){const accepted=node('details',undefined,'download-group');accepted.open=false;accepted.append(node('summary','论文与计算结果 · '+report.closeout.files.length+' 个文件'));for(const f of report.closeout.files){const row=node('div',undefined,'file-row'),a=node('a',readableResultLabel(f.label)+' ↓');a.href=`/api/tasks/${current.id}/closeout/files/${f.name}`;row.append(a,node('small',fileSize(f.size)));accepted.append(row);}box.append(accepted);}
  const group=node('details',undefined,'download-group');group.open=true;group.append(node('summary','作者参考 A · 分析与报告'));box.append(group);
- for(const f of report.files.filter(f=>f.name!=='analysis.json')){const row=node('div',undefined,'file-row'),a=node('a',f.label+' ↓');a.href=`/api/tasks/${current.id}/reference-result/files/${f.name}`;row.append(a,node('small',fileSize(f.size)));group.append(row);}
+ for(const f of report.files.filter(f=>f.name!=='analysis.json')){const row=node('div',undefined,'file-row'),a=node('a',readableResultLabel(f.label)+' ↓');a.href=`/api/tasks/${current.id}/reference-result/files/${f.name}`;row.append(a,node('small',fileSize(f.size)));group.append(row);}
 }
 function closeoutTable(report){
  const table=node('table',undefined,'result-table'),head=node('thead'),tr=node('tr'),body=node('tbody');
- for(const label of ['指标 / GPa','P','A','B','|P−A|','|A−B|','|P−B|'])tr.append(node('th',label));head.append(tr);table.append(head,body);
+ for(const label of ['指标 / GPa','论文结果 P','作者源码运行 A','Agent 独立生成 B','论文与作者之差 |P−A|','作者与Agent之差 |A−B|','论文与Agent之差 |P−B|'])tr.append(node('th',label));head.append(tr);table.append(head,body);
  for(const m of report.metrics){const row=node('tr'),name=node('td',m.label);name.append(node('small',m.method));row.append(name);for(const k of ['P','A','B','absolute_PA','absolute_AB','absolute_PB'])row.append(node('td',number(m[k],5),'number'));body.append(row);}return table;
 }
-function closeoutFigure(report,figure){
- const panel=node('figure',undefined,'paper-figure'),link=node('a');link.href=`/api/tasks/${current.id}/closeout/files/${figure.name}`;link.target='_blank';link.rel='noopener';const img=node('img');img.src=link.href;img.alt=figure.label;img.loading='lazy';link.append(img);panel.append(link,node('figcaption',figure.caption));return panel;
+function evidenceSourceHeading(role){
+ const sources={paper:['P','论文结果'],reference:['A','作者源码运行'],agent:['B','Agent 独立生成']};
+ const value=sources[role];if(!value)return null;
+ const heading=node('div',undefined,'figure-source');heading.append(node('span',value[0],'figure-source-letter'),node('strong',value[1]));return heading;
 }
-function closeoutCoverage(report){
- const panel=node('details',undefined,'coverage-panel');panel.append(node('summary',`论文目标覆盖 · ${report.coverage.length} 组图表`));const table=node('table',undefined,'research-table'),body=node('tbody');for(const item of report.coverage){const row=node('tr'),target=node('td');target.append(node('strong',item.target),node('small',item.content));const evidence=node('td');evidence.append(node('strong',item.status),node('p',item.evidence),node('small',item.additional_work));row.append(target,evidence);body.append(row);}table.append(body);panel.append(table);return panel;
+function closeoutFigure(report,figure,role){
+ role=role||report.views?.flatMap(v=>v.figures).find(f=>f.name===figure.name)?.role;
+ const panel=node('figure',undefined,'paper-figure evidence-figure '+(role||'')),link=node('a');
+ const heading=evidenceSourceHeading(role);if(heading)panel.append(heading);
+ panel.append(node('h4',readableResultLabel(figure.label)));link.href=`/api/tasks/${current.id}/closeout/files/${figure.name}`;link.target='_blank';link.rel='noopener';const img=node('img');img.src=link.href;img.alt=readableResultLabel(figure.label);img.loading='lazy';link.append(img);panel.append(link,node('figcaption',readableResultLabel(figure.caption)));return panel;
+}
+function closeoutCoverage(report,expanded=false){
+ const panel=node('details',undefined,'coverage-panel');panel.open=expanded;panel.append(node('summary',`查看全篇 ${report.coverage.length} 项目标的工况、缺项与分析依据`));const table=node('table',undefined,'research-table'),body=node('tbody');for(const item of report.coverage){const row=node('tr'),target=node('td');target.append(node('strong',item.target),node('small',item.content));const evidence=node('td');evidence.append(node('strong',item.status),node('p',item.evidence),node('small',item.additional_work));row.append(target,evidence);body.append(row);}table.append(body);panel.append(table);return panel;
+}
+
+function readableResultLabel(value){
+ return value.replace(/^A · /,'作者源码运行（A） · ').replace(/^B · /,'Agent 独立生成（B） · ');
+}
+function evidenceLegend(){
+ const box=node('section',undefined,'evidence-legend');box.setAttribute('aria-label','三类结果的含义');
+ for(const [role,letter,title,description] of [
+  ['paper','P','论文结果','原论文中的图、表和报告值。'],
+  ['reference','A','作者源码运行','使用作者公开的原始代码与工作流程，实际运行所得。'],
+  ['agent','B','Agent 独立生成','Agent 根据允许的研究条件独立编写流程，实际运行所得。']]){
+   const card=node('article',undefined,'evidence-source '+role);card.append(node('span',letter,'source-letter'),node('strong',title),node('p',description));box.append(card);
+ }
+ return box;
+}
+let evidenceViewChoice=null;
+function evidenceDataTable(table){
+ const panel=node('section',undefined,'evidence-data '+table.role),roles={paper:'论文结果（P）',reference:'作者源码运行（A）',agent:'Agent 独立生成（B）'};
+ panel.append(evidenceSourceHeading(table.role),node('h4',roles[table.role]+' · '+table.label));
+ const scroll=node('div',undefined,'comparison-scroll'),grid=node('table',undefined,'result-table'),head=node('thead'),row=node('tr'),body=node('tbody');
+ for(const column of table.columns)row.append(node('th',column.label));head.append(row);grid.append(head,body);
+ for(const values of table.rows){const tr=node('tr');for(const value of values)tr.append(node('td',value,'number'));body.append(tr);}scroll.append(grid);panel.append(scroll);
+ const download=node('a','下载完整数据表 ↓');download.href=`/api/tasks/${current.id}/closeout/files/${table.name}`;
+ panel.append(node('p',table.truncated?`共 ${table.total_rows} 行，预览前 6 行与末 6 行；完整数据可下载。`:`共 ${table.total_rows} 行。`,'plot-caption'),download);return panel;
+}
+function renderEvidenceGallery(reference,box){
+ const report=reference.closeout;
+ const views=report.views?.length?report.views:[{id:'baseline',title:'应力–应变',description:'已完成基准工况的曲线与数值比较。',stress_curve:true,figures:[],tables:[],metric_labels:report.metrics.map(m=>m.label)}];
+ const toolbar=node('div',undefined,'evidence-tabs');toolbar.setAttribute('role','tablist');toolbar.setAttribute('aria-label','图表主题');
+ const area=node('section',undefined,'evidence-view');box.append(toolbar,area);
+ if(!views.some(v=>v.id===evidenceViewChoice))evidenceViewChoice=views[0].id;
+ const draw=view=>{
+  evidenceViewChoice=view.id;area.replaceChildren(node('h3',view.title),node('p',view.description,'plot-caption'));
+  for(const button of toolbar.children)button.setAttribute('aria-selected',String(button.dataset.view===view.id));
+  const grid=node('div',undefined,'closeout-figures');
+  for(const image of view.figures.filter(f=>f.role==='paper')){const figure=report.figures.find(f=>f.name===image.name);grid.append(closeoutFigure(report,figure,image.role));}
+  if(view.stress_curve){const computed=node('article',undefined,'result-widget');computed.append(node('h4','作者源码运行与 Agent 独立生成'),curvePlot(report),node('p','深蓝实线：作者源码运行（A）；紫红虚线：Agent 独立生成（B）。初始体积归一化的平均应力。','plot-caption'));grid.append(computed);}
+  for(const image of view.figures.filter(f=>f.role!=='paper')){const figure=report.figures.find(f=>f.name===image.name);grid.append(closeoutFigure(report,figure,image.role));}
+  const computedImages=view.figures.filter(f=>f.role==='reference'||f.role==='agent');
+  const identical=computedImages.some(a=>a.role==='reference'&&computedImages.some(b=>b.role==='agent'&&a.sha256&&a.sha256===b.sha256));
+  if(identical)area.append(node('p','这组 A、B 图片文件完全一致，按两份来源分别保留。颜色仅标识来源，不表示结果有差异；图片相同本身不作为复现通过依据。','evidence-equality'));
+  area.append(grid);
+  if(view.metric_labels.length){const scroll=node('div',undefined,'comparison-scroll');scroll.append(closeoutTable({...report,metrics:report.metrics.filter(m=>view.metric_labels.includes(m.label))}));area.append(scroll);}
+  if(view.tables.length){const tables=node('details',undefined,'evidence-tables');tables.open=true;tables.append(node('summary','查看数值表与下载'));for(const table of view.tables)tables.append(evidenceDataTable(table));area.append(tables);}
+ };
+ for(const view of views){const button=node('button',view.title);button.dataset.view=view.id;button.setAttribute('role','tab');button.onclick=()=>draw(view);toolbar.append(button);}
+ draw(views.find(v=>v.id===evidenceViewChoice));
 }
 let closeoutPlotChoice='ab';
 function renderCloseout(reference,box){
- const r=reference.closeout,a=r.acceptance,banner=node('section',undefined,'acceptance-note');banner.append(node('span','基准复现成功 · 用户验收','badge'),node('strong','第一周已完成'),node('p',a.scope),node('small',`${a.date} · 用户确认；保留科学诊断与原始提交记录。`));box.append(banner);
+ const r=reference.closeout,a=r.acceptance;box.append(evidenceLegend());const banner=node('section',undefined,'acceptance-note');banner.append(node('span','基准复现成功 · 用户验收','badge'),node('strong','第一周已完成'),node('p',a.scope),node('small',`${a.date} · 用户确认；保留科学诊断与原始提交记录。`));box.append(banner);
  if(resultTab==='plots'){
-  const label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');const options={ab:'A–B 应力–应变',elastic05:'A–B 弹性区间 0–0.05',elastic06:'A–B 弹性区间 0–0.06',author:'作者 A 原有诊断视图'};r.figures.forEach((f,i)=>options['paper'+i]=f.label);for(const [k,v] of Object.entries(options))select.append(new Option(v,k));select.value=Object.hasOwn(options,closeoutPlotChoice)?closeoutPlotChoice:'ab';label.append(select);box.append(label);const area=node('div',undefined,'chart-area');box.append(area);const draw=()=>{area.replaceChildren();if(select.value.startsWith('paper'))area.append(closeoutFigure(r,r.figures[Number(select.value.slice(5))]));else if(select.value==='author')renderPlotGallery(reference,area);else area.append(curvePlot({...r,xmax:select.value==='elastic05'?.05:select.value==='elastic06'?.06:.5}),node('p','青绿：作者参考 A；琥珀：独立生成 B。P 完整曲线未数字化，见论文原图。','plot-caption'));};select.onchange=()=>{closeoutPlotChoice=select.value;draw();};draw();
+  const label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');const options={ab:'A–B 应力–应变',elastic05:'A–B 弹性区间 0–0.05',elastic06:'A–B 弹性区间 0–0.06',author:'作者 A 原有诊断视图'};r.figures.forEach((f,i)=>options['paper'+i]=f.label);for(const [k,v] of Object.entries(options))select.append(new Option(v,k));select.value=Object.hasOwn(options,closeoutPlotChoice)?closeoutPlotChoice:'ab';label.append(select);box.append(label);const area=node('div',undefined,'chart-area');box.append(area);const draw=()=>{area.replaceChildren();if(select.value.startsWith('paper'))area.append(closeoutFigure(r,r.figures[Number(select.value.slice(5))]));else if(select.value==='author')renderPlotGallery(reference,area);else area.append(curvePlot({...r,xmax:select.value==='elastic05'?.05:select.value==='elastic06'?.06:.5}),node('p','深蓝实线：作者源码运行（A）；紫红虚线：Agent 独立生成（B）。论文（P）的完整曲线未数字化，见论文原图。','plot-caption'));};select.onchange=()=>{closeoutPlotChoice=select.value;draw();};draw();
  }else if(resultTab==='overview'){
-  const grid=node('div',undefined,'closeout-figures'),computed=node('article',undefined,'result-widget');computed.append(node('h3','A–B 实际应力–应变'),curvePlot(r),node('p','青绿：A；琥珀：B。初始体积归一化的平均应力。','plot-caption'));grid.append(computed);if(r.figures[0])grid.append(closeoutFigure(r,r.figures[0]));box.append(grid);
+  renderEvidenceGallery(reference,box);
  }
- if(resultTab!=='plots'){const scroll=node('div',undefined,'comparison-scroll');scroll.append(closeoutTable(r));box.append(scroll,node('p','P 为论文表格值；两种模量窗口分别保留。数值比较不代替整条曲线或整篇论文验证。','plot-caption'));}
+ if(!['plots','overview'].includes(resultTab)){const scroll=node('div',undefined,'comparison-scroll');scroll.append(closeoutTable(r));box.append(scroll,node('p','P 为论文表格值；两种模量窗口分别保留。数值比较不代替整条曲线或整篇论文验证。','plot-caption'));}
  if(resultTab==='report'){box.append(node('h3',reference.title));const doi=node('a','DOI '+reference.doi);doi.href='https://doi.org/'+reference.doi;doi.target='_blank';doi.rel='noopener noreferrer';box.append(doi,node('p',`A 本次 ${number(reference.runtime.core_hours,4)} 核时；B 本次 ${number(r.core_hours,4)} 核时。A 历次失败另见历史，未从总账删除。`));}
  box.append(limitations({limitations:[...reference.limitations,...r.limitations]}),closeoutCoverage(r));
 }
@@ -938,6 +994,7 @@ function renderWorkspaceResults(){
   return;
  }
  if(!r){const empty=emptyState('还没有计算结果',current.status==='conditions_frozen'?'研究条件已保存。方案与计算记录会在服务就绪后显示。':'研究需求已保存。方案、计算与分析就绪后，真实结果会显示在这里。');const button=node('button','查看模型设置','quiet');button.onclick=()=>action(openModel);empty.append(button);box.append(empty);return;}
+ if(resultTab==='targets'){box.append(node('h2','论文图表与计算结果'));if(r.closeout){box.append(evidenceLegend());renderEvidenceGallery(r,box);box.append(closeoutCoverage(r.closeout));}else box.append(node('p','全文图表审计尚未接入。'));return;}
  if(r.closeout && ['overview','data','plots','report'].includes(resultTab)){renderCloseout(r,box);return;}
  if(resultTab==='overview'){
   const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','作者参考 A · 应力–应变曲线'),node('p','当前图为 A 的实际输出；P 的完整曲线与 B 的比较不在此图中。','plot-caption'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(plot,values);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
@@ -968,7 +1025,7 @@ async function refreshWorkspace(){
  }
  const [reference,execution,raw,results]=replies.map(r=>r.value);
  workspaceReport=reference.report;executionState=execution;rawResult={task:id,files:raw.files};normalResult=results;
- workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();
+ workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();renderTargetPlanning();
  const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
@@ -980,7 +1037,7 @@ async function refreshWorkspace(){
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?'第一周 · Codex 辅助验证':'应用模型尚未启用';
- const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
+ const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
  renderRawFiles(raw);
  if(current?.id!==id)return;
  if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
@@ -1113,3 +1170,33 @@ for(const key of ['new','tasks','papers','resources','help'])$('#top-'+key).prep
 $('#task-search').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();action(showTasks);}});
 
 for(const button of document.querySelectorAll("[data-resource]"))button.prepend(uiIcon(button.dataset.resource==='paper'?'cases':button.dataset.resource==='tools'?'help':'resources'));
+
+function renderTargetPlanning() {
+  const box=$('#target-planning');box.replaceChildren();box.hidden=current.mode!=='reproduction';
+  if(box.hidden)return;
+  box.append(node('h2','先选复现目标'),node('p','逐项查看论文图表、工况与所需数据；同一工况的多个图表共用计算。'));
+  const source=current.target_inventory, frozen=current.status==='conditions_frozen';
+  if(!source){
+    const audit=workspaceReport?.closeout;
+    if(audit){
+      box.replaceChildren(node('h2','论文目标与全篇审计'),node('p','先查看论文原图、计算曲线和数值表，再按需展开全篇 '+audit.coverage.length+' 项目标的详细依据。'));
+      const show=node('button','查看论文与计算图表','primary');
+      show.onclick=()=>{resultTab='targets';for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='论文目标'));renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});};
+      box.append(show,node('p','这是对已完成基准的补充审计；原 PAB 验收、提交次数和历史不变。','form-note'));
+    }else box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'文献图表清单尚未整理完成，暂不能冻结复现任务。'));
+    return;
+  }
+  box.append(node('h3',source.paper.title),node('p','DOI: '+source.paper.doi),node('p',source.coverage_note,'subtle'));
+  const names={retained_data:'已有数据可分析',new_calculation:'需要新增计算',missing_resources:'缺少资源',not_simulation:'资料核对项目',unresolved:'方法或工况待核对'};
+  const selected=new Set(current.target_selection?.selected_ids||[]),checks=[];
+  for(const row of source.targets){
+    const item=node('details',undefined,'target-option'),head=node('summary');
+    const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=selected.has(row.id);checkbox.disabled=frozen;checkbox.setAttribute('aria-label','选择 '+row.label);checkbox.onclick=e=>e.stopPropagation();
+    head.append(checkbox,document.createTextNode(row.label+' · '+names[row.availability]));item.append(head);
+    for(const [label,value] of [['出处',row.locator],['工况',row.conditions],['同工况分组',row.condition_group],['资源',row.resources],['输出',row.outputs],['采样',row.sampling],['分析',row.analysis],['比较标准',row.criterion||'尚未确定，不能冻结'],['限制',row.limitations]])item.append(node('p',label+'：'+value));
+    box.append(item);checks.push([row.id,checkbox]);
+  }
+  const label=node('label','本次范围与未选目标说明'),reason=document.createElement('textarea');reason.rows=2;reason.maxLength=2000;reason.value=current.target_selection?.exclusion_reason||'';reason.disabled=frozen;label.append(reason);box.append(label);
+  if(!frozen){const save=node('button','保存目标选择','primary');save.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/targets`,{revision:current.revision,selected_ids:checks.filter(([,c])=>c.checked).map(([id])=>id),exclusion_reason:reason.value});await afterChange('目标范围已保存；比较标准与条件齐全后才能冻结。');});box.append(save);}
+  box.append(node('p','B 每轮评测最多提交两次；保存或选择不提交计算。缺项或未定比较标准不能冻结。','form-note'));
+}
