@@ -25,8 +25,9 @@ from .manifest import canonical, sha256
 from .tasks import TaskError
 
 MODULE = re.compile(r'\b(lammps/[A-Za-z0-9_.\-]+)')
-VERSION = re.compile(r'LAMMPS \(([^)]+)\)')
-PACKAGE = re.compile(r'^\s*([A-Z][A-Z0-9\-]{2,})\s*:', re.M)
+VERSION = re.compile(r'(?:LAMMPS \(|Simulator - )([^)\n]+)\)?')
+PACKAGE_SECTION = re.compile(r'Installed packages:?\s*\n(.*?)(?:\n\s*\n|\nList of individual style)', re.S)
+PACKAGE = re.compile(r'\b([A-Z][A-Z0-9\-]{1,})\b')
 PAIR = re.compile(r'\b(meam/c|meam|snap|sw|eam/c|eam|tersoff|airebo|comb)\b')
 FORBIDDEN = ('sbatch', 'srun', 'scancel', 'salloc', 'rm ', 'mv ', 'cp ', 'mkdir', 'touch',
              'pip install', 'conda install', 'make', 'cmake', 'tee')
@@ -57,8 +58,9 @@ def inventory_commands(work_directory: str = ''):
     """The fixed command set. Read-only by construction and checked on creation."""
     commands = [
         InventoryCommand('hostname', 'hostname; date -u +%Y-%m-%dT%H:%M:%SZ'),
-        InventoryCommand('module_avail', 'module avail lammps 2>&1 | head -60'),
-        InventoryCommand('module_spider', 'module spider lammps 2>&1 | head -60'),
+        # head 太小会把带 MEAM 的构建截掉，从而得出"没有可用引擎"的错误结论。
+        InventoryCommand('module_avail', 'module avail lammps 2>&1 | head -200'),
+        InventoryCommand('module_spider', 'module spider lammps 2>&1 | head -200'),
         InventoryCommand('lmp_on_path', 'command -v lmp || echo "(no lmp on PATH)"'),
         InventoryCommand('python', 'command -v python3 || true; python3 -V 2>&1 | head -1'),
         InventoryCommand('scheduler', 'sinfo -s 2>&1 | head -12'),
@@ -74,9 +76,15 @@ def module_probe_command(module: str):
     """Load one module and read its version, packages and pair styles (still read-only)."""
     if not re.fullmatch(r'lammps/[A-Za-z0-9_.\-]{1,80}', module):
         raise TaskError('模块名无效')
+    # 不要隐藏 module load 的错误：上一版把 stderr 丢弃，导致"加载失败"被误读成"没有 LAMMPS"。
     return InventoryCommand(f'engine:{module}',
-                            f'module purge >/dev/null 2>&1; module load {module} >/dev/null 2>&1; '
-                            f'(command -v lmp || true); (lmp -h 2>&1 | head -120)')
+                            # 不要 module purge：它会连模块系统自身的初始化一起清掉，
+                            # 之后的 module load 静默失败，会被误读成"集群没有 LAMMPS"。
+                            # module load 绝不能进管道：管道在子 shell 执行，环境变更传不回主 shell。
+                            # I_MPI_FABRICS=shm：登录节点无 IB 分配时，Intel MPI 直连会因
+                            # ibv_create_cq 失败而中止；第一周的已装引擎审计正是用这个设置跑通的。
+                            f'export I_MPI_FABRICS=shm; module load {module}; echo load_rc=$?; '
+                            f'(command -v lmp || echo "(no lmp after load)"); (lmp -h 2>&1 | head -120)')
 
 
 def run_commands(runner, commands):
@@ -112,7 +120,9 @@ def parse_engine(item):
     """Read one ``lmp -h`` result. Missing facts stay missing; nothing is assumed."""
     text = item['stdout']
     version = VERSION.search(text)
-    packages = sorted({match.group(1) for match in PACKAGE.finditer(text)})
+    # 真实 help 里包清单是空格分隔的包名（AMOEBA … MANYBODY … MEAM …），不是 KEY: 行。
+    section = PACKAGE_SECTION.search(text)
+    packages = sorted({match.group(1) for match in PACKAGE.finditer(section.group(1))}) if section else []
     pairs = sorted({match.group(1) for match in PAIR.finditer(text)})
     command_path = ''
     for line in text.splitlines():
@@ -121,7 +131,8 @@ def parse_engine(item):
             break
     return dict(name=item['name'], returncode=item['returncode'], version=version.group(1) if version else None,
                 binary=command_path or None, installed_packages=packages, pair_styles=pairs,
-                meam_c_available='meam/c' in pairs, sha256=item['stdout_sha256'])
+                meam_package='MEAM' in packages, meam_c_listed='meam/c' in text,
+                sha256=item['stdout_sha256'])
 
 
 def summarize(results):
@@ -133,7 +144,8 @@ def summarize(results):
                 engines=engines,
                 usable_engines=[dict(module=engine['name'].split(':', 1)[1], version=engine['version'],
                                      binary=engine['binary'], packages=engine['installed_packages'],
-                                     meam_c=engine['meam_c_available']) for engine in usable],
+                                     meam=engine['meam_package'], meam_c_listed=engine['meam_c_listed'])
+                            for engine in usable],
                 lammps_present=bool(usable),
                 note=('清点只读取远端信息，不提交作业、不写远端、不安装任何软件。'
                       '若这里列出可用引擎，规划不得声称"没有 LAMMPS"，也不得提议构建新引擎。'))

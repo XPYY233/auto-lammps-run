@@ -15,17 +15,23 @@ lammps/20230328-intel-2021.4.0-omp   lammps/20240829.1-intel-2021.4.0
 lammps/20231121-intel-2021.4.0-kim   lammps/20250722-intel-2021.4.0
 """
 
-LMP_HELP = """LAMMPS (28 Mar 2023)
+# 真实 help 格式（取自集群实际输出）：版本行第二种写法 + 空格分隔的包清单。
+LMP_HELP = """load_rc=0
 /dssg/opt/icelake/linux-centos8-icelake/contribute/lammps/lammps-28Mar2023/bin/lmp
+
+Large-scale Atomic/Molecular Massively Parallel Simulator - 28 Mar 2023
+
+Usage example: lmp -var t 300 -echo screen -in in.alloy
 
 Installed packages:
 
-MANYBODY: pair styles eam, meam, sw
-MEAM:      pair styles meam, meam/c (deprecated)
-ML-SNAP:   pair styles snap
+AMOEBA ASPHERE BOCS BODY BPM BROWNIAN CG-DNA CLASS2 COLLOID COLVARS
+COMPRESS CORESHELL DIELECTRIC DIPOLE DPD-BASIC DRUDE EFF ELECTRODE
+GRANULAR INTEL INTERLAYER KSPACE MANYBODY MC MEAM MISC ML-IAP ML-POD ML-SNAP
+MOLECULE OPENMP OPT PERI PHONON PLUGIN QEQ REAXFF REPLICA RIGID SHOCK SPH
+SPIN SRD TALLY VORONOI
 
-Pair styles:
-meam  meam/c  snap  sw  eam
+List of individual styles:
 """
 
 
@@ -69,7 +75,8 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(engine['version'], '28 Mar 2023')
         self.assertEqual(engine['binary'], '/dssg/opt/icelake/linux-centos8-icelake/contribute/lammps/lammps-28Mar2023/bin/lmp')
         self.assertIn('MEAM', engine['installed_packages'])
-        self.assertTrue(engine['meam_c_available'])
+        self.assertTrue(engine['meam_package'])
+        self.assertIn('MANYBODY', engine['installed_packages'])
 
     def test_summary_states_lammps_is_present_and_forbids_a_build_claim(self):
         summary = summarize(self.results() + [dict(name='engine:lammps/20230328-intel-2021.4.0-omp',
