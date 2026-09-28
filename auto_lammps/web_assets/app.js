@@ -148,6 +148,8 @@ function render() {
   $('#conflict-count').textContent = all.filter(f=>conditionStatus(f)==='conflict').length;
   $('#generate-conditions').hidden = frozen;
   $('#generate-conditions').disabled = !schema.model_calls_enabled;
+  $('#complete-conditions').hidden = frozen;
+  $('#complete-conditions').disabled = !schema.model_calls_enabled;
   $('#generation-note').textContent = frozen ? '条件已冻结。' : schema.model_calls_enabled ? '根据原始需求整理条件，保留引用和缺项，不自动确认。' : '模型整理尚未启用或额度已用完。需求和已有条件已保存。';
   $('#generation-questions').replaceChildren();
   const batches = Object.values(current.generated_batches || {}).sort((a,b)=>a.revision-b.revision);
@@ -351,6 +353,18 @@ $('#refresh-reference').onclick=()=>action(async()=>{
   const id=current.id;current=await api('/api/tasks/'+id);
   await refreshModelStatus();await afterChange('文献记录已刷新。');
 });
+async function completeConditions() {
+  const id=current.id, revision=current.revision;
+  $('#complete-conditions').disabled=true;
+  notice('正在为缺失条件提出可执行的默认建议；建议需你逐项确认，不会自动确认。');
+  try {
+    current=await api(`/api/tasks/${id}/complete-conditions`,{revision});
+    await afterChange('已补充待确认的条件建议。请核对来源标注为“模型建议”的条目。');
+  } finally {
+    await refreshModelStatus();
+    $('#complete-conditions').disabled=false;
+  }
+}
 async function generateConditions() {
   const id=current.id, revision=current.revision;
   $('#generate-conditions').disabled=true;
@@ -364,6 +378,7 @@ async function generateConditions() {
   }
 }
 $('#generate-conditions').onclick=()=>action(generateConditions);
+$('#complete-conditions').onclick=()=>action(completeConditions);
 const resultMetrics={mean:'均值',sample_std:'样本标准差',min:'最小值',max:'最大值',value:'末行值',x:'末行横坐标',slope:'斜率',intercept:'截距',rmse:'残差均方根',r_squared:'R²'};
 const analysisMethods={summary:'区间统计',last:'区间末行',linear_fit:'线性拟合'};
 function resultReport(report,taskId) {

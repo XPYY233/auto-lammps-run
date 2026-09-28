@@ -5,7 +5,7 @@ unconfirmed; this module has no tool executor, file fetcher or HPC permission.
 """
 from .deepseek import ModelError
 from .manifest import canonical, sha256
-from .tasks import FIELDS, TaskError, candidate, text
+from .tasks import ESSENTIAL, FIELDS, TaskError, candidate, text
 
 
 def source_bundle(sources):
@@ -96,3 +96,91 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
     # task changed during the request, its revision guard rejects the whole
     # import; the already-issued model call remains in the separate ledger.
     return store.import_generated_conditions(identifier, revision, bundle, completion)
+
+def completion_messages(missing, extracted, mode='research', request=''):
+    """Ask for confirmable defaults instead of extracting unsupported facts."""
+    missing = sorted(missing)
+    if not missing or len(missing) > len(FIELDS) or any(key not in FIELDS for key in missing):
+        raise TaskError('补全字段列表无效')
+    labels = {key: FIELDS[key] for key in missing}
+    essential = sorted(key for key in missing if key in ESSENTIAL)
+    system = (
+        '你为科研计算提出待用户确认的默认建议，用于补齐尚未确定的输入条件。'
+        '这些建议不是从原文抽取的事实：不得声称来自原文，不得编造论文结果、实验数据或待预测结果，'
+        '也不得把作者脚本当作任务条件。每条建议必须给出 basis，说明依据（领域惯例、势函数要求、'
+        '项目政策、常规做法或物理约束）。输出 JSON 对象，且仅含 proposals 一个列表；每项仅含 '
+        'field,value,unit,basis,applicability 五个键。field 必须来自给定的缺失字段；value 必须具体可执行；'
+        '没有单位时 unit 用空字符串。applicability 只能是 required 或 not_applicable：'
+        '当用户需求明确不涉及该字段时用 not_applicable，并把不适用理由写进 value；'
+        '必要字段（' + '、'.join(essential) + '）不允许标为 not_applicable，必须给出可执行的具体值。'
+        'resources 与 scope 属于用户/政策决策：请给出保守且明确的可执行默认值（例如按项目已批准的'
+        '基准资源包络或单一基准工况验收范围），并在 basis 中写明这是政策默认、需用户确认，不得夸大。'
+        '无法给出合理建议的字段不要输出，留给用户填写。'
+        '示例 JSON：{"proposals":[{"field":"units","value":"metal","unit":"",'
+        '"basis":"金属体系常用 metal 单位制","applicability":"required"}]}。示例不是本任务建议，不要复制。'
+        '缺失字段如下：' + canonical(labels).decode()
+    )
+    return [{'role': 'system', 'content': system},
+            {'role': 'user', 'content': canonical({'mode': mode, 'user_request': text(request, 12000, required=False),
+                                                   'extracted_conditions': extracted,
+                                                   'missing_fields': labels,
+                                                   'essential_fields': essential}).decode()}]
+
+
+def validate_completion(missing, result):
+    allowed = set(missing)
+    if (not isinstance(result, dict) or set(result) != {'proposals'}
+            or not isinstance(result['proposals'], list) or len(result['proposals']) > 40):
+        raise TaskError('模型补全输出格式不完整')
+    proposals, seen = [], set()
+    for item in result['proposals']:
+        if not isinstance(item, dict) or set(item) != {'field', 'value', 'unit', 'basis'} | (
+                {'applicability'} if 'applicability' in item else set()):
+            raise TaskError('模型补全条目包含缺失或额外字段')
+        field = item['field']
+        if field not in FIELDS or field not in allowed:
+            raise TaskError('模型补全字段不在缺失列表中')
+        if field in seen:
+            raise TaskError('模型补全字段重复')
+        seen.add(field)
+        applicability = item.get('applicability', 'required')
+        if applicability not in {'required', 'not_applicable'}:
+            raise TaskError('模型补全适用性无效')
+        if applicability == 'not_applicable' and field in ESSENTIAL:
+            raise TaskError('必要字段不能标记为不适用')
+        proposals.append(dict(field=field, value=text(item['value'], 4000),
+                              unit=text(item['unit'], 80, required=False),
+                              basis=text(item['basis'], 1000), applicability=applicability))
+    return proposals
+
+
+def complete_condition_draft(client, store, identifier, revision, request_id):
+    """One accounted model call, then append the proposals as unconfirmed candidates."""
+    current = store.get(identifier)
+    if current['revision'] != revision or current['status'] == 'conditions_frozen':
+        raise TaskError('任务已更新或冻结，请先核对当前版本')
+    missing = [key for key, value in current['fields'].items()
+               if not (key == 'reference' and current['mode'] == 'research') and not value['candidates']]
+    if not missing:
+        raise TaskError('没有需要补全的条件字段')
+    extracted = [dict(field=key, value=value['candidates'][0]['value'], unit=value['candidates'][0]['unit'])
+                 for key, value in current['fields'].items() if value['candidates']]
+    messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''))
+    completion = client.complete_json(request_id, messages)
+    if completion['receipt']['state'] != 'completed':
+        raise ModelError('condition_completion_not_completed')
+    proposals = validate_completion(missing, completion['value'])
+    accepted, skipped = [], []
+    for proposal in proposals:
+        current = store.get(identifier)
+        # A field answered while the model was running is left untouched.
+        if current['fields'][proposal['field']]['candidates']:
+            skipped.append(proposal['field']); continue
+        # Each accepted candidate advances the revision, so re-read before the next.
+        store.add_candidate(identifier, current['revision'], proposal['field'],
+                            dict(value=proposal['value'], unit=proposal['unit'], origin='proposed',
+                                 source_locator='模型建议（待确认）：' + proposal['basis'],
+                                 applicability=proposal['applicability'], evidence_role='input'))
+        accepted.append(proposal['field'])
+    return {'revision': store.get(identifier)['revision'], 'proposed_fields': accepted,
+            'skipped_fields': skipped}

@@ -17,7 +17,7 @@ from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
 from .papers import PaperStore
 from .deepseek import DeepSeekClient, ModelCalls, ModelError
-from .condition_generation import generate_condition_draft
+from .condition_generation import complete_condition_draft, generate_condition_draft
 from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
@@ -626,6 +626,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail': '方案资料服务尚未配置。'}, status_code=422)
         return Response(candidate_service.file(identifier, name), media_type='application/octet-stream',
                         headers={'Content-Disposition': f'attachment; filename="{name}"'})
+
+    @app.post('/api/tasks/{identifier}/complete-conditions')
+    def complete_conditions(identifier: str, data: Revision):
+        if model_client is None:
+            return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
+        request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
+                                           operation='complete-conditions-v1')))[:32]
+        return complete_condition_draft(model_client, store, identifier, data.revision, request_id)
 
     @app.post('/api/tasks/{identifier}/conditions/{field}')
     def add(identifier: str, field: str, data: AddCondition):
