@@ -118,6 +118,12 @@ class CloseoutViews:
             raise ResultUnavailable('Invalid target coverage')
         coverage = [{k: text(row[k], 4000) for k in ('target', 'content', 'evidence', 'status', 'additional_work')}
                     for row in coverage]
+        if 'coverage.json' in data:
+            exported = json.loads(data['coverage.json'])
+            if (exported.get('doi') != document['doi']
+                    or exported.get('paper_title') != document['title']
+                    or exported.get('coverage') != document['coverage']):
+                raise ResultUnavailable('Displayed and downloadable coverage differ')
         retained = self.outputs.listing(identifier)['files']
         for item in document.get('postprocessing', []):
             receipt = json.loads(data[item['receipt_file']])

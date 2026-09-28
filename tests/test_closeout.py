@@ -93,6 +93,15 @@ class CloseoutTests(unittest.TestCase):
         self.assets['figure.png']=b'different';self.save_closeout()
         self.assertEqual(self.client.get(self.url).status_code,409)
 
+    def test_downloaded_coverage_cannot_disagree_with_page(self):
+        export=dict(doi=self.doc['doi'],paper_title=self.doc['title'],coverage=self.doc['coverage'])
+        self.assets['coverage.json']=canonical(export);self.save_closeout()
+        self.assertEqual(self.client.get(self.url).status_code,200)
+        export['coverage']=[]
+        self.assets['coverage.json']=canonical(export);self.save_closeout()
+        self.assertEqual(self.client.get(self.url).status_code,409)
+        self.assertEqual(self.client.get(f"/api/tasks/{self.task['id']}/closeout/files/coverage.json").status_code,409)
+
     def test_wrong_job_or_manifest_rejected(self):
         for key in ('job_id','manifest_sha256'):
             original=self.doc[key];self.doc[key]='wrong';self.save_closeout()

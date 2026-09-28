@@ -532,3 +532,14 @@ Issue #113 补充：完整日志显示 latest Linux 探针输出为空且原生 
 本轮只读文件搜索使用不存在的 shell glob，被 zsh 提前拒绝；改用 rg --files 列实际文件，
 无文件变更。协作 heartbeat 首次创建缺 destination/thread 被工具拒绝，未创建任务；
 补目标字段重试，不用手写调度文件替代。
+
+Issue #113 覆盖记录核验发现页面 evidence.coverage 已更新 Fig.3，而可下载 coverage.json
+仍保留后处理前状态；两份各自摘要有效并不能证明相互一致。追加统一更新四类已有分析
+状态，并让读取器拒绝同一结案包中不一致的覆盖清单。保留原版目录，发布新版后核验。
+本轮只读定位再次假定不存在的 reference_reports.py，已按实际 ReferenceViews 实现恢复；
+无资料或账本修改。
+
+Issue #113 私有覆盖更新首次调用使用了旧开发环境的安装模块，缺 closeout 导入即退出，
+尚未创建或写入新版。固定此次控制脚本的当前源码目录后核验；这不是便携安装验收。
+
+Issue #113 原生诊断确认 Linux 在 render_image 阶段段错误（returncode -11），此前几何/CNA/RDF步骤完成；不绕过渲染来判验收。PR118读取时误用了当前 gh 不支持的 diff --stat，命令被拒绝无变更，改读实际diff。
