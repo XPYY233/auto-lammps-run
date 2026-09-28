@@ -303,6 +303,15 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def connection_models(data: ProviderInput):
         return connections.list_models(data.provider)
 
+    @app.post('/api/model-connections/check')
+    def check_connection(data: ProviderInput):
+        if model_client is None:
+            return JSONResponse({'detail':'尚未配置模型账本，无法进行真实调用自检。'},status_code=409)
+        try:
+            return connections.check(data.provider, calls=model_client.calls)
+        except (TaskError, ModelError) as error:
+            return JSONResponse({'detail':str(error)},status_code=409)
+
     @app.get('/api/hpc-connection')
     def hpc_status():
         return hpc.status()
@@ -664,10 +673,18 @@ def main():
     papers=PaperStore(store,ledger=ledger)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
     from .discovery_library import DiscoveryLibrary
+    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
+    if model_client is not None:
+        # The runtime route prefers the connection saved in the product settings and
+        # keeps using the same ledger; the environment key stays the fallback while
+        # no connection is configured.
+        saved=connections.status().get('connections',{}).get('deepseek-official',{})
+        if saved.get('configured'):
+            model_client=connections.client('deepseek-official', calls=model_client.calls)
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          model_connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory),
+                          model_connections=connections,
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

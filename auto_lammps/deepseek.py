@@ -56,7 +56,7 @@ class DeepSeekConfig:
                 raise ModelError('invalid_model_limits')
 
 
-def request_body(config, messages):
+def request_body(config, messages, model=None):
     if not isinstance(messages, list) or not messages or len(messages) > 32:
         raise ModelError('invalid_messages')
     for message in messages:
@@ -66,7 +66,7 @@ def request_body(config, messages):
             raise ModelError('invalid_messages')
     if not any('json' in item['content'].lower() for item in messages):
         raise ModelError('json_instruction_required')
-    body = canonical(dict(model=config.model, messages=messages, stream=False,
+    body = canonical(dict(model=model or config.model, messages=messages, stream=False,
                           thinking={'type': 'disabled'}, max_tokens=config.max_output_tokens,
                           response_format={'type': 'json_object'}))
     if len(body) > config.max_input_bytes:
@@ -252,14 +252,19 @@ def usage_from_response(content):
 
 
 class DeepSeekClient:
-    def __init__(self, calls, *, transport=https_transport, key_reader=None):
+    def __init__(self, calls, *, transport=https_transport, key_reader=None, model=None):
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,100}', model)):
+            raise ModelError('invalid_model')
         self.calls, self.transport = calls, transport
         self.key_reader = key_reader or (lambda: os.environ.get('DEEPSEEK_API_KEY'))
+        # The runtime route may name a model chosen in the product settings; the
+        # receipt always records the model actually requested.
+        self.model = model or calls.config.model
 
     def complete_json(self, identifier, messages):
-        body = request_body(self.calls.config, messages)
+        body = request_body(self.calls.config, messages, model=self.model)
         self.calls.reserve(identifier, body)
-        receipt = dict(provider='deepseek', requested_model=self.calls.config.model,
+        receipt = dict(provider='deepseek', requested_model=self.model,
                        request_sha256=sha256(body), state='not_sent', usage=None,
                        http_status=None, response_sha256=None, output_sha256=None)
         try:

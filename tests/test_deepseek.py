@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import ssl
 import unittest
 from unittest.mock import Mock, patch
 
@@ -148,6 +149,10 @@ class DeepSeekTests(unittest.TestCase):
             stream.status = 307
             stream.read.return_value = b'redirect'
             self.assertEqual(https_transport(b'{}', 'synthetic-key', 30), (307, b'redirect'))
-            connection.assert_called_once_with('api.deepseek.com', timeout=30)
+            # The fixed host is still the only target, and the connection now carries
+            # a verifying TLS context instead of relying on an implicit default.
+            connection.assert_called_once_with('api.deepseek.com', timeout=30,
+                                               context=connection.call_args.kwargs['context'])
+            self.assertEqual(connection.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
             stream.read.assert_called_once_with(MAX_RESPONSE_BYTES+1)
             connection.return_value.close.assert_called_once()
