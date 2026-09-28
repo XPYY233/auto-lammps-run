@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from .manifest import canonical, private_directory, sha256
 from .runtime_launcher import read_regular
+from .tls_context import ssl_context
 from .tasks import TaskError, task_id
 
 PROVIDERS = {
@@ -31,7 +32,11 @@ def official_request(provider, key, method, path, payload=None):
         headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
     else:
         headers['Authorization'] = 'Bearer ' + key
-    connection = http.client.HTTPSConnection(PROVIDERS[provider][1], timeout=60)
+    try:
+        context = ssl_context()
+    except OSError:
+        raise TaskError('本机缺少可用的证书包，无法建立 HTTPS 连接；请设置 SSL_CERT_FILE。') from None
+    connection = http.client.HTTPSConnection(PROVIDERS[provider][1], timeout=60, context=context)
     try:
         connection.request(method, path, body=canonical(payload) if payload is not None else None, headers=headers)
         response = connection.getresponse()

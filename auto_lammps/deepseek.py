@@ -15,6 +15,7 @@ import sqlite3
 import stat
 
 from .manifest import canonical, private_directory, sha256
+from .tls_context import ssl_context
 
 APP_ID = 0x414C4D43
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -75,7 +76,11 @@ def request_body(config, messages):
 
 def https_transport(body, key, timeout):
     """Fixed official host; no redirects, proxy discovery or automatic retries."""
-    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout)
+    try:
+        context = ssl_context()
+    except OSError:
+        raise ModelError('model_tls_trust_unavailable') from None
+    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout, context=context)
     try:
         connection.request('POST', '/chat/completions', body=body,
                            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
@@ -279,7 +284,7 @@ class DeepSeekClient:
             safe = str(exc) if type(exc) is ModelError and str(exc) in {
                 'model_key_missing_or_invalid', 'invalid_transport_response', 'provider_request_failed',
                 'invalid_json', 'invalid_response', 'incomplete_generation', 'empty_or_unexpected_output',
-                'json_object_required', 'response_too_large'} else 'model_transport_unknown'
+                'json_object_required', 'response_too_large', 'model_tls_trust_unavailable'} else 'model_transport_unknown'
             receipt['error'] = safe
             self.calls.record(identifier, receipt)
             raise ModelError(safe) from None
