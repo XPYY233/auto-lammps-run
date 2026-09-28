@@ -194,6 +194,10 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'not verify units: declare units from the physical workflow, never infer them from variable names. '
         'Do not declare vector/block output as scalar. Both table formats may share a plan. '
         'Each operation is {id,method,file,x,y,window:[min,max]}; method is summary, last, or linear_fit. '
+        'Every analysis table must declare at least two and at most sixteen labeled columns, because every '
+        'operation needs both an x column and a y column: a table with a single column is rejected outright. '
+        'Include the x column your operation will use (for example a step or timestep column) next to the value '
+        'column. '
         'The analysis contract is checked strictly, so satisfy it exactly: (a) analysis.files lists every '
         'analysis file the workflow writes, each a distinct flat filename with no directory part; (b) every '
         'table file and every operation file must be one of those declared analysis.files, and an operation '
@@ -209,7 +213,24 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'or unsupported analysis; never substitute numeric-table analysis for required structural analysis. '
         f'Write every analysis file to {prefix}<flat_filename>; list its basename in analysis.files. '
         'Do not use stdout.txt, stderr.txt or log.lammps as analysis outputs. '
-        'The result is an unverified proposal, not permission to submit. Never assert scientific success.'
+        ' The following is a FORMAT example only. It is a synthetic cell and a synthetic curve, not a '
+        'published material, not a reference answer, and it must never be copied as scientific content; '
+        'reproduce its structure exactly with your own scientific values. A shape-complete proposal is: '
+        '{"summary":"<one line>","questions":[],'
+        '"structure":{"crystal":"bcc","elements":["W"],"a_angstrom":3.165,"repeat":[4,4,4],'
+        '"orientation":"cubic_axes","boundary":["p","p","p"],"vacancies":[],"substitutions":[],'
+        '"type_elements":["W"],"masses_amu":[183.84]},'
+        '"potential_pin":"<copy one supplied pin verbatim>",'
+        '"workflow":"min_style cg\\nfix 1 all box/relax iso 0.0 vmax 0.001\\nminimize 1e-10 1e-10 10000 10000\\n'
+        'print \"# columns: step energy\" file /output/a0.dat\\nprint \"# units: step eV\" file /output/a0.dat",'
+        '"analysis":{"quantity":"equilibrium lattice constant and bulk energy",'
+        '"method":"read the printed table","files":["a0.dat"],'
+        '"plan":{"tables":[{"file":"a0.dat","columns":[{"name":"step","unit":"step"},{"name":"energy","unit":"eV"}]}],'
+        '"operations":[{"id":"last","method":"last","file":"a0.dat","x":"step","y":"energy","window":[0,10000]}]}}}. '
+        'Note in that example: questions is empty because a plan is given; every geometric field of structure is '
+        'present; the two analysis files are flat and distinct; both the table file and the operation file are '
+        'the declared analysis file; x and y are its declared columns; the operation method is one of summary, '
+        'last, linear_fit; and every write uses the declared path. Always emit one JSON object, never prose.'
     )
     extra = ''
     if guidance:
@@ -294,7 +315,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                                   'questions 非空时 structure/potential_pin/workflow/analysis 必须全部为 null；'
                                   '给出可执行方案时 questions 必须是空列表；structure 的几何字段必须齐全'
                                   '（crystal、elements、a_angstrom、repeat、orientation、boundary、vacancies、'
-                                  'substitutions、type_elements、masses_amu），不要省略任何一项。不要改变科研范围。',
+                                  'substitutions、type_elements、masses_amu），不要省略任何一项；'
+                                  '每个分析表必须声明**至少两列**（操作要用到的 x 列与 y 列，例如 step 与 energy），'
+                                  '单列表格一律被拒；operations 的 x、y 必须取自该表声明的列名。不要改变科研范围。',
                     'failure': str(error)[:400]}).decode()}]
             try:
                 repaired = client.complete_json(repair_id, repair_messages)
