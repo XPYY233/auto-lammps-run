@@ -86,4 +86,5 @@ python3 -m auto_lammps --query LAMMPS --output "$HOME/.local/share/auto-lammps-p
 
 Linux Tachyon 的原生故障发生在环境遮蔽光照路径；应用渲染配置显式关闭该装饰性光照，
 仍保留CPU原子图、结构快照和拼图实际导出检查。配置写入分析回执，不能将旧图片静默
-替换为新渲染。此兼容策略需Linux独立CI通过后才能宣称已验证。
+替换为新渲染。此配置已通过Linux/macOS独立安装、分类/RDF、结构PNG与文件分析快照导出的CI验证；
+完整用户环境迁移和科研/API自动化仍需分别验收。
