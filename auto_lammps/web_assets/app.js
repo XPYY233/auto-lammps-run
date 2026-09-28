@@ -937,6 +937,7 @@ async function showResources(){
   }
  }else if(discovered)discoveryLibraryNote='发现目录尚未配置；下方仅为已登记资源。';
  for(const [name,url,note] of [['LAMMPS','https://docs.lammps.org/','模拟引擎；实际版本及能力以任务环境记录为准。'],['OVITO','https://www.ovito.org/','结构与轨迹分析工具；网页交互尚待接入。']])resourceRows.push({kind:'tools',name,type:'工具文档',url,note,state:'官方文档',elementList:[],styles:[]});
+ renderResourceTabs();
  renderResourceTable();
 }
 $('#resource-search').oninput=renderResourceTable;
