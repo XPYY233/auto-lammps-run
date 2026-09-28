@@ -3,6 +3,8 @@
 Reports are private controller artifacts. No browser publication, model context,
 submission, retrospective plan freeze or evaluation mutation is provided here.
 """
+import csv
+import io
 import json
 from pathlib import Path
 import re
@@ -11,6 +13,58 @@ from . import runtime_launcher as runtime, scalar_analysis
 from .manifest import sha256
 from .results import existing_private_directory, ResultUnavailable
 from .tasks import text
+
+
+def evidence_views(document, data, figures, metrics):
+    """Read display groupings only from hash-checked controller artifacts."""
+    views, seen = document.get('views', []), set()
+    if not isinstance(views, list) or len(views) > 32:
+        raise ResultUnavailable('Invalid evidence views')
+    figure_names = {f['name'] for f in figures}
+    metric_labels = {m['label'] for m in metrics}
+    result = []
+    for view in views:
+        identifier = view['id']
+        if not re.fullmatch(r'[a-z0-9_-]{1,40}', identifier) or identifier in seen:
+            raise ResultUnavailable('Invalid evidence view identity')
+        seen.add(identifier)
+        images, tables = view.get('figures', []), view.get('tables', [])
+        selected = view.get('metric_labels', [])
+        if (not isinstance(images, list) or len(images) > 12 or
+                not isinstance(tables, list) or len(tables) > 4 or
+                not isinstance(selected, list) or any(v not in metric_labels for v in selected) or
+                type(view.get('stress_curve', False)) is not bool):
+            raise ResultUnavailable('Invalid evidence view content')
+        rendered_images, rendered_tables = [], []
+        for item in images + tables:
+            if item['role'] not in {'paper', 'reference', 'agent'}:
+                raise ResultUnavailable('Invalid evidence source role')
+        for item in images:
+            if item['name'] not in figure_names:
+                raise ResultUnavailable('Evidence view figure is not declared')
+            rendered_images.append(dict(name=item['name'], role=item['role']))
+        for item in tables:
+            name = item['name']
+            if name not in data or not name.endswith('.csv'):
+                raise ResultUnavailable('Evidence view table is not declared')
+            reader = csv.DictReader(io.StringIO(data[name].decode('utf-8-sig')))
+            columns = item['columns']
+            if (not isinstance(columns, list) or not 1 <= len(columns) <= 20 or
+                    any(c['key'] not in (reader.fieldnames or []) for c in columns)):
+                raise ResultUnavailable('Evidence table columns differ')
+            rows = list(reader)
+            if len(rows) > 10000:
+                raise ResultUnavailable('Evidence table is too large')
+            preview = rows if len(rows) <= 12 else rows[:6] + rows[-6:]
+            rendered_tables.append(dict(name=name, role=item['role'], label=text(item['label'], 200),
+                columns=[dict(key=c['key'], label=text(c['label'], 100)) for c in columns],
+                rows=[[text(row[c['key']], 100) for c in columns] for row in preview],
+                total_rows=len(rows), truncated=len(preview) < len(rows)))
+        result.append(dict(id=identifier, title=text(view['title'], 200),
+            description=text(view['description'], 2000), figures=rendered_images,
+            tables=rendered_tables, metric_labels=selected,
+            stress_curve=view.get('stress_curve', False)))
+    return result
 
 
 class CloseoutViews:
@@ -152,6 +206,7 @@ class CloseoutViews:
             figures.append(dict({k: text(figure[k], 2000) for k in ('name', 'label', 'caption')}, kind=kind))
         public = dict(acceptance=acceptance, scientific_status='diagnostic', formal_blind=False,
                       metrics=metrics, curves=curves, coverage=coverage, figures=figures,
+                      views=evidence_views(document, data, figures, metrics),
                       limitations=[text(v, 4000) for v in document['limitations']],
                       files=[{k: f[k] for k in ('name', 'label', 'size')} for f in files],
                       job_id=request['job_id'], core_hours=request['actual_core_seconds']/3600,
