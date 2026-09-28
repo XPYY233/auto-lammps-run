@@ -22,7 +22,6 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
 import time
 import urllib.request
 import webbrowser
@@ -148,8 +147,6 @@ def parse(argv=None):
     parser.add_argument('--delegate-wait-seconds', type=float, default=15.0,
                         help='已有入口时的等待时间；超时则只复用服务并打开页面')
     parser.add_argument('--poll-seconds', type=float, default=2.0)
-    parser.add_argument('--browser-wait-seconds', type=float, default=5.0,
-                        help='交给浏览器启动后最多等待多久（已有入口的本次入口用）')
     parser.add_argument('--no-browser', action='store_true', help='只监督，不打开浏览器（测试用）')
     parser.add_argument('--no-dialogs', action='store_true', help='不显示系统通知/提示（测试用）')
     parser.add_argument('--no-stop', action='store_true', help='不调用停止器（仅离线测试可用）')
@@ -169,26 +166,21 @@ def acquire_lock(descriptor, wait_seconds):
             time.sleep(0.5)
 
 
-def open_page(url, journal, join_seconds=0.0):
-    """Open the page without ever letting a browser launcher stall supervision.
+def open_page(url, journal):
+    """Open the page in its own process, never inside this supervisor.
 
-    ``webbrowser`` waits for the browser process when it uses a generic launcher (the BROWSER
-    environment variable or a wrapper script), so the call runs in a daemon thread: watching the
-    activity file must continue no matter how the browser was started. A short ``join_seconds``
-    lets a process that exits immediately (the delegate entry) give the launcher time to start.
+    ``webbrowser`` waits for the browser it launches, and forking a supervisor that may have
+    threads is not safe; a detached helper process keeps both concerns away from the watch loop
+    (and keeps the page opening even after this entry exits).
     """
-    def run():
-        try:
-            if not webbrowser.open(url):
-                journal.write('浏览器未能打开页面，请手动访问：' + url)
-        except Exception as error:  # a browser failure must never stop supervision
-            journal.write(f'浏览器打开失败（{error}）；请手动访问：{url}')
-
-    thread = threading.Thread(target=run, name='open-page', daemon=True)
-    thread.start()
-    if join_seconds:
-        thread.join(join_seconds)
-    return thread
+    opener = 'import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.argv[1]) else 1)'
+    # -I keeps the helper isolated; an explicit BROWSER override must still reach webbrowser.
+    flags = [] if os.environ.get('BROWSER') else ['-I']
+    try:
+        subprocess.Popen([sys.executable, *flags, '-c', opener, url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as error:
+        journal.write(f'浏览器启动失败（{error}）；请手动访问：{url}')
 
 
 def supervise(args):
@@ -223,8 +215,8 @@ def supervise(args):
         save(role='delegate', started=result['started'], url=result['url'], monitoring='primary-entry', stopped=False)
         journal.write(f"已有入口在监督本应用；本次只复用并打开页面：{result['url']}")
         if not args.no_browser:
-            # This instance exits right away, so give the launcher a moment to start the page.
-            open_page(result['url'], journal, join_seconds=args.browser_wait_seconds)
+            # The helper process outlives this delegate entry, so the page still appears.
+            open_page(result['url'], journal)
         return 0
 
     activity_path = Path(args.activity_file).expanduser() if args.activity_file else state / 'session-activity.json'
