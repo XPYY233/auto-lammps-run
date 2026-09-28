@@ -24,7 +24,12 @@ class RetainedAnalysisTests(unittest.TestCase):
 
     def test_bcc_and_receipt(self):
         output = self.root / 'analysis'
+        self.plan['snapshot_frames'] = [0]
         report = analyze(self.plan, output)
+        for filename in ('frame-0.png', 'snapshots.png', 'analysis.png'):
+            self.assertTrue((output / filename).read_bytes().startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertTrue({'frame-0.png', 'snapshots.png', 'analysis.png'} <=
+                        {item['name'] for item in report['files']})
         with (output / 'analysis.csv').open() as stream:
             row = next(csv.DictReader(stream))
         self.assertEqual(int(row['BCC']), 128)
