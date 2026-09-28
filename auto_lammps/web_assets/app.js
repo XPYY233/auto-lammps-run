@@ -4,6 +4,7 @@ const origins = {user:'用户明确指定',paper:'论文提供',code:'作者代�
 const statuses = {missing:'缺失',unselected:'待选择',conflict:'有矛盾',pending:'待确认',confirmed:'已确认'};
 let schema, current = null, editing = null, resolving = null, busy = false;
 let literaturePreview = null;
+let pendingRoute=null, renderedRoute=null;
 let paperFilter='all';
 let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
 let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:null};
@@ -35,8 +36,40 @@ async function action(work) {
   busy = true;
   document.querySelectorAll('.dialog-error').forEach(item=>{item.hidden=true;});
   try { await work(); } catch (error) { notice(error.message, true); }
-  finally { busy = false; }
+  finally { busy = false; drainRoute(); }
 }
+function normalizeRoute(hash){
+ return /^#[a-f0-9]{32}$/.test(hash)||['#home','#new','#tasks','#papers','#resources','#help'].includes(hash)?hash:'#home';
+}
+function recordRoute(hash){
+ // A newer browser destination wins over a response already in flight.
+ if(pendingRoute!==null)return;
+ if(location.hash!==hash){
+  if(renderedRoute===null)history.replaceState(null,'',hash);
+  else history.pushState(null,'',hash);
+ }
+ renderedRoute=hash;
+}
+async function renderRoute(hash){
+ if(/^#[a-f0-9]{32}$/.test(hash))return openTask(hash.slice(1));
+ const pages={'#home':showHome,'#new':renderNew,'#tasks':showTasks,'#papers':showPapers,'#resources':showResources,'#help':showHelp};
+ return pages[normalizeRoute(hash)]();
+}
+function drainRoute(){
+ if(busy||pendingRoute===null)return;
+ const target=pendingRoute;pendingRoute=null;
+ action(()=>renderRoute(target));
+}
+function requestRoute(hash){
+ const target=normalizeRoute(hash);
+ // Write navigation intent now; render serially after an existing action.
+ if(location.hash!==target)history.pushState(null,'',target);
+ pendingRoute=target;drainRoute();
+}
+function restoreRoute(){pendingRoute=normalizeRoute(location.hash);drainRoute();}
+window.addEventListener('hashchange',restoreRoute);
+window.addEventListener('popstate',restoreRoute);
+
 async function listTasks() {
   const result = await api('/api/tasks');
   taskCache=result.tasks;
@@ -46,18 +79,20 @@ async function listTasks() {
   for (const task of result.tasks.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase()))) {
     const button = node('button',task.title, current?.id === task.id ? 'active' : '');
     button.append(node('small',task.reference_stage || (task.status === 'conditions_frozen' ? '条件已保存 · 查看历史' : '需求已保存 · 待整理')));
-    button.onclick = () => action(() => openTask(task.id));
+    button.onclick = () => requestRoute('#'+task.id);
     $('#task-list').append(button);
   }
 }
 async function openTask(id) {
-  current = await api('/api/tasks/'+id);
+  const task = await api('/api/tasks/'+id);
+  if(pendingRoute!==null)return;
+  current=task;
   $('#advanced-task').open=false;
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
   for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
   renderWorkspaceResults();
-  history.replaceState(null, '', '#'+id);
+  recordRoute('#'+id);
   render();
   $('#results-content').replaceChildren();
   $('#results-status').textContent='正在读取记录…';
@@ -70,17 +105,17 @@ async function openTask(id) {
   await refreshWorkspace();
   await refreshDiscussion();
 }
-function showNew() {
-  if (busy) return;
+function showNew(){requestRoute('#new');}
+async function renderNew() {
   current = null;
-  history.replaceState(null, '', '#new');
+  recordRoute('#new');
   hideViews('welcome');
   selectNavigation('new');
   $('#welcome').hidden = false;
   $('#papers-view').hidden = true;
   $('#task-view').hidden = true;
   $('#message').hidden = true;
-  action(listTasks);
+  await listTasks();
   $('#create-form textarea').focus();
   window.scrollTo({top:0});
 }
@@ -233,7 +268,7 @@ $('#create-form').onsubmit=(event)=>{
     data.title=data.title.trim() || data.prompt.trim().slice(0,36);
     current=await api('/api/tasks',data);
     normalResult=null;workspaceReport=null;resultTab='overview';
-    history.replaceState(null,'','#'+current.id);
+    recordRoute('#'+current.id);
     await afterChange('研究需求已保存。可在这里继续查看进度和结果。');
     event.target.reset();setMode('research');
     if (schema.model_calls_enabled) await generateConditions();
@@ -530,13 +565,7 @@ $('#literature-form').onsubmit=(event)=>{
 };
 action(async()=>{
   await refreshModelStatus();
-  if (location.hash==='#papers') { await listTasks(); await showPapers(); }
-  else if (/^#[a-f0-9]{32}$/.test(location.hash)) await openTask(location.hash.slice(1));
-  else if(location.hash==='#tasks') await showTasks();
-  else if(location.hash==='#resources') await showResources();
-  else if(location.hash==='#help') showHelp();
-  else if(location.hash==='#new'){await listTasks();hideViews('welcome');selectNavigation('new');}
-  else await showHome();
+  if(pendingRoute===null)await renderRoute(normalizeRoute(location.hash));
 });
 
 const requestStates={reserved:'已预留，未派发',dispatching:'派发中',unknown:'提交结果不明，先对账',accepted:'调度器已接受',pending:'排队中',running:'运行中',completed:'计算已结束，尚未科学核验',failed:'计算失败',cancelled:'已取消',timeout:'已超时',rejected:'提交被拒',cancel_requested:'已请求取消',cancelled_before_dispatch:'派发前取消'};
@@ -544,7 +573,7 @@ const paperEvents={bibliography_corrected:'核正论文题目与出版信息',ca
 const roleNames={agent:'主 Agent 正式评测',reference:'作者参考运行',development:'开发验证',analysis:'分析作业'};
 async function showPapers() {
   hideViews('papers-view');selectNavigation('papers');
-  current=null; history.replaceState(null,'','#papers');
+  current=null; recordRoute('#papers');
   $('#welcome').hidden=true; $('#task-view').hidden=true; $('#papers-view').hidden=false;
   await refreshPapers(); window.scrollTo({top:0});
 }
@@ -577,7 +606,7 @@ function paperCard(p,statuses,availableTasks) {
   const link=node('a',p.title); link.href=p.doi_url; link.target='_blank'; link.rel='noopener noreferrer';
   top.append(link,node('span',p.selection==='candidate'?'候选 · 尚未选定':statuses[p.status],'badge '+(p.status==='reproduced'?'confirmed':'pending')));
   card.append(top,node('p','DOI '+p.doi,'subtle'),node('p','拟复现范围：'+p.scope),node('p',p.note,'paper-note'),node('p',p.stage,'subtle'));
-  if(p.tasks.length){const go=node('button','查看结果与进度 →','primary');go.onclick=()=>action(()=>openTask(p.tasks[0].id));card.append(go);}
+  if(p.tasks.length){const go=node('button','查看结果与进度 →','primary');go.onclick=()=>requestRoute('#'+p.tasks[0].id);card.append(go);}
   if (p.source_discovery) {
     const sources=node('details'); sources.dataset.paperSource=p.id; sources.append(node('summary','论文源码检索'));
     sources.append(node('p',p.source_discovery.state==='partial'?'检索有未完成项，不能据此判定没有源码。':'已完成本轮有限检索，未覆盖全部仓库。','subtle'));
@@ -640,7 +669,7 @@ function paperCard(p,statuses,availableTasks) {
   for (const e of p.history) timeline.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · ${e.event.startsWith('source_search_completed:')?'检索论文源码':e.event.startsWith('potential_acquired:')?'准备势函数资源':e.event.startsWith('reference_resources_prepared:')?({'finished':'超算参考资料准备完成','partial':'超算参考资料准备有未完成项','unknown':'超算参考资料准备待核实'}[e.event.split(':').at(-1)]||'准备超算参考资料'):e.event.startsWith('engine_source_prepared:')?({'failed':'计算环境准备失败','source_ready':'超算源码准备完成','unknown':'计算环境准备待核实'}[e.event.split(':').at(-1)]||'准备计算环境'):paperEvents[e.event.split(':')[0]]||e.event} · 文献版本 ${e.revision}`));
   details.append(timeline);
   for (const task of p.tasks) {
-    const button=node('button','打开研究任务：'+task.title,'quiet'); button.onclick=()=>action(()=>openTask(task.id)); details.append(button);
+    const button=node('button','打开研究任务：'+task.title,'quiet'); button.onclick=()=>requestRoute('#'+task.id); details.append(button);
     const revisions=node('ol');
     for (const e of task.history) {
       const [kind,field]=e.event.split(':');
@@ -701,10 +730,10 @@ function taskCards(){
  const tasks=taskCache.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase())&&(taskFilter==='all'||taskState(t)===taskFilter));
  if(!tasks.length){box.append(emptyState('此分类暂无任务','新建一项研究，或调整搜索条件。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['任务','当前阶段','作业 / 提交次数','最近更新','操作'])hr.append(node('th',label));head.append(hr);table.append(head,body);
- for(const t of tasks){const tr=node('tr'),info=node('td'),title=node('strong',t.title);info.append(title,node('small',t.mode==='reproduction'?'文献验证':'科研计算'));const progress=node('td');progress.append(node('span',taskStateLabel(t),'badge '+(taskState(t)==='running'?'pending':'')));if(t.reference_stage)progress.append(node('small','作者参考：'+t.reference_stage));const counts=node('td',t.job_id?'作业 '+t.job_id:'尚未派发');if(t.submission_count!==undefined)counts.append(node('small',(t.mode==='reproduction'?'B 提交：':'提交：')+t.submission_count+' / 2'));const changed=node('td',t.updated_at?new Date(t.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'),actions=node('td'),go=node('button','查看详情','quiet');go.onclick=()=>action(()=>openTask(t.id));actions.append(go);tr.append(info,progress,counts,changed,actions);body.append(tr);}box.append(table);
+ for(const t of tasks){const tr=node('tr'),info=node('td'),title=node('strong',t.title);info.append(title,node('small',t.mode==='reproduction'?'文献验证':'科研计算'));const progress=node('td');progress.append(node('span',taskStateLabel(t),'badge '+(taskState(t)==='running'?'pending':'')));if(t.reference_stage)progress.append(node('small','作者参考：'+t.reference_stage));const counts=node('td',t.job_id?'作业 '+t.job_id:'尚未派发');if(t.submission_count!==undefined)counts.append(node('small',(t.mode==='reproduction'?'B 提交：':'提交：')+t.submission_count+' / 2'));const changed=node('td',t.updated_at?new Date(t.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'),actions=node('td'),go=node('button','查看详情','quiet');go.onclick=()=>requestRoute('#'+t.id);actions.append(go);tr.append(info,progress,counts,changed,actions);body.append(tr);}box.append(table);
 
 }
-async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');history.replaceState(null,'','#tasks');await listTasks();taskCards();}
+async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');recordRoute('#tasks');await listTasks();taskCards();}
 let resourceFilter='all',resourceRows=[];
 function potentialResourceRows(p){
  const report=p.potential_acquisition||{},files=report.files||[];
@@ -763,7 +792,7 @@ function renderResourceTable(){
  for(const r of rows){const tr=node('tr'),name=node('td');tr.dataset.resourceKind=r.kind;name.append(node('strong',r.name));if(r.filename)name.append(node('small','原始文件：'+r.filename,'mono'));if(r.tags){const tags=node('div',undefined,'resource-tags');for(const tag of r.tags)tags.append(node('span',tag,'badge'));name.append(tags);}if(r.companion&&!r.bundle)name.append(node('small','配套文件：'+r.companion));const type=node('td',r.type);if(r.elements)type.append(node('small',r.elements));const version=node('td',r.version?r.version.slice(0,12):'未登记','mono'),state=node('td',r.state),detail=node('td'),d=node('details');d.append(node('summary','查看依据'));if(r.paper)d.append(node('p',r.paper));if(r.doi){const a=node('a','DOI '+r.doi);a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';d.append(a);}if(r.version)d.append(node('p','固定版本：'+r.version));for(const line of r.note.split('\n'))d.append(node('p',line));if(r.files){d.append(node('h4','配套文件与来源'));for(const f of r.files){d.append(node('p',f.filename,'mono'));if(f.hash)d.append(node('code','SHA-256 '+f.hash));const link=node('a','查看该文件来源');link.href=f.url;link.target='_blank';link.rel='noopener noreferrer';d.append(link);}}else if(r.hash)d.append(node('code','SHA-256 '+r.hash));const a=node('a','原始来源 ↗');a.href=r.url;a.target='_blank';a.rel='noopener noreferrer';d.append(a);detail.append(d);tr.append(name,type,version,state,detail);body.append(tr);}box.append(table);
 }
 async function showResources(){
- current=null;hideViews('resources-view');selectNavigation('resources');history.replaceState(null,'','#resources');
+ current=null;hideViews('resources-view');selectNavigation('resources');recordRoute('#resources');
  const result=await api('/api/papers');resourceRows=[];let discovered;try{discovered=await api('/api/resource-discoveries');}catch(error){discoveryLibraryNote='发现清单暂时无法读取，已登记的资源仍保留。';}
  for(const button of document.querySelectorAll('[data-resource]')){button.classList.toggle('selected',button.dataset.resource===resourceFilter);button.onclick=()=>{resourceFilter=button.dataset.resource;for(const b of document.querySelectorAll('[data-resource]'))b.classList.toggle('selected',b===button);renderResourceTable();};}
  for(const p of result.papers){
@@ -780,7 +809,7 @@ async function showResources(){
 $('#resource-search').oninput=renderResourceTable;
 $('#resource-refresh').onclick=()=>action(showResources);
 
-function showHelp(){current=null;hideViews('help-view');selectNavigation('help');history.replaceState(null,'','#help');renderHelp();}
+function showHelp(){current=null;hideViews('help-view');selectNavigation('help');recordRoute('#help');renderHelp();}
 function emptyState(title,message){const box=node('div',undefined,'empty-result');box.append(node('span','◇','empty-icon'),node('h3',title),node('p',message));return box;}
 function number(v,digits=4){return Number.isFinite(v)?v.toLocaleString('en-US',{maximumFractionDigits:digits,minimumFractionDigits:0}):'—';}
 function fileSize(bytes){if(bytes<1024)return number(bytes,0)+' B';if(bytes<1024**2)return number(bytes/1024,2)+' KiB';if(bytes<1024**3)return number(bytes/1024**2,2)+' MiB';return number(bytes/1024**3,2)+' GiB';}
@@ -1043,11 +1072,11 @@ $('#model-form').onsubmit=e=>{e.preventDefault();action(async()=>{const provider
 $('#fetch-models').onclick=()=>action(async()=>{const result=await api('/api/model-connections/models',{provider:$('#provider-choice').value});$('#available-models').replaceChildren(...result.models.map(id=>new Option(id,id)));$('#connection-status').textContent=`已取得 ${result.models.length} 个模型 ID${result.has_more?'（目录还有后续页，可手动输入）':''}。点击模型输入框选择。`});
 $('#remove-key').onclick=()=>action(async()=>{connectionState=await api('/api/model-connections',{provider:$('#provider-choice').value,model:'',remove:true});$('#model-key').value='';refreshConnectionLabel();});
 $('#close-model').onclick=()=>{$('#model-key').value='';$('#model-dialog').close();};for(const id of ['open-model','home-model','rail-model','discussion-model'])$('#'+id).onclick=()=>action(openModel);
-for(const id of ['top-tasks','back-tasks','home-tasks'])$('#'+id).onclick=()=>action(showTasks);
+for(const id of ['top-tasks','back-tasks','home-tasks'])$('#'+id).onclick=()=>requestRoute('#tasks');
 for(const id of ['top-new','tasks-new'])$('#'+id).onclick=showNew;
-$('#top-papers').onclick=()=>action(showPapers);$('#pick-paper').onclick=()=>action(showPapers);
-for(const id of ['top-resources'])$('#'+id).onclick=()=>action(showResources);
-for(const id of ['top-help','home-help'])$('#'+id).onclick=showHelp;
+$('#top-papers').onclick=()=>requestRoute('#papers');$('#pick-paper').onclick=()=>requestRoute('#papers');
+for(const id of ['top-resources'])$('#'+id).onclick=()=>requestRoute('#resources');
+for(const id of ['top-help','home-help'])$('#'+id).onclick=()=>requestRoute('#help');
 $('#mode-research').onclick=()=>setMode('research');$('#mode-reproduction').onclick=()=>setMode('reproduction');
 $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-view').hidden)taskCards();});};
 
@@ -1058,10 +1087,10 @@ let taskFilter='all', selectedPlot='full', discussionRequest=null;
 function taskState(t){return t.execution_state||'draft';}
 function taskStateLabel(t){return ({running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',failed:'失败',timeout:'超时',draft:'待准备'})[taskState(t)]||'状态待核对';}
 function statsFor(tasks, box){box.replaceChildren();for(const [label,value] of [['全部任务',tasks.length],['运行中',tasks.filter(t=>taskState(t)==='running').length],['排队中',tasks.filter(t=>['queued','accepted'].includes(taskState(t))).length],['计算结束',tasks.filter(t=>taskState(t)==='completed').length]]){const c=node('div',undefined,'stat'),icon=node('span',undefined,'stat-icon');icon.append(uiIcon(label==='运行中'?'play':label==='排队中'?'clock':label==='计算结束'?'check':'tasks'));c.append(icon,node('small',label),node('strong',String(value)));box.append(c);}}
-async function showHome(){current=null;hideViews('home-view');selectNavigation('');history.replaceState(null,'','#home');await listTasks();statsFor(taskCache,$('#home-stats'));const papers=await api('/api/papers');const selected=papers.papers.filter(p=>p.selection==='selected');const box=$('#home-cases-content');box.replaceChildren();for(const p of selected.slice(0,2)){const c=node('article',undefined,'compact-case');c.append(node('span','文献复现验证','badge pending'),node('h3',p.title),node('small','DOI '+p.doi),node('p',p.stage));const go=node('button','查看进度','quiet');go.onclick=()=>action(()=>p.tasks.length?openTask(p.tasks[0].id):showPapers());c.append(go);box.append(c);}if(!selected.length)box.append(node('p','尚未选定验证案例。','subtle'));const status=$('#home-status');status.replaceChildren();for(const [k,v] of [['计算状态',taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准'],['案例清单',selected.length+' 篇已选'],['模型连接','点击模型设置查看'],['存储空间','未连接实时用量查询']])status.append(node('dt',k),node('dd',v));const dl=$('#home-downloads');dl.replaceChildren();const finished=taskCache.filter(t=>t.reference_stage||taskState(t)==='completed');for(const t of finished.slice(0,3)){const b=node('button',t.title,'download-task');b.onclick=()=>action(()=>openTask(t.id));b.append(node('small','打开结果与下载文件'));dl.append(b);}if(!finished.length)dl.append(node('p','结果文件会随任务保存在这里。','subtle'));}
-$('#go-home').onclick=e=>{e.preventDefault();action(showHome);};
+async function showHome(){current=null;hideViews('home-view');selectNavigation('');recordRoute('#home');await listTasks();statsFor(taskCache,$('#home-stats'));const papers=await api('/api/papers');const selected=papers.papers.filter(p=>p.selection==='selected');const box=$('#home-cases-content');box.replaceChildren();for(const p of selected.slice(0,2)){const c=node('article',undefined,'compact-case');c.append(node('span','文献复现验证','badge pending'),node('h3',p.title),node('small','DOI '+p.doi),node('p',p.stage));const go=node('button','查看进度','quiet');go.onclick=()=>requestRoute(p.tasks.length?'#'+p.tasks[0].id:'#papers');c.append(go);box.append(c);}if(!selected.length)box.append(node('p','尚未选定验证案例。','subtle'));const status=$('#home-status');status.replaceChildren();for(const [k,v] of [['计算状态',taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准'],['案例清单',selected.length+' 篇已选'],['模型连接','点击模型设置查看'],['存储空间','未连接实时用量查询']])status.append(node('dt',k),node('dd',v));const dl=$('#home-downloads');dl.replaceChildren();const finished=taskCache.filter(t=>t.reference_stage||taskState(t)==='completed');for(const t of finished.slice(0,3)){const b=node('button',t.title,'download-task');b.onclick=()=>requestRoute('#'+t.id);b.append(node('small','打开结果与下载文件'));dl.append(b);}if(!finished.length)dl.append(node('p','结果文件会随任务保存在这里。','subtle'));}
+$('#go-home').onclick=e=>{e.preventDefault();requestRoute('#home');};
 $('#home-start').onclick=()=>{const prompt=$('#home-prompt').value;showNew();$('#create-form [name=prompt]').value=prompt;};
-$('#home-guide').onclick=()=>{$('#home-start').click();};$('#home-cases').onclick=()=>action(showPapers);
+$('#home-guide').onclick=()=>{$('#home-start').click();};$('#home-cases').onclick=()=>requestRoute('#papers');
 $('#paper-search').oninput=()=>action(refreshPapers);
 for(const [title,text] of [['合金拉伸响应','研究 300 K 下 NbTiZrMoV 合金的单轴拉伸响应。请整理需要确认的初始结构、势函数和加载条件，输出应力–应变曲线与缺陷分析。'],['晶体弹性性质','计算 SiC 晶体的弹性性质。请先确认晶型、温度和势函数，给出弹性常数与分析图表。'],['点缺陷形成能','研究 W 晶体中的空位形成能。请明确参考体系、边界条件及弛豫方案，保留结构与能量来源。']]){const b=node('button',undefined,'example-task');b.append(node('strong',title),node('small',text));b.onclick=()=>{$('#create-form [name=prompt]').value=text;$('#create-form [name=prompt]').focus();};$('#task-examples').append(b);}
 const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存，尚未确定的科学条件需要进一步明确。当前通用自动执行尚未开放。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
