@@ -33,7 +33,9 @@ async function api(path, data) {
   return result;
 }
 async function action(work) {
-  if (busy) return;
+  // A dropped click must be visible: before, a user action during startup or while
+  // another action ran was discarded with no feedback at all.
+  if (busy) { notice('正在处理上一步，请稍候再试。'); return; }
   busy = true;
   document.querySelectorAll('.dialog-error').forEach(item=>{item.hidden=true;});
   try { await work(); } catch (error) { notice(error.message, true); }
