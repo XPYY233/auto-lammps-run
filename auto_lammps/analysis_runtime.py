@@ -89,7 +89,7 @@ def main():
         try:
             report['checks'] = smoke_check()
         except Exception as exc:
-            report.update(ready=False, error=type(exc).__name__,
+            report.update(ready=False, error=type(exc).__name__, detail=str(exc)[:1000],
                           action='Check analysis runtime installation and platform graphics libraries')
     print(json.dumps(report, ensure_ascii=False))
     return 0 if report['ready'] else 1
