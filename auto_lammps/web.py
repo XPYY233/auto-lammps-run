@@ -351,7 +351,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/hpc-connection')
     def hpc_status():
-        return hpc.status()
+        # The execution service is wired from the private deployment; report the real state
+        # instead of a hardcoded False that made the page and the AI believe it was absent.
+        return hpc.status(execution_enabled=execution_jobs is not None)
 
     @app.post('/api/hpc-connection')
     def save_hpc(data: HPCInput):
@@ -438,7 +440,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         status = model_client.calls.status() if model_client else None
         reference_status = reference_model_client.calls.status() if reference_model_client else None
         return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
-                'model_status': status, 'execution_enabled': False,
+                'model_status': status, 'execution_enabled': execution_jobs is not None,
                 # Which copy of the application is really serving this port; the desktop launcher
                 # refuses to run when it differs from the environment its configuration names.
                 'installation': {'package': str(Path(__file__).resolve().parent), 'python': sys.executable},

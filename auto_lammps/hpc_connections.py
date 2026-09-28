@@ -85,7 +85,7 @@ class HPCConnections:
             raise StaleTask('连接列表已更新，请重新打开设置。')
         return state
 
-    def status(self):
+    def status(self, *, execution_enabled=False):
         with self.tasks.transaction() as db:
             state=self._management(db)
             latest=db.execute('SELECT MAX(revision) FROM hpc_profiles').fetchone()[0] or 0
@@ -100,7 +100,7 @@ class HPCConnections:
         return dict(configured=bool(active),revision=latest,management_revision=state['id'],
                     active_id=active['id'] if active else None,active_revision=active['revision'] if active else None,
                     profile=active['profile'] if active else None,last_check=active['last_check'] if active else None,
-                    connections=entries,execution_enabled=False)
+                    connections=entries,execution_enabled=bool(execution_enabled))
 
     def manage(self, identifier, operation, management_revision):
         if operation not in {'select','archive','restore'}: raise TaskError('未知的连接管理操作。')
