@@ -661,3 +661,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .connection-card{border:1px solid #dce4ef;border-radius:10px;background:#f8faff;padding:14px;margin:10px 0}
 .connection-card strong{color:#172b4d}.connection-badge{display:inline-block;margin-left:12px;font-size:12px;color:#185adb;background:#e9f0ff;border-radius:5px;padding:2px 7px}
 .connection-detail{overflow-wrap:anywhere;margin:8px 0 4px}.connection-card .form-note{margin:5px 0 10px}.connection-card .actions{flex-wrap:wrap}.connection-remove{color:#9d2941}
+.resource-tab-count{margin-left:6px;padding:1px 7px;border-radius:9px;background:var(--blue-soft);color:var(--blue);font-size:11px;font-weight:600}
+#resource-tabs button.selected .resource-tab-count{background:white}
+.resource-tab-notice{margin:14px 0 8px;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:8px;background:white}
+.resource-tab-notice strong{display:block;margin-bottom:4px}
+.resource-tab-notice p{margin:0;color:var(--muted);font-size:13px}
