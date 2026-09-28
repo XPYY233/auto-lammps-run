@@ -150,13 +150,17 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
             raise ModelError('condition_repair_not_completed')
         return store.import_generated_conditions(identifier, revision, bundle, repair)
 
-def completion_messages(missing, extracted, mode='research', request='', resources=None):
+def completion_messages(missing, extracted, mode='research', request='', resources=None, guidance=None):
     """Ask for confirmable defaults instead of extracting unsupported facts."""
     missing = sorted(missing)
     if not missing or len(missing) > len(FIELDS) or any(key not in FIELDS for key in missing):
         raise TaskError('补全字段列表无效')
     labels = {key: FIELDS[key] for key in missing}
     essential = sorted(key for key in missing if key in ESSENTIAL)
+    guidance_rule = ''
+    if guidance:
+        guidance_rule = ('用户中途给出的引导，必须优先遵守（不得与之冲突）：'
+                         + '；'.join(str(item) for item in guidance)[:2000] + '。')
     resources_rule = ''
     if resources:
         resources_rule = ('已装可用的势函数资源（potential 字段必须从中选用其一，并写出其格式与元素；'
@@ -174,6 +178,7 @@ def completion_messages(missing, extracted, mode='research', request='', resourc
         'resources 与 scope 属于用户/政策决策：请给出保守且明确的可执行默认值（例如按项目已批准的'
         '基准资源包络或单一基准工况验收范围），并在 basis 中写明这是政策默认、需用户确认，不得夸大。'
         '无法给出合理建议的字段不要输出，留给用户填写。'
+        + guidance_rule
         + resources_rule
         + '示例 JSON：{"proposals":[{"field":"units","value":"metal","unit":"",'
         '"basis":"金属体系常用 metal 单位制","applicability":"required"}]}。示例不是本任务建议，不要复制。'
@@ -224,7 +229,7 @@ def validate_completion(missing, result, resources=None):
     return proposals
 
 
-def complete_condition_draft(client, store, identifier, revision, request_id, resources=None):
+def complete_condition_draft(client, store, identifier, revision, request_id, resources=None, guidance=None):
     """One accounted model call, then append the proposals as unconfirmed candidates."""
     current = store.get(identifier)
     if current['revision'] != revision or current['status'] == 'conditions_frozen':
@@ -235,7 +240,7 @@ def complete_condition_draft(client, store, identifier, revision, request_id, re
         raise TaskError('没有需要补全的条件字段')
     extracted = [dict(field=key, value=value['candidates'][0]['value'], unit=value['candidates'][0]['unit'])
                  for key, value in current['fields'].items() if value['candidates']]
-    messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''), resources)
+    messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''), resources, guidance)
     completion = client.complete_json(request_id, messages)
     if completion['receipt']['state'] != 'completed':
         raise ModelError('condition_completion_not_completed')

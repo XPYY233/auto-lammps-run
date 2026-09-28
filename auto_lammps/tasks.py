@@ -139,7 +139,12 @@ class TaskStore:
                        'operation_sha256 TEXT NOT NULL, at TEXT NOT NULL, document TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS task_lifecycle (task_id TEXT NOT NULL REFERENCES tasks(id), '
                        'sequence INTEGER NOT NULL, action TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
-            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle'):
+            # 用户中途引导与暂停：都是追加历史，不覆盖任何既有记录。
+            db.execute('CREATE TABLE IF NOT EXISTS task_guidance (task_id TEXT NOT NULL REFERENCES tasks(id), '
+                       'sequence INTEGER NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
+            db.execute('CREATE TABLE IF NOT EXISTS task_control (task_id TEXT NOT NULL REFERENCES tasks(id), '
+                       'sequence INTEGER NOT NULL, action TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
+            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle', 'task_guidance', 'task_control'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable task evidence'); END")
@@ -179,6 +184,54 @@ class TaskStore:
             rows = db.execute('SELECT sequence,action,at FROM task_lifecycle WHERE task_id=? ORDER BY sequence', (identifier,)).fetchall()
         return dict(lifecycle_revision=len(rows), deleted=any(r['action']=='delete' for r in rows),
                     user_finished=any(r['action']=='finish' for r in rows), lifecycle_events=[dict(r) for r in rows])
+
+    def guidance(self, identifier):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            return [dict(row) for row in db.execute(
+                'SELECT sequence,note,at FROM task_guidance WHERE task_id=? ORDER BY sequence', (identifier,))]
+
+    def _control_plane(self, db, identifier, revision):
+        """引导与暂停不改动冻结的条件记录，因此允许在冻结之后使用；只校验版本。"""
+        doc = self._read(db, identifier)
+        if doc['revision'] != revision:
+            raise StaleTask('任务已更新，请刷新后再操作')
+        return doc
+
+    def add_guidance(self, identifier, revision, note):
+        """Append one user steering note; the next model calls are told about it."""
+        value = text(note, 2000)
+        with self.transaction() as db:
+            doc = self._control_plane(db, identifier, revision)
+            sequence = (db.execute('SELECT MAX(sequence) FROM task_guidance WHERE task_id=?',
+                                   (identifier,)).fetchone()[0] or 0) + 1
+            db.execute('INSERT INTO task_guidance VALUES (?,?,?,?)',
+                       (identifier, sequence, value, datetime.now(timezone.utc).isoformat()))
+            self._write(db, doc, 'guidance_added')
+        return self.guidance(identifier)
+
+    def paused(self, identifier):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            row = db.execute('SELECT action FROM task_control WHERE task_id=? ORDER BY sequence DESC LIMIT 1',
+                             (identifier,)).fetchone()
+        return bool(row and row['action'] == 'pause')
+
+    def set_paused(self, identifier, revision, paused):
+        action = 'pause' if paused else 'resume'
+        wanted = bool(paused)
+        with self.transaction() as db:
+            doc = self._control_plane(db, identifier, revision)
+            row = db.execute('SELECT action FROM task_control WHERE task_id=? ORDER BY sequence DESC LIMIT 1',
+                             (identifier,)).fetchone()
+            if bool(row and row['action'] == 'pause') == wanted:
+                return {'paused': wanted, 'unchanged': True, 'revision': doc['revision']}
+            sequence = (db.execute('SELECT MAX(sequence) FROM task_control WHERE task_id=?',
+                                   (identifier,)).fetchone()[0] or 0) + 1
+            db.execute('INSERT INTO task_control VALUES (?,?,?,?)',
+                       (identifier, sequence, action, datetime.now(timezone.utc).isoformat()))
+            doc = self._write(db, doc, 'task_' + ('paused' if wanted else 'resumed'))
+        return {'paused': wanted, 'revision': doc['revision']}
 
     def manage_lifecycle(self, identifier, revision, lifecycle_revision, action):
         if action not in {'delete', 'finish'}: raise TaskError('未知的任务记录操作')

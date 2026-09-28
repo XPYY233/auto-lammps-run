@@ -102,7 +102,7 @@ async function openTask(id) {
   window.scrollTo({top:0});
   await listTasks();
   await renderHistory();
-  await refreshCandidate();
+  await refreshCandidate(); await refreshActivity(); await refreshGuidance();
   await refreshResults();
   await refreshReferenceHistory();
   await refreshWorkspace();
@@ -135,6 +135,9 @@ function render() {
   $('#papers-view').hidden = true;
   $('#task-title').textContent = current.title;
   $('#task-prompt').textContent = current.prompt;
+  // 全局提示条是上一次动作留下的，打开任务时先清掉，避免用户以为那是当前状态。
+  const banner = $('#message');
+  if (banner) { banner.hidden = true; banner.textContent = ''; banner.className = ''; }
   const frozen = current.status === 'conditions_frozen';
   $('#candidate-panel').hidden = !frozen;
   $('#prepare-candidate').disabled = true;
@@ -572,6 +575,77 @@ function retriggerOutcome(before,after) {
     return `服务端返回同一条准备记录（${name}）：一个任务只保留一条准备记录，本次未再次调用模型。开始新一轮准备需要控制端先开放，原记录与澄清问题不会被覆盖。`;
   return `准备记录已更新（${name}）：${candidateStatus(after).label}。`;
 }
+
+
+async function refreshGuidance() {
+  const list=$('#guidance-list'); if(!list) return;
+  const id=current?.id; if(!id){list.replaceChildren();return;}
+  let data;
+  try { data=await api(`/api/tasks/${id}/guidance`); }
+  catch(error){ list.replaceChildren(node('li','无法读取引导：'+error.message,'subtle')); return; }
+  if(current?.id!==id) return;
+  const paused=Boolean(data.paused);
+  const button=$('#task-pause');
+  if(button){ button.textContent=paused?'继续任务':'暂停任务';
+              button.className=paused?'primary':'quiet'; }
+  $('#guidance-note').disabled=paused&&false;
+  list.replaceChildren();
+  const items=data.guidance||[];
+  if(!items.length){ list.append(node('li','还没有中途引导。','subtle')); return; }
+  for(const item of items){
+    list.append(node('li',`#${item.sequence} ${String(item.at||'').replace('T',' ').slice(0,19)} — ${item.note}`));
+  }
+}
+
+async function sendGuidance() {
+  const note=$('#guidance-note').value.trim();
+  if(!note){ notice('请先写下引导内容。', true); return; }
+  await api(`/api/tasks/${current.id}/guidance`,{revision:current.revision,note});
+  $('#guidance-note').value='';
+  await afterChange('引导已记录；应用内 AI 的后续判断会遵守它。');
+  await refreshGuidance();
+}
+
+async function togglePause() {
+  const paused=($('#task-pause').textContent||'').includes('暂停');
+  const result=await api(`/api/tasks/${current.id}/pause`,{revision:current.revision,paused});
+  await afterChange(result.paused?'任务已暂停：新的准备与派发会等待你的继续。':'任务已继续。');
+  await refreshGuidance();
+}
+
+async function refreshActivity() {
+  const box=$('#ai-activity'); if(!box) return;
+  const id=current?.id; if(!id){box.replaceChildren();return;}
+  let data;
+  try { data=await api(`/api/tasks/${id}/ai-activity`); }
+  catch(error){ box.replaceChildren(node('p','无法读取 AI 活动：'+error.message,'subtle')); return; }
+  if(current?.id!==id) return;
+  $('#ai-activity-note').textContent=data.note||'';
+  box.replaceChildren();
+  const steps=data.steps||[];
+  if(!steps.length){box.append(node('p','这个任务还没有 AI 活动记录。','subtle'));return;}
+  const list=node('ol',undefined,'ai-activity-list');
+  for(const step of steps){
+    const item=node('li');
+    const head=node('div',undefined,'ai-activity-head');
+    const label=step.kind==='model'?'模型调用':(step.kind==='preparation'?'方案准备':'任务记录');
+    head.append(node('span',label,'badge '+(step.state==='failed'?'failed':step.state==='completed'?'completed':'pending')),
+                node('strong',step.label||''),
+                node('small',(step.at||'').replace('T',' ').slice(0,19),'subtle'));
+    item.append(head);
+    const facts=[];
+    if(step.model)facts.push('模型 '+step.model);
+    if(step.tokens!==undefined&&step.tokens!==null)facts.push(step.tokens+' tokens');
+    if(step.state)facts.push('状态 '+step.state);
+    if(step.output_keys&&step.output_keys.length)facts.push('产出 '+step.output_keys.join('/'));
+    if(facts.length)item.append(node('p',facts.join(' · '),'subtle'));
+    if(step.detail)item.append(node('p','具体原因：'+step.detail,'attention-detail'));
+    for(const question of (step.questions||[]))item.append(node('p','待处理：'+question,'subtle'));
+    list.append(item);
+  }
+  box.append(list);
+}
+
 async function refreshCandidate() {
   if(!current || current.status!=='conditions_frozen') return;
   const id=current.id;
@@ -587,6 +661,15 @@ async function refreshCandidate() {
     attention.append(node('strong',candidate.state==='clarification'?'方案准备需要补充条件：':
       candidate.state==='failed'?'方案准备未完成，需要处理：':'方案准备需要核对：'),
       node('span',`${candidateStatus(candidate).label} · 记录 ${String(candidate.id).slice(0,8)}`));
+    const detail=String(candidate?.result?.detail || candidate?.result?.message || '').trim();
+    if(detail) attention.append(node('p',detail,'attention-detail'));
+    const questions=(candidate?.result?.questions || []).slice(0,3);
+    if(questions.length){
+      const list=node('ul',undefined,'attention-questions');
+      for(const question of questions)list.append(node('li',String(question).slice(0,260)));
+      attention.append(list);
+      if((candidate.result.questions||[]).length>3)attention.append(node('p',`另有 ${(candidate.result.questions||[]).length-3} 条待处理事项，展开后可看全部。`,'subtle'));
+    }
     const jump=node('button','查看需要处理的内容 ↓','quiet');jump.type='button';
     jump.onclick=()=>{$('#advanced-task').open=true;$('#candidate-panel').scrollIntoView({block:'start'});};
     attention.append(jump);

@@ -150,6 +150,14 @@ class TargetSelection(Revision):
     exclusion_reason: str = Field(max_length=2000)
 
 
+class GuidanceInput(Revision):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class PauseInput(Revision):
+    paused: bool
+
+
 class TargetPreview(Revision):
     selected_ids: list[str] = Field(max_length=256)
     exclusion_reason: str = Field(max_length=2000)
@@ -632,6 +640,68 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def get(identifier: str):
         return store.get(identifier)
 
+    @app.get('/api/tasks/{identifier}/guidance')
+    def task_guidance(identifier: str):
+        return {'task_id': identifier, 'guidance': store.guidance(identifier),
+                'paused': store.paused(identifier)}
+
+    @app.post('/api/tasks/{identifier}/guidance')
+    @serialized_task_action
+    def task_guidance_add(identifier: str, data: GuidanceInput):
+        return {'task_id': identifier, 'guidance': store.add_guidance(identifier, data.revision, data.note),
+                'paused': store.paused(identifier)}
+
+    @app.post('/api/tasks/{identifier}/pause')
+    @serialized_task_action
+    def task_pause(identifier: str, data: PauseInput):
+        return store.set_paused(identifier, data.revision, data.paused)
+
+    @app.get('/api/tasks/{identifier}/ai-activity')
+    def ai_activity(identifier: str):
+        """What the in-app AI actually did for this task, step by step.
+
+        The user could not see which model calls happened or why a step stopped, so this
+        projects the task history, the preparation events and the private ledger receipts
+        (state, model, tokens, output keys, specific failure detail) into one timeline.
+        """
+        document = store.get(identifier)
+        steps = [{'at': event['at'], 'kind': 'task', 'label': event['event'],
+                  'revision': event['revision'], 'state': 'recorded'}
+                 for event in store.history(identifier)]
+
+        def add_model(request_id, label):
+            if model_client is None or not request_id:
+                return
+            try:
+                found = model_client.calls.lookup(request_id)
+            except (ValueError, KeyError, ModelError):
+                return
+            receipt = (found or {}).get('receipt') or {}
+            value = receipt.get('structured_output')
+            usage = receipt.get('usage') or {}
+            questions = value.get('questions') if isinstance(value, dict) else None
+            steps.append({'at': receipt.get('at') or '', 'kind': 'model', 'label': label,
+                          'request_id': request_id, 'model': receipt.get('requested_model'),
+                          'state': receipt.get('state') or 'unknown',
+                          'tokens': usage.get('total_tokens'),
+                          'output_keys': sorted(value)[:10] if isinstance(value, dict) else [],
+                          'questions': [str(item)[:300] for item in (questions or [])][:5]})
+
+        for request_id in (document.get('generated_batches') or {}):
+            add_model(request_id, '整理需求中的条件')
+        job = preparations.get(identifier) if preparations else None
+        for event in (job or {}).get('events') or []:
+            payload = event.get('payload') or {}
+            steps.append({'at': event.get('at'), 'kind': 'preparation',
+                          'label': event.get('label') or event.get('state'),
+                          'state': event.get('state'),
+                          'detail': payload.get('detail') or payload.get('message'),
+                          'questions': [str(item)[:300] for item in (payload.get('questions') or [])][:5]})
+        if job and (job.get('result') or {}).get('request_id'):
+            add_model(job['result']['request_id'], '生成计算方案')
+        return {'task_id': identifier, 'steps': steps,
+                'note': '这是应用内 AI 的实际步骤。模型回答原文保存在私有账本中；这里给出状态、用量与具体原因。'}
+
     @app.get('/api/tasks/{identifier}/history')
     def history(identifier: str):
         preparation = preparations.reconcile(identifier)
@@ -673,6 +743,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @serialized_task_action
     def candidate_start(identifier: str, data: Revision):
         require_open_task(identifier)
+        if store.paused(identifier):
+            raise TaskError('任务已暂停：请先继续，再启动准备。已提交的作业不受影响。')
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
         if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
@@ -702,7 +774,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 resources = None
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
                                            operation='complete-conditions-v1')))[:32]
-        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources)
+        guidance = [item['note'] for item in store.guidance(identifier)]
+        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources, guidance)
 
     @app.post('/api/tasks/{identifier}/conditions/{field}')
     def add(identifier: str, field: str, data: AddCondition):
