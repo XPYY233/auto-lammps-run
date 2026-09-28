@@ -235,6 +235,7 @@ class AgentCandidateTests(unittest.TestCase):
         for field in FIELDS:
             doc = tasks.add_candidate(doc['id'], doc['revision'], field, evidence('synthetic input'))
         doc = tasks.confirm(doc['id'], doc['revision'], list(FIELDS))
+        doc = target_ready(tasks, doc)
         doc = tasks.freeze(doc['id'], doc['revision'])
         with self.assertRaisesRegex(CandidateError, 'release and isolation'):
             generate_research_candidate(self.client, tasks, doc['id'], doc['revision'], self.adapter,

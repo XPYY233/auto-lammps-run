@@ -43,7 +43,7 @@ def inventory(value):
         if row['id'] in ids:
             raise TaskError('目标标识重复')
         ids.add(row['id'])
-        if row['availability'] not in AVAILABILITY or row['kind'] not in {'figure', 'subfigure', 'table', 'supplement'}:
+        if not isinstance(row['availability'], str) or not isinstance(row['kind'], str) or row['availability'] not in AVAILABILITY or row['kind'] not in {'figure', 'subfigure', 'table', 'supplement'}:
             raise TaskError('目标类型或可用性无效')
     return result
 
