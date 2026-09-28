@@ -164,6 +164,9 @@ class DiscussionInput(ProviderInput):
 
 
 class HPCInput(Input):
+    connection_id: str | None = None
+    as_new: bool = False
+    management_revision: StrictInt | None = None
     revision: StrictInt = Field(ge=0)
     label: str
     host: str
@@ -176,6 +179,12 @@ class HPCInput(Input):
     private_key: SecretStr | None = None
     known_hosts: SecretStr | None = None
     certificate: SecretStr | None = None
+
+class HPCManagementInput(Input):
+    connection_id: str
+    operation: str
+    management_revision: StrictInt = Field(ge=1)
+
 
 class HPCCheckInput(Input):
     revision: StrictInt = Field(ge=1)
@@ -300,8 +309,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.post('/api/hpc-connection')
     def save_hpc(data: HPCInput):
-        value=data.model_dump(exclude={'revision','private_key','known_hosts','certificate'})
-        return hpc.save(value,data.revision,**{k:(getattr(data,k).get_secret_value() if getattr(data,k) is not None else None) for k in ('private_key','known_hosts','certificate')})
+        value=data.model_dump(exclude={'revision','private_key','known_hosts','certificate','connection_id','as_new','management_revision'})
+        return hpc.save(value,data.revision,connection_id=data.connection_id,as_new=data.as_new,management_revision=data.management_revision,**{k:(getattr(data,k).get_secret_value() if getattr(data,k) is not None else None) for k in ('private_key','known_hosts','certificate')})
+
+    @app.post('/api/hpc-connection/manage')
+    def manage_hpc(data: HPCManagementInput):
+        return hpc.manage(data.connection_id,data.operation,data.management_revision)
 
     @app.post('/api/hpc-connection/check')
     def check_hpc(data: HPCCheckInput):
@@ -594,6 +607,7 @@ def main():
     parser.add_argument('--data-directory', required=True)
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--ledger', help='Existing private ledger shared by execution and operator history')
+    parser.add_argument('--model-connections-directory', type=Path, help='Explicit private credential directory shared by this project; no discovery or environment fallback')
     parser.add_argument('--model-ledger', help='Existing private DeepSeek policy and usage database; no automatic enablement')
     parser.add_argument('--reference-model-ledger', help='Explicit existing reference-side model policy; no automatic enablement')
     parser.add_argument('--execution-config',type=Path,help='Private deployment with fixed task/evaluation bindings and existing grants')
@@ -653,6 +667,7 @@ def main():
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
+                          model_connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory),
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

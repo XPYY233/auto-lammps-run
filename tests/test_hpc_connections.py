@@ -49,3 +49,64 @@ class HPCConnectionTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/hpc-connection',json={**PROFILE,'revision':0}).status_code,403)
         self.hpc.save(PROFILE,0);self.probe.return_value=False
         self.assertFalse(self.hpc.check(1)['connected']);self.assertEqual(self.hpc.status()['last_check']['connected'],0)
+
+    def test_manage_multiple_connections_preserves_pinned_credentials(self):
+        first=self.hpc.save({**PROFILE,'authentication':'private_key'},0,private_key='synthetic-key-one')
+        first_id=first['active_id'];before=self.hpc.ssh_arguments(1)
+        second=self.hpc.save({**PROFILE,'label':'Second','host':'second.example.edu'},1,as_new=True)
+        self.assertEqual(len(second['connections']),2)
+        selected=self.hpc.manage(first_id,'select',second['management_revision'])
+        self.assertEqual(selected['active_revision'],1)
+        edited=self.hpc.save({**PROFILE,'label':'Renamed','authentication':'private_key'},2,
+                             connection_id=first_id,management_revision=selected['management_revision'])
+        self.assertEqual(len(edited['connections']),2)
+        self.assertEqual(edited['active_revision'],3)
+        archived=self.hpc.manage(first_id,'archive',edited['management_revision'])
+        self.assertFalse(archived['configured'])
+        self.assertEqual(self.hpc.ssh_arguments(1),before)
+        self.assertNotIn('synthetic-key-one',json.dumps(archived))
+        self.assertEqual(HPCConnections(self.store).status(),archived)
+        restored=self.hpc.manage(first_id,'restore',archived['management_revision'])
+        self.assertFalse(restored['configured'])
+        self.assertTrue(self.hpc.manage(first_id,'select',restored['management_revision'])['configured'])
+        self.probe.assert_not_called()
+
+    def test_new_connection_never_inherits_same_host_credentials(self):
+        state=self.hpc.save({**PROFILE,'authentication':'private_key'},0,private_key='synthetic-key')
+        with self.assertRaises(TaskError):
+            self.hpc.save({**PROFILE,'authentication':'private_key'},1,as_new=True)
+        self.assertEqual(self.hpc.status(),state)
+
+    def test_management_stale_writes_and_archived_edits_rejected(self):
+        state=self.hpc.save(PROFILE,0)
+        removed=self.hpc.manage(state['active_id'],'archive',state['management_revision'])
+        with self.assertRaises(StaleTask):
+            self.hpc.save(PROFILE,1,management_revision=state['management_revision'])
+        with self.assertRaises(StaleTask):
+            self.hpc.manage(state['active_id'],'restore',state['management_revision'])
+        with self.assertRaises(TaskError):
+            self.hpc.save(PROFILE,1,connection_id=state['active_id'],management_revision=removed['management_revision'])
+        with self.assertRaises(TaskError):
+            self.hpc.manage(state['active_id'],'select',removed['management_revision'])
+
+    def test_management_route_requires_origin_and_preserves_profile_history(self):
+        state=self.hpc.save(PROFILE,0)
+        data=dict(connection_id=state['active_id'],operation='archive',management_revision=state['management_revision'])
+        self.assertEqual(self.client.post('/api/hpc-connection/manage',json=data).status_code,403)
+        response=self.client.post('/api/hpc-connection/manage',json=data,headers=HEADERS)
+        self.assertEqual(response.status_code,200)
+        self.assertFalse(response.json()['configured'])
+        self.assertEqual(self.hpc._row(1)['revision'],1)
+        self.assertEqual(self.client.post('/api/hpc-connection/manage',json=data,headers=HEADERS).status_code,409)
+
+    def test_legacy_profile_migration_keeps_versions_and_secrets(self):
+        self.hpc.save(PROFILE,0)
+        self.hpc.save({**PROFILE,'host':'second.example.edu'},1)
+        # Simulate a pre-management database; immutable profile and credential records stay.
+        with self.store.transaction() as db:
+            db.execute('DROP TABLE hpc_management_events')
+            db.execute('DROP TABLE hpc_saved_connections')
+        migrated=HPCConnections(self.store).status()
+        self.assertEqual(migrated['active_revision'],2)
+        self.assertEqual([x['revision'] for x in migrated['connections']],[2,1])
+        self.assertIn('login.example.edu',self.hpc.ssh_arguments(1))

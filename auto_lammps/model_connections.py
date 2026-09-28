@@ -48,9 +48,9 @@ def official_request(provider, key, method, path, payload=None):
 
 
 class ModelConnections:
-    def __init__(self, tasks, *, transport=official_request, assistant_enabled=False):
+    def __init__(self, tasks, *, transport=official_request, assistant_enabled=False, credentials_directory=None):
         self.tasks, self.transport, self.assistant_enabled = tasks, transport, assistant_enabled
-        self.directory = private_directory(tasks.path.parent / 'model-connections')
+        self.directory = private_directory(Path(credentials_directory) if credentials_directory is not None else tasks.path.parent / 'model-connections')
         with tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY, provider TEXT, event TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS result_questions (id TEXT PRIMARY KEY, task_id TEXT, provider TEXT, model TEXT, question TEXT, context_sha256 TEXT, at TEXT)')

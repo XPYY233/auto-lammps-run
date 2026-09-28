@@ -61,3 +61,17 @@ class ModelConnectionTests(unittest.TestCase):
         count=self.transport.call_count
         self.connections.discuss(task['id'],'f'*32,'openai','失败测试',{})
         self.assertEqual(self.transport.call_count,count)
+
+    def test_explicit_shared_project_credential_directory_without_key_copy(self):
+        self.connections.save('deepseek-official','synthetic','shared-synthetic-secret')
+        preview_store=TaskStore(Path(self.tmp.name)/'preview'/'tasks.sqlite')
+        preview=ModelConnections(preview_store,transport=self.transport,
+                                 credentials_directory=self.connections.directory)
+        self.assertTrue(preview.status()['connections']['deepseek-official']['configured'])
+        self.assertNotIn('shared-synthetic-secret',json.dumps(preview.status()))
+        self.assertFalse((preview_store.path.parent/'model-connections').exists())
+        preview.save('deepseek-official','updated')
+        self.assertEqual(self.connections.status()['connections']['deepseek-official']['model'],'updated')
+        preview.save('deepseek-official','',remove=True)
+        self.assertFalse(self.connections.status()['connections']['deepseek-official']['configured'])
+        self.transport.assert_not_called()
