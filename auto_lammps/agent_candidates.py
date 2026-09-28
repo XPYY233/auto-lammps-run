@@ -138,7 +138,7 @@ def output_prefix(layout):
     return '/output/' if layout == 'isolated' else ''
 
 
-def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated'):
+def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated', answers=None, guidance=None):
     prefix = output_prefix(output_layout)
     _text(task_text, 24000)
     if units not in ('metal', 'real'):
@@ -194,6 +194,15 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'not verify units: declare units from the physical workflow, never infer them from variable names. '
         'Do not declare vector/block output as scalar. Both table formats may share a plan. '
         'Each operation is {id,method,file,x,y,window:[min,max]}; method is summary, last, or linear_fit. '
+        'The analysis contract is checked strictly, so satisfy it exactly: (a) analysis.files lists every '
+        'analysis file the workflow writes, each a distinct flat filename with no directory part; (b) every '
+        'table file and every operation file must be one of those declared analysis.files, and an operation '
+        'may only use a table declared in plan.tables; (c) operation x and y must be column names declared '
+        'for that table; (d) potential_pin must be copied verbatim from the supplied resource summaries, '
+        'character for character; (e) every write in the workflow must target exactly the declared path, that is '
+        'the output prefix followed by one of the names in analysis.files (write_data <prefix><name>, dump ... file '
+        '<prefix><name>, and file/append arguments alike); a write to any undeclared path fails immediately. '
+        'If any of these is wrong the preparation fails without a retry. '
         'x selects the inclusive predeclared window; y is the quantity to analyze. linear_fit requires '
         'at least three samples and variable x. Do not choose windows after seeing results or silently '
         'change units or scientific methods. Use clarification questions for missing analysis conditions '
@@ -202,12 +211,21 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Do not use stdout.txt, stderr.txt or log.lammps as analysis outputs. '
         'The result is an unverified proposal, not permission to submit. Never assert scientific success.'
     )
-    context = {'task_text': task_text, 'units': units, 'resources': resource_summaries, 'max_atoms': max_atoms}
+    extra = ''
+    if guidance:
+        extra = '用户中途给出的方向性要求，必须遵守：' + '；'.join(str(item)[:400] for item in guidance) + '。'
+    if answers:
+        extra += '用户对上一次澄清问题的答复（据此完成方案，不要重复提问）：' + str(answers)[:4000]
+    if extra:
+        instruction = instruction + ' ' + extra
+    context = {'task_text': task_text, 'units': units, 'resources': resource_summaries, 'max_atoms': max_atoms,
+               'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])]}
     return [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': canonical(context).decode()}]
 
 
 def generate_candidate_draft(client, adapter, *, task_text, units, resources, store, max_atoms=100000,
-                             condition_record_sha256=None, on_stage=None, output_layout='isolated'):
+                             condition_record_sha256=None, on_stage=None, output_layout='isolated',
+                             answers=None, guidance=None):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -226,8 +244,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
         raise CandidateError('Invalid geometry atom limit')
     runtime = geometry_runtime()
-    messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms, output_layout=output_layout)
+    messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms,
+                                  output_layout=output_layout, answers=answers, guidance=guidance)
     context = {'generator_version': GENERATOR_VERSION, 'messages': messages,
+               'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])],
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'potential_compatibility': adapter.compatibility_policy(),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
@@ -237,34 +257,56 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     request_id = sha256(canonical(context))[:32]
     if on_stage:
         on_stage('model_requested')
-    completion = client.complete_json(request_id, messages)
+    try:
+        completion = client.complete_json(request_id, messages)
+    except ModelError as error:
+        # 模型偶尔返回非法 JSON（例如夹带 markdown 或未转义换行）。给恰好一次重发机会，
+        # 只要求"严格合法的 JSON"，不放宽任何内容契约。
+        if 'invalid_json' not in str(error):
+            raise
+        repair_id = sha256(canonical({'base': request_id, 'repair': 'json'}))[:32]
+        completion = client.complete_json(repair_id, messages + [
+            {'role': 'user', 'content': '上一条回答不是合法 JSON。请重新输出严格的单个 JSON 对象：'
+                                        '不要 markdown 代码块、不要注释、不要尾随逗号，字符串内不要出现未转义的换行，'
+                                        '键名与契约完全一致。'}])
     if (completion['receipt']['state'] != 'completed'
             or completion['receipt']['output_sha256'] != sha256(canonical(completion['value']))):
         raise ModelError('candidate_generation_not_completed')
     proposal = completion['value']
-    try:
-        screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
-    except CandidateError as error:
-        # 契约被违反时（例如同时给出提问与可执行方案）给模型恰好一次修正机会；
-        # 校验本身不放宽，原始回答仍保留在账本里。
-        repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
-        repair_messages = messages + [
-            {'role': 'assistant', 'content': canonical(proposal).decode()},
-            {'role': 'user', 'content': canonical({
-                'correction': '上一次输出未通过校验。请只修正被指出的问题并重新输出同一 JSON 契约：'
-                              'questions 非空时 structure/potential_pin/workflow/analysis 必须全部为 null；'
-                              '给出可执行方案时 questions 必须是空列表。不要改变科研范围。',
-                'failure': str(error)[:400]}).decode()}]
+    # 契约很长，模型一次难以全部满足。校验规则一条都不放宽，但把**具体错误**回喂给模型，
+    # 最多自动修复 3 轮（每轮都是一次可记账调用），常见结果是从"少一个字段"逐轮收敛到合法方案。
+    screen = None
+    last_error = None
+    for attempt in range(4):
         try:
-            repaired = client.complete_json(repair_id, repair_messages)
-        except ModelError:
-            # 没有额度做修复时，用户应当看到真正的校验失败原因，而不是"额度耗尽"。
-            raise error
-        if (repaired['receipt']['state'] != 'completed'
-                or repaired['receipt']['output_sha256'] != sha256(canonical(repaired['value']))):
-            raise error
-        proposal = repaired['value']
-        screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
+            screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout)
+            last_error = None
+            break
+        except CandidateError as error:
+            last_error = error
+            if attempt == 3:
+                break
+            repair_id = sha256(canonical({'base': request_id, 'repair': attempt + 1}))[:32]
+            repair_messages = messages + [
+                {'role': 'assistant', 'content': canonical(proposal).decode()},
+                {'role': 'user', 'content': canonical({
+                    'correction': '上一次输出未通过校验。请只修正被指出的问题并重新输出完整的同一 JSON 契约：'
+                                  'questions 非空时 structure/potential_pin/workflow/analysis 必须全部为 null；'
+                                  '给出可执行方案时 questions 必须是空列表；structure 的几何字段必须齐全'
+                                  '（crystal、elements、a_angstrom、repeat、orientation、boundary、vacancies、'
+                                  'substitutions、type_elements、masses_amu），不要省略任何一项。不要改变科研范围。',
+                    'failure': str(error)[:400]}).decode()}]
+            try:
+                repaired = client.complete_json(repair_id, repair_messages)
+            except ModelError:
+                # 没有额度继续修复时，用户看到的是真正的校验失败原因。
+                raise error
+            if (repaired['receipt']['state'] != 'completed'
+                    or repaired['receipt']['output_sha256'] != sha256(canonical(repaired['value']))):
+                raise error
+            proposal = repaired['value']
+    if last_error is not None:
+        raise last_error
     if screen is None:
         return {'status': 'clarification_required', 'proposal': proposal, 'model_receipt': completion['receipt'],
                 'request_id': request_id, 'execution_authorized': False}
@@ -331,10 +373,11 @@ def research_inputs(tasks, identifier, revision):
             'condition_record_sha256': sha256(frozen)}
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, output_layout='isolated'):
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, output_layout='isolated', answers=None, guidance=None):
     """Research bridge; reference tasks still need the separate release/isolation gate."""
     inputs = research_inputs(tasks, identifier, revision)
     # Only selected confirmed values; no task title, free prompt, discarded
     # alternatives, source context or reference-side export enters the model.
     return generate_candidate_draft(client, adapter, **inputs, resources=resources,
-                                    store=store, max_atoms=max_atoms, on_stage=on_stage, output_layout=output_layout)
+                                    store=store, max_atoms=max_atoms, on_stage=on_stage, output_layout=output_layout,
+                                    answers=answers, guidance=guidance)

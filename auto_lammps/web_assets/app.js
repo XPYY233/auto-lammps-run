@@ -656,6 +656,8 @@ async function refreshCandidate() {
   const available=(automatic?schema.automatic_workflow:schema.candidate_preparation) || {enabled:false,reason:'方案准备服务尚未配置。'};
   const retriggerable=Boolean(candidate)&&['clarification','failed','interrupted','configuration_changed'].includes(candidate.state);
   if(retriggerable) $('#advanced-task').open=true; // 需要用户处理时直接展开，不把澄清问题藏在折叠区
+  const answersBlock=$('#candidate-answers-block');
+  if(answersBlock) answersBlock.hidden=!(candidate && candidate.state==='clarification');
   const attention=$('#candidate-attention');attention.hidden=!retriggerable;attention.replaceChildren();
   if(retriggerable) {
     attention.append(node('strong',candidate.state==='clarification'?'方案准备需要补充条件：':
@@ -718,7 +720,11 @@ $('#prepare-candidate').onclick=()=>action(async()=>{
   $('#prepare-candidate').disabled=true;
   const automatic=schema.automatic_workflow?.configured;
   $('#candidate-outcome').textContent='正在提交重新准备请求…';
-  try { await api(`/api/tasks/${id}/${automatic?'workflow':'candidate'}`,{revision:current.revision}); }
+  const answers=($('#candidate-answers')?.value||'').trim();
+  try {
+    if(answers) await api(`/api/tasks/${id}/candidate`,{revision:current.revision,answers});
+    else await api(`/api/tasks/${id}/${automatic?'workflow':'candidate'}`,{revision:current.revision});
+  }
   finally { await refreshModelStatus(); await refreshCandidate(); await renderHistory(); }
   if(current?.id!==id) return;
   candidateOutcome=retriggerOutcome(before,candidateRecord);

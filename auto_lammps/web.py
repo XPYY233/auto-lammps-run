@@ -150,6 +150,10 @@ class TargetSelection(Revision):
     exclusion_reason: str = Field(max_length=2000)
 
 
+class CandidateInput(Revision):
+    answers: str | None = Field(default=None, max_length=4000)
+
+
 class GuidanceInput(Revision):
     note: str = Field(min_length=1, max_length=2000)
 
@@ -741,14 +745,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.post('/api/tasks/{identifier}/candidate', status_code=202)
     @serialized_task_action
-    def candidate_start(identifier: str, data: Revision):
+    def candidate_start(identifier: str, data: CandidateInput):
         require_open_task(identifier)
         if store.paused(identifier):
             raise TaskError('任务已暂停：请先继续，再启动准备。已提交的作业不受影响。')
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
         if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
-        return {'candidate': candidate_service.enqueue(identifier, data.revision)}
+        return {'candidate': candidate_service.enqueue(identifier, data.revision, data.answers)}
 
     @app.get('/api/tasks/{identifier}/candidate/files/{name}')
     def candidate_file(identifier: str, name: str):

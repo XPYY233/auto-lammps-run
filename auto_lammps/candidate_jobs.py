@@ -21,7 +21,7 @@ ACTIVE = {'running', 'model_requested', 'preparing_files'}
 LABELS = {'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
-          'configuration_changed': '配置已变化 · 待核对'}
+          'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
 ERRORS = {'model_budget_exhausted': '模型额度已用完，没有自动重试。',
           'model_key_missing_or_invalid': '模型密钥尚未配置，请联系管理员。',
           'request_already_reserved': '已有模型请求记录，需要核对，未重复调用。',
@@ -62,7 +62,7 @@ class CandidateHistory:
             events = [dict(row) for row in db.execute('SELECT * FROM candidate_events WHERE job_id=? ORDER BY sequence', (job['id'],))]
         for event in events:
             event['payload'] = json.loads(event['payload'])
-            event['label'] = LABELS[event['state']]
+            event['label'] = LABELS.get(event['state'], event['state'])
         return {**job, 'state': events[-1]['state'], 'label': events[-1]['label'],
                 'updated_at': events[-1]['at'], 'result': events[-1]['payload'], 'events': events,
                 'execution_authorized': False}
@@ -123,10 +123,29 @@ class CandidateService:
             return {'enabled': True, 'reason': ''}
         return {'enabled': False, 'reason': '尚无已配置且通过静态兼容检查的势函数。'}
 
-    def enqueue(self, identifier, revision):
+    def enqueue(self, identifier, revision, answers=None):
         existing = self.history.reconcile(identifier)
         if existing:
-            return existing
+            if not answers:
+                return existing
+            # 澄清闭环：用户的答复作为**追加事件**进入同一个作业，随后重新入队，
+            # 触发一次新的、可记账的模型调用。冻结条件与既有事件、费用都不改写。
+            if existing['state'] not in ('clarification', 'failed', 'interrupted', 'configuration_changed'):
+                raise CandidateError('当前状态不需要补充答复；请先查看已有准备记录。')
+            available = self.availability()
+            if not available['enabled']:
+                raise CandidateError(available['reason'])
+            with self.tasks.transaction() as db:
+                if existing['config_sha256'] != self.config_sha256:
+                    # 作业行不可改（immutable triggers），因此以**追加事件**记录重新基线，
+                    # run 检查时以最新一次再基线为准。
+                    self.history._event(db, existing['id'], 'config_rebased',
+                                        {'from': existing['config_sha256'], 'to': self.config_sha256})
+                self.history._event(db, existing['id'], 'clarification_answered',
+                                    {'answers': str(answers)[:4000]})
+                self.history._event(db, existing['id'], 'queued')
+            self.pool.submit(self.run, identifier)
+            return self.history.get(identifier)
         inputs = research_inputs(self.tasks, identifier, revision)
         available = self.availability()
         with self.tasks.transaction() as db:
@@ -162,16 +181,31 @@ class CandidateService:
                 state = db.execute('SELECT state FROM candidate_events WHERE job_id=? ORDER BY sequence DESC LIMIT 1', (job['id'],)).fetchone()[0]
                 if state != 'queued':
                     return
-                if job['config_sha256'] != self.config_sha256:
-                    self.history._event(db, job['id'], 'configuration_changed', {'message': '服务配置或代码版本已变化；没有重新调用模型。'})
+                baseline = job['config_sha256']
+                rebased = db.execute("SELECT payload FROM candidate_events WHERE job_id=? AND state='config_rebased' "
+                                     "ORDER BY sequence DESC LIMIT 1", (job['id'],)).fetchone()
+                if rebased:
+                    baseline = (json.loads(rebased['payload']) or {}).get('to', baseline)
+                if baseline != self.config_sha256:
+                    self.history._event(db, job['id'], 'configuration_changed',
+                                        {'message': '服务配置或代码版本已变化；没有重新调用模型。',
+                                         'detail': '如确认要按当前版本重跑，请在页面上再次点击准备并（如有需要）补充答复。'})
                     return
                 self.history._event(db, job['id'], 'running')
             def stage(state):
                 with self.tasks.transaction() as db:
                     self.history._event(db, job['id'], state)
+            answers = None
+            with self.tasks.transaction() as db:
+                row = db.execute("SELECT payload FROM candidate_events WHERE job_id=? AND state='clarification_answered' "
+                                 "ORDER BY sequence DESC LIMIT 1", (job['id'],)).fetchone()
+                if row:
+                    answers = (json.loads(row['payload']) or {}).get('answers')
+            guidance = [item['note'] for item in self.tasks.guidance(identifier)]
             try:
                 result = generate_research_candidate(self.client, self.tasks, identifier, job['revision'], self.adapter,
-                            resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage, output_layout=self.output_layout)
+                            resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
+                            output_layout=self.output_layout, answers=answers, guidance=guidance)
                 if result['status'] == 'clarification_required':
                     state, payload = 'clarification', {'summary': result['proposal']['summary'],
                         'questions': result['proposal']['questions'], 'request_id': result['request_id']}
