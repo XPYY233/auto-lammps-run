@@ -216,6 +216,34 @@ class ModelCalls:
                     receipt=json.loads(row[1]) if row[1] else None)
 
 
+def lenient_json(text):
+    """Parse JSON that is valid except for raw control characters inside strings.
+
+    Models routinely embed a multi-line LAMMPS script in a JSON string and emit real
+    newlines instead of \n escapes. Escaping those characters inside string literals
+    changes no content and recovers the object the model meant; the strict parser is
+    still tried first and nothing else is relaxed.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                out.append(char); escaped = False; continue
+            if char == '\\':
+                out.append(char); escaped = True; continue
+            if char == '"':
+                out.append(char); in_string = False; continue
+            if char == '\n': out.append('\\n'); continue
+            if char == '\r': out.append('\\r'); continue
+            if char == '\t': out.append('\\t'); continue
+            if ord(char) < 0x20: out.append('\\u%04x' % ord(char)); continue
+            out.append(char); continue
+        out.append(char)
+        if char == '"': in_string = True
+    return strict_json(''.join(out))
+
 def parse_completion(content):
     data = strict_json(content)
     if not isinstance(data, dict):
@@ -230,7 +258,11 @@ def parse_completion(content):
     if (not isinstance(message, dict) or message.get('role') != 'assistant' or message.get('tool_calls')
             or not isinstance(message.get('content'), str) or not message['content'].strip()):
         raise ModelError('empty_or_unexpected_output')
-    value = strict_json(message['content'])
+    try:
+        value = strict_json(message['content'])
+    except ModelError:
+        # 多行工作流被写成裸换行是常见近似错误；容错解析不改变任何内容。
+        value = lenient_json(message['content'])
     if not isinstance(value, dict):
         raise ModelError('json_object_required')
     return value

@@ -143,7 +143,10 @@ class ExecutionJobs:
                 import re
                 if not isinstance(reason,str) or not re.fullmatch(r'[a-z_]{0,80}',reason):reason='adapter_attention'
             except Exception as exc:
-                state='attention';reason='execution_check_failed'
+                # 只暴露异常类别（安全字符），否则"执行需要核对"无法定位问题。
+                import re as _re
+                kind=_re.sub(r'[^a-z]','',type(exc).__name__.lower())[:24] or 'error'
+                state='attention';reason='execution_check_failed_'+kind
                 # Class name only; private paths, grants and remote output stay private.
                 if isinstance(exc,FileNotFoundError):reason='deployment_file_missing'
             with self.tasks.transaction() as db:self._event(db,job['id'],state,reason)

@@ -13,7 +13,7 @@ from .deepseek import ModelError
 from .ledger import Resources
 from .manifest import canonical, freeze, private_directory, sha256
 from .structures import build_structure, geometry_runtime, validate_structure
-from .analysis_v2 import adapter_identity, plan_adapter, validate_plan
+from .analysis_v2 import AnalysisError, adapter_identity, plan_adapter, validate_plan
 from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX_TABLES,
                        MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
@@ -85,7 +85,9 @@ def validate_body(body, outputs, *, output_prefix='/output/'):
                 raise CandidateError('Missing write_data output')
             targets.append(tokens[1])
         for i, token in enumerate(tokens):
-            if token in {'file', 'append'}:
+            # LAMMPS 的 `print ... file X append` 里，append 是"追加写入"的开关而不是输出名
+            # （也可能是 append yes/no）。此前把它当成需要文件名的关键字，会误拒合法写法。
+            if token == 'file':
                 if i + 1 >= len(tokens):
                     raise CandidateError('Missing output filename')
                 targets.append(tokens[i + 1])
@@ -132,12 +134,37 @@ def validate_proposal(value, *, max_atoms, output_layout="isolated"):
     for key in ('quantity', 'method'):
         _text(analysis[key], 4000)
     files = analysis['files']
+    # 契约里 analysis.files 是"扁平基名"，但模型常按工作流的写法带上输出前缀（/output/x 或 output/x）。
+    # 这属于显然意图的书写差异，统一归一到基名，避免把一个无害写法变成整轮失败；
+    # 归一后仍要求扁平、非保留名且互不相同。
+    if isinstance(files, list):
+        normalized = []
+        for item in files:
+            name = item
+            if isinstance(name, str):
+                name = name.replace('\\', '/').split('/')[-1]
+                if name.startswith('output/'):
+                    name = name.split('output/')[-1]
+            normalized.append(name)
+        files = normalized
+        analysis['files'] = normalized
     if (not isinstance(files, list) or not 1 <= len(files) <= 29
             or any(not isinstance(x, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', x)
                    or x in RESERVED_OUTPUTS for x in files) or len(set(files)) != len(files)):
         raise CandidateError('Analysis output names must be distinct flat filenames')
+    if isinstance(analysis.get('plan'), dict):
+        plan = analysis['plan']
+        # 空计划（没有表或没有操作）不含任何信息；plan 本就可选，按"没有计划"处理，
+        # 不因一个无意义的空洞让整轮准备失败。
+        if not plan.get('tables') or not plan.get('operations'):
+            analysis.pop('plan', None)
     if 'plan' in analysis:
-        validate_plan(analysis['plan'],files)
+        try:
+            validate_plan(analysis['plan'], files)
+        except AnalysisError as error:
+            # 统一归类：分析计划问题与候选方案其他问题一样，应被记为方案校验失败，
+            # 而不是以未处理异常的形式冒出来。
+            raise CandidateError(str(error)) from None
     return validate_body(value['workflow'], files, output_prefix=output_prefix(output_layout))
 
 
@@ -169,6 +196,9 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'orientation, boundary, vacancies, substitutions, type_elements, masses_amu. crystal is fcc, bcc, '
         'diamond, rocksalt or zincblende; elements contains base species (two for rocksalt/zincblende); '
         'repeat is three positive integers; orientation must be cubic_axes; boundary is three p/f strings. '
+        'Express defects through the structure fields, not the script: a vacancy is one entry in vacancies '
+        '(the trusted builder removes that site), a substitution is one entry in substitutions. delete_atoms is '
+        'not an allowed command; a workflow that needs it is rejected. '
         'For a fully specified non-cubic cell or slab, use crystal=explicit_cell with exactly crystal, '
         'cell_angstrom, site_elements, scaled_positions, repeat, orientation, boundary, vacancies, '
         'substitutions, type_elements, masses_amu. Do not include elements or a_angstrom in this variant. '
@@ -191,6 +221,9 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Supported fix styles: ' + ', '.join(sorted(FIX_STYLES)) + '. Supported compute styles: '
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
         'analysis is {quantity,method,files,plan}; method describes analysis, not executable Python. '
+        'The plan object is OPTIONAL: omit plan entirely when no numeric curve is required, and include it only '
+        'when you can satisfy every limit below. When plan is present it must hold at least one table and at '
+        'least one operation. '
         'plan is {tables,operations}. Each table is {file,columns:[{name,unit},...]}. Supported units: '
         + ', '.join(sorted(ANALYSIS_UNITS)) + '. '
         'Each numeric table must start with exactly "# columns: <space-separated names>" and '
@@ -231,22 +264,24 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Do not use stdout.txt, stderr.txt or log.lammps as analysis outputs. '
         ' The following is a FORMAT example only. It is a synthetic cell and a synthetic curve, not a '
         'published material, not a reference answer, and it must never be copied as scientific content; '
-        'reproduce its structure exactly with your own scientific values. A shape-complete proposal is: '
+        'reproduce its structure exactly with your own scientific values. Every write below uses the '
+        f'declared output prefix {prefix!r} for THIS task, which you must also use. A shape-complete proposal is: '
         '{"summary":"<one line>","questions":[],'
         '"structure":{"crystal":"bcc","elements":["W"],"a_angstrom":3.165,"repeat":[4,4,4],'
         '"orientation":"cubic_axes","boundary":["p","p","p"],"vacancies":[],"substitutions":[],'
         '"type_elements":["W"],"masses_amu":[183.84]},'
         '"potential_pin":"<copy one supplied pin verbatim>",'
-        '"workflow":"min_style cg\\nfix 1 all box/relax iso 0.0 vmax 0.001\\nminimize 1e-10 1e-10 10000 10000\\n'
-        'print \"# columns: step energy\" file /output/a0.dat\\nprint \"# units: step eV\" file /output/a0.dat",'
+        f'"workflow":"min_style cg\\nminimize 1e-10 1e-10 10000 10000\\nprint \\"# columns: step energy\\" file {prefix}a0.dat\\nprint \\"# units: step eV\\" file {prefix}a0.dat",'
         '"analysis":{"quantity":"equilibrium lattice constant and bulk energy",'
         '"method":"read the printed table","files":["a0.dat"],'
         '"plan":{"tables":[{"file":"a0.dat","columns":[{"name":"step","unit":"step"},{"name":"energy","unit":"eV"}]}],'
         '"operations":[{"id":"last","method":"last","file":"a0.dat","x":"step","y":"energy","window":[0,10000]}]}}}. '
         'Note in that example: questions is empty because a plan is given; every geometric field of structure is '
-        'present; the two analysis files are flat and distinct; both the table file and the operation file are '
-        'the declared analysis file; x and y are its declared columns; the operation method is one of summary, '
-        'last, linear_fit; and every write uses the declared path. Always emit one JSON object, never prose.'
+        'present; the analysis file is flat; the table file and the operation file are that declared file; x and '
+        'y are its declared columns; the operation method is one of summary, last, linear_fit; every write uses '
+        'the declared prefix shown above (which may be empty, in which case use the bare declared filename). '
+        'Always emit one JSON object, never prose. The workflow value is a single JSON string: write newlines as '
+        'the two characters \\n and never put a raw newline or tab inside any string.'
     )
     extra = ''
     if guidance:

@@ -277,3 +277,64 @@ class PromptContractConformanceTests(unittest.TestCase):
         self.assertIn(str(analysis.MIN_COLUMNS), text)
         self.assertIn(str(analysis.MAX_COLUMNS), text)
 
+class LammpsAppendIdiomTests(unittest.TestCase):
+    """LAMMPS 的 print ... file X append 是合法写法，不能被当作缺少输出文件名。"""
+
+    def test_trailing_append_is_a_flag_not_a_target(self):
+        from auto_lammps.agent_candidates import validate_body
+        body = ('print "# columns: step energy" file /output/a0.dat\n'
+                'print "# units: step eV" file /output/a0.dat\n'
+                'print "0 -1.0" file /output/a0.dat append\n'
+                'run 0\n')
+        result = validate_body(body, ['a0.dat'])
+        self.assertEqual(result['declared_outputs'], ['a0.dat'])
+
+    def test_append_with_yes_no_is_also_accepted(self):
+        from auto_lammps.agent_candidates import validate_body
+        body = 'print "0 -1.0" file /output/a0.dat append yes\nrun 0\n'
+        self.assertEqual(validate_body(body, ['a0.dat'])['declared_outputs'], ['a0.dat'])
+
+class AnalysisFileNormalizationTests(unittest.TestCase):
+    """模型常把 /output/ 前缀写进 analysis.files；归一为扁平基名，但仍拒绝重复与保留名。"""
+
+    def proposal(self, files):
+        return {'summary': 'synthetic', 'questions': [], 'potential_pin': 'a' * 64,
+                'structure': deepcopy(SPEC), 'workflow': 'run 0\nwrite_data /output/final.data',
+                'analysis': {'quantity': 'q', 'method': 'm', 'files': files}}
+
+    def test_prefixed_names_are_normalized_to_basenames(self):
+        from auto_lammps.agent_candidates import validate_proposal
+        value = self.proposal(['/output/final.data'])
+        validate_proposal(value, max_atoms=100000)
+        self.assertEqual(value['analysis']['files'], ['final.data'])
+
+    def test_duplicates_and_reserved_names_are_still_rejected(self):
+        from auto_lammps.agent_candidates import CandidateError, validate_proposal
+        with self.assertRaisesRegex(CandidateError, 'distinct flat filenames'):
+            validate_proposal(self.proposal(['a.dat', '/output/a.dat']), max_atoms=100000)
+        with self.assertRaisesRegex(CandidateError, 'distinct flat filenames'):
+            validate_proposal(self.proposal(['stdout.txt']), max_atoms=100000)
+
+class EmptyAnalysisPlanTests(unittest.TestCase):
+    """空计划不含信息，按未提供处理；非空但不合法的计划仍被拒绝。"""
+
+    def proposal(self, plan):
+        return {'summary': 'synthetic', 'questions': [], 'potential_pin': 'a' * 64,
+                'structure': deepcopy(SPEC), 'workflow': 'run 0\nwrite_data /output/final.data',
+                'analysis': {'quantity': 'q', 'method': 'm', 'files': ['final.data'], 'plan': plan}}
+
+    def test_empty_plan_is_dropped(self):
+        from auto_lammps.agent_candidates import validate_proposal
+        value = self.proposal({'tables': [], 'operations': []})
+        validate_proposal(value, max_atoms=100000)
+        self.assertNotIn('plan', value['analysis'])
+
+    def test_malformed_nonempty_plan_is_still_rejected(self):
+        from auto_lammps.agent_candidates import CandidateError, validate_proposal
+        # 有表也有操作，但表只有一列（契约要求 x 与 y 两列）→ 必须拒绝，不能被"空计划"规则放过。
+        value = self.proposal({'tables': [{'file': 'final.data', 'columns': [{'name': 'x', 'unit': 'eV'}]}],
+                               'operations': [{'id': 'last', 'method': 'last', 'file': 'final.data',
+                                               'x': 'x', 'y': 'x', 'window': [0, 1]}]})
+        with self.assertRaises(CandidateError):
+            validate_proposal(value, max_atoms=100000)
+

@@ -17,6 +17,7 @@ from .potentials import PotentialError
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
+BOOKKEEPING = {'config_rebased', 'clarification_answered'}
 ACTIVE = {'running', 'model_requested', 'preparing_files'}
 LABELS = {'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
@@ -63,8 +64,10 @@ class CandidateHistory:
         for event in events:
             event['payload'] = json.loads(event['payload'])
             event['label'] = LABELS.get(event['state'], event['state'])
-        return {**job, 'state': events[-1]['state'], 'label': events[-1]['label'],
-                'updated_at': events[-1]['at'], 'result': events[-1]['payload'], 'events': events,
+        # 记账类事件（重新基线、答复登记）不改变准备状态，否则会把已准备的方案顶回"需要处理"。
+        significant = [e for e in events if e['state'] not in BOOKKEEPING] or events
+        return {**job, 'state': significant[-1]['state'], 'label': significant[-1]['label'],
+                'updated_at': significant[-1]['at'], 'result': significant[-1]['payload'], 'events': events,
                 'execution_authorized': False}
 
     @contextmanager
@@ -130,7 +133,7 @@ class CandidateService:
                 return existing
             # 澄清闭环：用户的答复作为**追加事件**进入同一个作业，随后重新入队，
             # 触发一次新的、可记账的模型调用。冻结条件与既有事件、费用都不改写。
-            if existing['state'] not in ('clarification', 'failed', 'interrupted', 'configuration_changed'):
+            if existing['state'] not in ('clarification', 'failed', 'interrupted', 'configuration_changed', 'prepared'):
                 raise CandidateError('当前状态不需要补充答复；请先查看已有准备记录。')
             available = self.availability()
             if not available['enabled']:
@@ -160,6 +163,33 @@ class CandidateService:
                 self.history._event(db, job, 'queued')
         self.pool.submit(self.run, identifier)
         return self.history.get(identifier)
+
+    def rebaseline(self, identifier):
+        """显式重启时把作业的有效基线更新到当前配置（追加事件，作业行不可改）。"""
+        job = self.history.get(identifier)
+        if job is None:
+            return None
+        baseline = self.effective_config_sha256(identifier)
+        if baseline == self.config_sha256:
+            return self.config_sha256
+        # 注意：事务内不得再调用会自行开事务的方法（否则 BEGIN IMMEDIATE 嵌套 → database is locked）。
+        with self.tasks.transaction() as db:
+            self.history._event(db, job['id'], 'config_rebased',
+                                {'from': baseline, 'to': self.config_sha256})
+        return self.config_sha256
+
+    def effective_config_sha256(self, identifier):
+        """作业行不可改，因此以最新一次'重新基线'事件为准；没有则用行内值。"""
+        job = self.history.get(identifier)
+        if job is None:
+            return None
+        baseline = job['config_sha256']
+        with self.tasks.transaction() as db:
+            row = db.execute("SELECT payload FROM candidate_events WHERE job_id=? AND state='config_rebased' "
+                             "ORDER BY sequence DESC LIMIT 1", (job['id'],)).fetchone()
+        if row:
+            baseline = (json.loads(row['payload']) or {}).get('to', baseline)
+        return baseline
 
     def start(self):
         with self.tasks.transaction() as db:

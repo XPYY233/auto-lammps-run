@@ -743,8 +743,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
         from .ledger import LedgerError
         try:return execution_jobs.enqueue(identifier,data.revision)
-        except (ValueError,OSError,LedgerError,runtime_denied):
-            return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
+        except (ValueError,OSError,LedgerError,runtime_denied) as error:
+            # 笼统的"未通过核验"无法定位；给出异常类型与简短原因（不含密钥或路径细节）。
+            detail = '方案或计算部署未通过核验，未发起新的计算。原因：' + type(error).__name__
+            extra = str(error)[:200]
+            if extra and extra != type(error).__name__:
+                detail += '：' + extra
+            return JSONResponse({'detail':detail},status_code=409)
 
     @app.post('/api/tasks/{identifier}/workflow',status_code=202)
     @serialized_task_action

@@ -156,3 +156,19 @@ class DeepSeekTests(unittest.TestCase):
             self.assertEqual(connection.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
             stream.read.assert_called_once_with(MAX_RESPONSE_BYTES+1)
             connection.return_value.close.assert_called_once()
+
+class LenientJsonTests(unittest.TestCase):
+    """字符串内的裸换行（模型写多行脚本时常见）应被容错解析，其他错误不放宽。"""
+
+    def test_raw_newline_inside_string_is_escaped(self):
+        from auto_lammps.deepseek import lenient_json
+        text = '{"workflow": "minimize 1e-10 1e-10\nrun 0", "ok": 1}'
+        # 上面的字面量本就是合法转义；这里构造真正的裸换行
+        raw = '{"workflow": "line one' + chr(10) + 'line two", "ok": 1}'
+        self.assertEqual(lenient_json(raw)['workflow'], 'line one' + chr(10) + 'line two')
+
+    def test_other_malformed_json_still_raises(self):
+        from auto_lammps.deepseek import ModelError, lenient_json
+        with self.assertRaises(ModelError):
+            lenient_json('{"a": ')
+
