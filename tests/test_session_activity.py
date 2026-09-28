@@ -79,6 +79,14 @@ class SessionEndpointTests(unittest.TestCase):
         with self.client(activity) as client:
             self.assertEqual(client.get('/api/session/activity', headers={'Host': 'example.org'}).status_code, 403)
 
+    def test_schema_reports_the_copy_of_the_application_that_is_serving(self):
+        """The desktop launcher compares this with the environment its configuration names."""
+        import auto_lammps
+        with self.client() as client:
+            installation = client.get('/api/schema').json()['installation']
+        self.assertEqual(installation['package'], str(Path(auto_lammps.__file__).resolve().parent))
+        self.assertTrue(Path(installation['python']).is_absolute())
+
     def test_page_assets_include_the_session_reporter(self):
         with self.client() as client:
             page = client.get('/')

@@ -46,6 +46,44 @@ def read_config(path):
     return config
 
 
+def interpreter_environment(config):
+    """The configured interpreter's own package directories, asked from that interpreter."""
+    probe = subprocess.run([config['python'], '-I', '-c',
+                            'import json,sysconfig;print(json.dumps(sysconfig.get_paths()))'],
+                           capture_output=True, text=True, cwd=config['state_directory'])
+    if probe.returncode:
+        raise LaunchError('配置的运行环境无法查询自身路径：' + probe.stderr.strip()[-200:])
+    try:
+        paths = json.loads(probe.stdout)
+    except ValueError:
+        raise LaunchError('配置的运行环境返回了无法解析的路径信息。')
+    return [Path(paths[key]) for key in ('purelib', 'platlib') if paths.get(key)]
+
+
+def installed_package(config):
+    """The auto_lammps package the configured interpreter loads, under the service conditions."""
+    probe = subprocess.run([config['python'], '-I', '-c', 'import auto_lammps;print(auto_lammps.__file__)'],
+                           capture_output=True, text=True, cwd=config['state_directory'])
+    if probe.returncode:
+        raise LaunchError('配置的运行环境无法加载应用代码：' + probe.stderr.strip()[-200:])
+    return Path(probe.stdout.strip())
+
+
+def verify_installation(config):
+    """Refuse to run when the configured interpreter does not own the application it loads.
+
+    Catches today's collision: another runtime directory (or a source checkout on sys.path) is
+    what actually gets served, while the configuration claims this environment. The check runs
+    with the same -I and working directory the service itself uses.
+    """
+    package = installed_package(config)
+    environment = interpreter_environment(config)
+    if not any(package.is_relative_to(directory) for directory in environment):
+        raise LaunchError('配置的运行环境加载的 auto_lammps 不在该环境内（实际：%s）。'
+                          '请核对安装位置，不要与其它运行副本混用。' % package)
+    return package
+
+
 def matching_service(config):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     base = f"http://127.0.0.1:{config['port']}/"
@@ -63,6 +101,18 @@ def matching_service(config):
         return False
 
 
+def served_installation(config):
+    """The package the running service says it loaded, when it reports one."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{config['port']}/api/schema", timeout=2) as response:
+            data = json.load(response)
+    except (OSError, ValueError):
+        return ''
+    installation = data.get('installation') if isinstance(data, dict) else None
+    return installation.get('package', '') if isinstance(installation, dict) else ''
+
+
 def occupied(port):
     with socket.socket() as sock:
         sock.settimeout(1)
@@ -73,6 +123,7 @@ def launch(config, open_browser=True, timeout=30):
     state = Path(config['state_directory'])
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(state, 0o700)
+    package = verify_installation(config)
     lock = os.open(state / 'launcher.lock', os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(lock, 'w') as stream:
         # Concurrent desktop clicks serialize; none can submit or duplicate jobs.
@@ -80,6 +131,10 @@ def launch(config, open_browser=True, timeout=30):
         started = False
         if not matching_service(config):
             if occupied(config['port']):
+                served = served_installation(config)
+                if served and served != str(package):
+                    raise LaunchError('端口 %d 上的服务实际运行 %s，与配置的运行环境 %s 不一致。'
+                                      '未关闭任何进程；请先核对安装副本。' % (config['port'], served, package))
                 raise LaunchError('该端口已有不同版本或未就绪的服务。未关闭任何进程；请检查应用版本。')
             log = state / 'application.log'
             fd = os.open(log, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
@@ -100,7 +155,8 @@ def launch(config, open_browser=True, timeout=30):
             started = True
         url = f"http://127.0.0.1:{config['port']}/?release={config['asset_sha256']['app.js'][:12]}#home"
         receipt = {'release': config.get('release', ''), 'url': url, 'started': started,
-                   'checked_at': time.time(), 'ui_sha256': config['asset_sha256']}
+                   'checked_at': time.time(), 'ui_sha256': config['asset_sha256'],
+                   'package': str(package), 'interpreter': config['python']}
         (state / 'last-launch.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
         os.chmod(state / 'last-launch.json', 0o600)
     if open_browser:

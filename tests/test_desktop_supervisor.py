@@ -87,11 +87,13 @@ class SuperviseTests(unittest.TestCase):
         base = dict(config=self.config_path, activity_file=self.state / 'session-activity.json',
                     session_token='tok', connect_seconds=0.2, stale_seconds=0.2,
                     hidden_stale_seconds=0.4, close_grace_seconds=0.1, delegate_wait_seconds=0.1,
-                    poll_seconds=0.02, no_browser=True, no_dialogs=True, no_stop=False)
+                    poll_seconds=0.02, no_browser=True, no_dialogs=True, no_stop=False,
+                    browser_wait_seconds=0.2)
         base.update(overrides)
         return mock.Mock(**base)
 
-    def run_supervise(self, *, started, activity, enabled=True, snapshots=(), no_stop=False):
+    def run_supervise(self, *, started, activity, enabled=True, snapshots=(), no_stop=False,
+                      browser_opens=False, browser_side_effect=None):
         launch = mock.Mock(return_value={'started': started, 'url': 'http://127.0.0.1:8799/?release=abc#home',
                                          'release': 'synthetic-test'})
         sequence = list(snapshots)
@@ -104,8 +106,8 @@ class SuperviseTests(unittest.TestCase):
              mock.patch.object(supervisor, 'port_listening', return_value=True), \
              mock.patch.object(supervisor, 'read_activity', side_effect=read), \
              mock.patch.object(supervisor, 'stop_service', side_effect=lambda path: (self.stops.append(str(path)), (0, '已停止'))[1]), \
-             mock.patch.object(supervisor.webbrowser, 'open') as browser:
-            code = supervisor.supervise(self.args(no_stop=no_stop))
+             mock.patch.object(supervisor.webbrowser, 'open', side_effect=browser_side_effect) as browser:
+            code = supervisor.supervise(self.args(no_browser=not browser_opens, no_stop=no_stop))
         return code, launch, browser
 
     def resolved_config(self):
@@ -152,6 +154,37 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.stops, [])
         self.assertFalse(self.receipt()['stopped'])
+
+    def test_a_blocking_browser_call_never_stalls_supervision(self):
+        """The stdlib waits for a generic browser process; supervision must not wait with it."""
+        import threading
+        gate = threading.Event()
+        closed = {'sessions': {}, 'closed_session': 'tok'}
+        code, launch, browser = self.run_supervise(
+            started=True, activity=closed, browser_opens=True,
+            browser_side_effect=lambda url: gate.wait(30),
+            snapshots=[{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.stops, [self.resolved_config()])
+        self.assertEqual(self.receipt()['reason'], 'page_closed')
+        browser.assert_called_once()
+        self.assertIn('session=', browser.call_args.args[0])
+        gate.set()
+
+
+    def test_a_second_entry_delegates_without_stopping_the_running_service(self):
+        """A second click reuses the service and its page; it must not stop what it did not start."""
+        with mock.patch.object(supervisor, 'acquire_lock', return_value=False), \
+             mock.patch.object(supervisor.launch_local, 'launch',
+                               return_value={'started': False, 'url': 'http://127.0.0.1:8799/#home'}) as launch, \
+             mock.patch.object(supervisor, 'stop_service') as stopper, \
+             mock.patch.object(supervisor.webbrowser, 'open', return_value=True) as browser:
+            code = supervisor.supervise(self.args(no_browser=False))
+        self.assertEqual(code, 0)
+        stopper.assert_not_called()
+        self.assertEqual(self.receipt()['role'], 'delegate')
+        self.assertFalse(launch.call_args.kwargs['open_browser'])
+        self.assertTrue(browser.called)
 
 
 if __name__ == '__main__':

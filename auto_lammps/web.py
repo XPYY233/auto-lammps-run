@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -419,6 +420,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         reference_status = reference_model_client.calls.status() if reference_model_client else None
         return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': False,
+                # Which copy of the application is really serving this port; the desktop launcher
+                # refuses to run when it differs from the environment its configuration names.
+                'installation': {'package': str(Path(__file__).resolve().parent), 'python': sys.executable},
                 'automatic_workflow': workflow.availability() if workflow else {'configured':False,'enabled':False},
                 'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else

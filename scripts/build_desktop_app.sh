@@ -104,18 +104,31 @@ if [ ! -f "\$SCRIPTS/desktop_supervisor.py" ] || [ ! -f "\$SCRIPTS/stop_local.py
 fi
 finish() {
   code=\$?
-  "\$PY" -I "\$SCRIPTS/stop_local.py" --config "\$CONFIG" >>"\$LOG" 2>&1 || true
-  case "\$code" in
-    0|129|130|143) ;;
-    *) osascript -e 'display alert "Auto-LAMMPS 入口异常退出" message "本地服务已按身份校验收尾，未影响其它实例。详见运行记录中的 desktop-entry.log。" giving up after 45' >/dev/null 2>&1 & ;;
-  esac
+  # The supervisor stops whatever it owns (页面关闭、Cmd+Q、自身异常). Only an abnormal death of
+  # the supervisor (killed, crash) can leave that service behind, so only then does the entry
+  # stop it here - through the same identity-checked stopper. 0/1 mean "nothing was left".
+  if [ "\$code" -ge 4 ]; then
+    "\$PY" -I "\$SCRIPTS/stop_local.py" --config "\$CONFIG" >>"\$LOG" 2>&1 || true
+    osascript -e 'display alert "Auto-LAMMPS 入口异常退出" message "本地服务已按身份校验收尾，未影响其它实例。详见运行记录中的 desktop-entry.log。" giving up after 45' >/dev/null 2>&1 &
+  fi
   return 0
 }
 trap 'finish' EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-trap 'exit 129' HUP
-"\$PY" -I "\$SCRIPTS/desktop_supervisor.py" --config "\$CONFIG" >>"\$LOG" 2>&1
+"\$PY" -I "\$SCRIPTS/desktop_supervisor.py" --config "\$CONFIG" >>"\$LOG" 2>&1 &
+child=\$!
+# Cmd+Q / 注销时把信号交给监督进程，由它按身份校验收尾，而不是直接丢下子进程。
+forward() { kill -TERM "\$child" 2>/dev/null; }
+trap 'forward' TERM INT HUP
+code=0
+tries=0
+while :; do
+  wait "\$child"; code=\$?
+  kill -0 "\$child" 2>/dev/null || break
+  tries=\$((tries+1))
+  if [ "\$tries" -ge 40 ]; then kill -KILL "\$child" 2>/dev/null; code=137; break; fi
+  sleep 0.5
+done
+exit "\$code"
 ENTRY
   chmod 755 "$bundle/Contents/MacOS/$name"
   cat > "$bundle/Contents/Resources/entry.json" <<RECEIPT

@@ -22,6 +22,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import webbrowser
@@ -118,7 +119,8 @@ class Journal:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
-        sys.stderr.write(line)
+        if sys.stderr.isatty():  # the entry already redirects the log file to stderr
+            sys.stderr.write(line)
 
 
 def announce(title, message, *, alert=False, quiet=False):
@@ -146,18 +148,20 @@ def parse(argv=None):
     parser.add_argument('--delegate-wait-seconds', type=float, default=15.0,
                         help='已有入口时的等待时间；超时则只复用服务并打开页面')
     parser.add_argument('--poll-seconds', type=float, default=2.0)
+    parser.add_argument('--browser-wait-seconds', type=float, default=5.0,
+                        help='交给浏览器启动后最多等待多久（已有入口的本次入口用）')
     parser.add_argument('--no-browser', action='store_true', help='只监督，不打开浏览器（测试用）')
     parser.add_argument('--no-dialogs', action='store_true', help='不显示系统通知/提示（测试用）')
     parser.add_argument('--no-stop', action='store_true', help='不调用停止器（仅离线测试可用）')
     return parser.parse_args(argv)
 
 
-def acquire_lock(stream, wait_seconds):
+def acquire_lock(descriptor, wait_seconds):
     """Take the entry lock now, or wait briefly for the current entry to finish."""
     deadline = time.monotonic() + wait_seconds
     while True:
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except OSError:
             if time.monotonic() >= deadline:
@@ -165,10 +169,37 @@ def acquire_lock(stream, wait_seconds):
             time.sleep(0.5)
 
 
+def open_page(url, journal, join_seconds=0.0):
+    """Open the page without ever letting a browser launcher stall supervision.
+
+    ``webbrowser`` waits for the browser process when it uses a generic launcher (the BROWSER
+    environment variable or a wrapper script), so the call runs in a daemon thread: watching the
+    activity file must continue no matter how the browser was started. A short ``join_seconds``
+    lets a process that exits immediately (the delegate entry) give the launcher time to start.
+    """
+    def run():
+        try:
+            if not webbrowser.open(url):
+                journal.write('浏览器未能打开页面，请手动访问：' + url)
+        except Exception as error:  # a browser failure must never stop supervision
+            journal.write(f'浏览器打开失败（{error}）；请手动访问：{url}')
+
+    thread = threading.Thread(target=run, name='open-page', daemon=True)
+    thread.start()
+    if join_seconds:
+        thread.join(join_seconds)
+    return thread
+
+
 def supervise(args):
     quiet = args.no_dialogs or bool(os.environ.get('AUTO_LAMMPS_SILENT'))
     config_path = Path(args.config).expanduser().resolve()
-    config = launch_local.read_config(config_path)
+    try:
+        config = launch_local.read_config(config_path)
+    except (launch_local.LaunchError, OSError, ValueError) as error:
+        # Nothing was started from this configuration, so nothing may be stopped either.
+        announce('Auto-LAMMPS 未能启动', str(error), alert=True, quiet=quiet)
+        return 1
     state = Path(config['state_directory']).expanduser()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     journal = Journal(state / 'desktop-entry.log')
@@ -183,12 +214,17 @@ def supervise(args):
         os.chmod(temporary, 0o600)
         os.replace(temporary, receipt_path)
 
-    lock = os.fdopen(os.open(state / 'desktop-entry.lock', os.O_CREAT | os.O_RDWR, 0o600), 'w')
-    if not acquire_lock(lock, args.delegate_wait_seconds):
+    # A raw descriptor: the lock lives until this process exits, without an unclosed file object.
+    descriptor = os.open(state / 'desktop-entry.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    if not acquire_lock(descriptor, args.delegate_wait_seconds):
         # A long-running entry already supervises this application: reuse the service and page.
-        result = launch_local.launch(config, open_browser=not args.no_browser)
+        # This instance owns nothing, so it must not stop the service that entry started.
+        result = launch_local.launch(config, open_browser=False)
         save(role='delegate', started=result['started'], url=result['url'], monitoring='primary-entry', stopped=False)
         journal.write(f"已有入口在监督本应用；本次只复用并打开页面：{result['url']}")
+        if not args.no_browser:
+            # This instance exits right away, so give the launcher a moment to start the page.
+            open_page(result['url'], journal, join_seconds=args.browser_wait_seconds)
         return 0
 
     activity_path = Path(args.activity_file).expanduser() if args.activity_file else state / 'session-activity.json'
@@ -215,7 +251,7 @@ def supervise(args):
     url = session_url(result['url'], token)
     Path(activity_path).unlink(missing_ok=True)
     if not args.no_browser:
-        webbrowser.open(url)
+        open_page(url, journal)
     watcher = Watch(token, visible_stale=args.stale_seconds, hidden_stale=args.hidden_stale_seconds,
                     close_grace=args.close_grace_seconds)
     # From here the entry owns this run: any exit must not leave the service behind. A reused
@@ -303,8 +339,16 @@ def watch_loop(args, config, watcher, activity_path, journal, asked, owner):
 
 
 def main(argv=None):
+    """Exit codes the entry wrapper relies on: 0/1 mean "nothing was left running"."""
     os.umask(0o077)
-    return supervise(parse(argv))
+    try:
+        return supervise(parse(argv))
+    except SystemExit:
+        raise
+    except BaseException:  # an unexpected crash must be visible, not a silent exit
+        import traceback
+        traceback.print_exc()
+        return 4
 
 
 if __name__ == '__main__':
