@@ -89,7 +89,7 @@ class DeepSeekTests(unittest.TestCase):
         self.assertNotIn('SECRET_CANARY', json.dumps(history))
         with self.assertRaisesRegex(ModelError, 'request_already_reserved'):
             client.complete_json('a'*32, MESSAGES)
-        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(self.transport.call_count, 2, '完全没有响应的传输失败现在做一次有界重试，重试次数如实记录')
 
     def test_rejection_body_and_missing_key_do_not_leak(self):
         client = self.client(2, transport=Mock(return_value=(401, b'SECRET_CANARY')))

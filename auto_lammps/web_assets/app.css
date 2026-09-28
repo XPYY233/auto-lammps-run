@@ -690,3 +690,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .resource-tab-notice p{margin:0;color:var(--muted);font-size:13px}
 
 .request-open{display:block;padding:10px 12px;margin:8px 0;background:#f7fafd;border:1px solid #e3ecf5;border-radius:8px}.request-open .request-label{display:block;font-size:12px;color:#5a7893;margin-bottom:4px}.request-open #task-prompt{margin:0;white-space:pre-wrap;line-height:1.65;color:#22384d;font-size:13px}
+
+.clarify-form{display:flex;flex-direction:column;gap:10px;margin:8px 0}
+.clarify-item{background:#fff;border:1px solid #e3ecf5;border-radius:8px;padding:8px 10px}
+.clarify-question{margin:0 0 4px;font-weight:600;color:#22384d;font-size:13px}
+.clarify-item textarea{width:100%;box-sizing:border-box;margin-top:6px;font-size:13px}

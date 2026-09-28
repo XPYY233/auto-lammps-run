@@ -111,7 +111,7 @@ class ReferenceWebTests(unittest.TestCase):
         self.assertEqual(self.http.get(self.url).json()['requests'][0]['state'], 'unknown')
         self.assertEqual(self.recover().status_code, 422)
         self.assertEqual(self.post().status_code, 422)
-        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(self.transport.call_count, 2, '完全没有响应的传输失败现在做一次有界重试，重试次数如实记录')
         self.doc = self.store.create('Zero budget', 'Synthetic source', 'reproduction')
         self.url = f"/api/tasks/{self.doc['id']}/reference-evidence"
         self.client = DeepSeekClient(ModelCalls(self.root/'zero.sqlite', DeepSeekConfig('synthetic'),
@@ -120,7 +120,7 @@ class ReferenceWebTests(unittest.TestCase):
         self.assertEqual(self.post(http).status_code, 422)
         self.assertEqual(http.get(self.url).json()['requests'][0]['state'], 'unresolved')
         self.assertEqual(self.recover(http).status_code, 422)
-        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(self.transport.call_count, 2, '额度耗尽后不再新增调用；基数已含一次有界重试')
 
 
 if __name__ == '__main__':

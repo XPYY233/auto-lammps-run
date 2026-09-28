@@ -245,3 +245,35 @@ class AgentCandidateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class PromptContractConformanceTests(unittest.TestCase):
+    """提示词必须覆盖校验器可枚举的规则，否则规则会再次漂移（见 docs/CANDIDATE_CONTRACT_AUDIT.md）。"""
+
+    def prompt(self):
+        from auto_lammps.agent_candidates import candidate_messages
+        messages = candidate_messages('Synthetic permitted task', units='metal',
+                                      resource_summaries=[], max_atoms=100)
+        return ' '.join(item['content'] for item in messages)
+
+    def test_every_enumerable_validator_rule_is_stated(self):
+        from auto_lammps.analysis import UNITS, METHODS, MAX_TABLES, MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS
+        from auto_lammps.agent_candidates import COMMANDS, FIX_STYLES, COMPUTE_STYLES
+        text = self.prompt()
+        for unit in UNITS:
+            self.assertIn(unit, text, '单位未在提示词中列出: ' + unit)
+        for method in METHODS:
+            self.assertIn(method, text, '分析方法未在提示词中列出: ' + method)
+        for name in COMMANDS | FIX_STYLES | COMPUTE_STYLES:
+            self.assertIn(name, text, '允许的 LAMMPS 命令/样式未在提示词中列出: ' + name)
+        for limit in (MAX_TABLES, MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS):
+            self.assertIn(str(limit), text, '数量上限未在提示词中给出: ' + str(limit))
+        for phrase in ('columns', 'analysis.files', 'verbatim', 'cubic_axes', '# columns:', '# units:'):
+            self.assertIn(phrase, text, '结构性规则未在提示词中说明: ' + phrase)
+
+    def test_limits_come_from_the_validator_not_a_copy(self):
+        from auto_lammps import analysis, analysis_v2, agent_candidates
+        self.assertEqual(analysis_v2.MAX_TABLES, analysis.MAX_TABLES)
+        text = self.prompt()
+        self.assertIn(str(analysis.MIN_COLUMNS), text)
+        self.assertIn(str(analysis.MAX_COLUMNS), text)
+

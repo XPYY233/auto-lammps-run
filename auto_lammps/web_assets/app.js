@@ -665,12 +665,39 @@ async function refreshCandidate() {
       node('span',`${candidateStatus(candidate).label} · 记录 ${String(candidate.id).slice(0,8)}`));
     const detail=String(candidate?.result?.detail || candidate?.result?.message || '').trim();
     if(detail) attention.append(node('p',detail,'attention-detail'));
-    const questions=(candidate?.result?.questions || []).slice(0,3);
+    const questions=candidate?.result?.questions || [];
     if(questions.length){
-      const list=node('ul',undefined,'attention-questions');
-      for(const question of questions)list.append(node('li',String(question).slice(0,260)));
-      attention.append(list);
-      if((candidate.result.questions||[]).length>3)attention.append(node('p',`另有 ${(candidate.result.questions||[]).length-3} 条待处理事项，展开后可看全部。`,'subtle'));
+      // 像 harness 一样逐条提问：显示问题、原因与建议，并给出回答位置；提交后循环直到方案准备完毕。
+      const form=node('div',undefined,'clarify-form');
+      questions.forEach((question,index)=>{
+        const item=node('div',undefined,'clarify-item');
+        item.append(node('p',`${index+1}. ${questionText(question)}`,'clarify-question'));
+        if(question&&typeof question==='object'&&question.why)item.append(node('p','为什么问：'+question.why,'subtle'));
+        const answer=node('textarea');answer.rows=2;answer.dataset.questionIndex=String(index);
+        answer.placeholder='在此回答这一条；留空表示跳过';
+        if(question&&typeof question==='object'&&question.suggestion){
+          const line=node('p','建议：'+question.suggestion,'subtle');
+          const use=node('button','采用建议','quiet');use.type='button';
+          use.onclick=()=>{answer.value=question.suggestion;};
+          line.append(' ',use);
+          item.append(line);
+        }
+        item.append(answer);
+        form.append(item);
+      });
+      attention.append(form);
+      const submit=node('button','提交答复并继续生成方案','primary');submit.type='button';
+      submit.onclick=()=>action(async()=>{
+        const inputs=[...document.querySelectorAll('#candidate-attention textarea[data-question-index]')];
+        const values=inputs.map(input=>input.value);
+        const answers=buildClarificationAnswers(questions,values);
+        if(!answers.trim()){notice('请至少回答一条，或直接使用下方的引导输入框。',true);return;}
+        submit.disabled=true;
+        await api(`/api/tasks/${current.id}/candidate`,{revision:current.revision,answers});
+        await afterChange('已提交答复；应用内 AI 会带着你的答复继续组织方案。');
+        await refreshCandidate();
+      });
+      attention.append(submit);
     }
     const jump=node('button','查看需要处理的内容 ↓','quiet');jump.type='button';
     jump.onclick=()=>{$('#advanced-task').open=true;$('#candidate-panel').scrollIntoView({block:'start'});};
@@ -720,7 +747,9 @@ $('#prepare-candidate').onclick=()=>action(async()=>{
   $('#prepare-candidate').disabled=true;
   const automatic=schema.automatic_workflow?.configured;
   $('#candidate-outcome').textContent='正在提交重新准备请求…';
-  const answers=($('#candidate-answers')?.value||'').trim();
+  const inputs=[...document.querySelectorAll('#candidate-attention textarea[data-question-index]')];
+  const perQuestion=inputs.length?buildClarificationAnswers(candidateRecord?.result?.questions||[],inputs.map(i=>i.value)):'';
+  const answers=(perQuestion||$('#candidate-answers')?.value||'').trim();
   try {
     if(answers) await api(`/api/tasks/${id}/candidate`,{revision:current.revision,answers});
     else await api(`/api/tasks/${id}/${automatic?'workflow':'candidate'}`,{revision:current.revision});
@@ -1547,6 +1576,20 @@ $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();awai
 // Shared navigation follows the approved home; all counts come from saved evidence.
 let taskFilter='all', selectedPlot='full', discussionRequest=null;
 function taskFinished(t){return Boolean(t.user_finished)||Boolean((t.lifecycle_events||[]).some(e=>e&&e.action==='finish'));}
+
+function questionText(question){return typeof question==='string'?question:String(question?.question||'');}
+
+function buildClarificationAnswers(questions,values){
+  const lines=[];
+  (questions||[]).forEach((question,index)=>{
+    const answer=String((values||[])[index]??'').trim();
+    if(!answer) return;
+    lines.push(`Q${index+1}: ${questionText(question)}`);
+    lines.push(`A${index+1}: ${answer}`);
+  });
+  return lines.join('\n');
+}
+
 function taskState(t){
   if(t.scoped_acceptance?.status==='accepted_by_user') return 'validated';
   if(taskFinished(t)) return 'finished';

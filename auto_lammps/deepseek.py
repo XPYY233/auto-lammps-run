@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import http.client
 import json
+import time
 import os
 from pathlib import Path
 import re
@@ -273,7 +274,19 @@ class DeepSeekClient:
                     or any(ord(char) < 33 or ord(char) > 126 for char in key)):
                 raise ModelError('model_key_missing_or_invalid')
             receipt['state'] = 'unknown'
-            status, content = self.transport(body, key, self.calls.config.timeout_seconds)
+            # 仅对"没有拿到任何响应"的传输失败做一次有界重试：这类失败最常见的是瞬时网络问题，
+            # 不重试会把整个任务永久卡住（记录仍如实保留重试次数）。
+            attempts = 0
+            while True:
+                attempts += 1
+                try:
+                    status, content = self.transport(body, key, self.calls.config.timeout_seconds)
+                    break
+                except Exception:
+                    if attempts >= 2:
+                        raise
+                    time.sleep(2)
+            receipt['transport_attempts'] = attempts
             if type(status) is not int or not isinstance(content, bytes) or len(content) > MAX_RESPONSE_BYTES:
                 raise ModelError('invalid_transport_response')
             receipt.update(http_status=status, response_sha256=sha256(content))

@@ -14,6 +14,8 @@ from .ledger import Resources
 from .manifest import canonical, freeze, private_directory, sha256
 from .structures import build_structure, geometry_runtime, validate_structure
 from .analysis_v2 import adapter_identity, plan_adapter, validate_plan
+from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX_TABLES,
+                       MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
 GENERATOR_VERSION = 4
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
@@ -109,7 +111,14 @@ def validate_proposal(value, *, max_atoms, output_layout="isolated"):
     if not isinstance(questions, list) or len(questions) > 30:
         raise CandidateError('Invalid clarification questions')
     for question in questions:
-        _text(question, 2000)
+        # 既接受纯文本问题，也接受 {question, why, suggestion}，便于界面逐条提问并给出建议。
+        if isinstance(question, dict):
+            _text(question.get('question'), 2000)
+            for key in ('why', 'suggestion'):
+                if question.get(key) is not None:
+                    _text(question[key], 1000)
+        else:
+            _text(question, 2000)
     if questions:
         if any(value[key] is not None for key in ('structure', 'potential_pin', 'workflow', 'analysis')):
             raise CandidateError('Clarification proposals must not contain a runnable candidate')
@@ -151,6 +160,8 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'lattice constants, masses, temperature, strain, seeds, steps or other missing scientific choices. '
         'If a necessary condition is missing or the supported tools cannot express the task, give questions '
         'and set structure, potential_pin, workflow, analysis to null. Do not reduce the scientific scope. '
+        'When you do ask, each question may be a plain string or an object '
+        '{"question":"...","why":"...","suggestion":"..."} where suggestion is a concrete default the user can accept. '
         'The two modes are mutually exclusive and this is checked: when questions is non-empty every one of '
         'structure, potential_pin, workflow and analysis must be null, and when a plan is given questions must '
         'be an empty list. Never return questions together with a runnable plan. '
@@ -181,7 +192,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
         'analysis is {quantity,method,files,plan}; method describes analysis, not executable Python. '
         'plan is {tables,operations}. Each table is {file,columns:[{name,unit},...]}. Supported units: '
-        '1, step, K, bar, atm, Pa, MPa, GPa, eV, kcal/mol, angstrom, angstrom^2, nm, nm^2, ps, fs, g/cm^3. '
+        + ', '.join(sorted(ANALYSIS_UNITS)) + '. '
         'Each numeric table must start with exactly "# columns: <space-separated names>" and '
         '"# units: <space-separated units>", then finite numeric rows with those columns. '
         'Use print or fix ave/time scalar title1/title2 to write these headers. '
@@ -193,11 +204,16 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'integer stride before execution; all expected samples must be present. Native headers do '
         'not verify units: declare units from the physical workflow, never infer them from variable names. '
         'Do not declare vector/block output as scalar. Both table formats may share a plan. '
-        'Each operation is {id,method,file,x,y,window:[min,max]}; method is summary, last, or linear_fit. '
-        'Every analysis table must declare at least two and at most sixteen labeled columns, because every '
-        'operation needs both an x column and a y column: a table with a single column is rejected outright. '
-        'Include the x column your operation will use (for example a step or timestep column) next to the value '
-        'column. '
+        'Each operation is {id,method,file,x,y,window:[min,max]}; method is one of '
+        + ', '.join(ANALYSIS_METHODS) + '. '
+        + f'Limits enforced by the validator: 1 to {MAX_TABLES} tables; each table {MIN_COLUMNS} to {MAX_COLUMNS} '
+        + f'labeled columns; 1 to {MAX_OPERATIONS} operations; x and y must differ and both be declared columns of '
+        + 'that table; window is an inclusive [min,max] with min <= max; the table file must be one of '
+        + 'analysis.files and every workflow write must use the declared prefix path. '
+        + f'Every analysis table must declare between {MIN_COLUMNS} and {MAX_COLUMNS} labeled columns, because '
+        + 'every operation needs both an x column and a y column: a table with a single column is rejected '
+        + 'outright. Include the x column your operation will use (for example a step or timestep column) next '
+        + 'to the value column. '
         'The analysis contract is checked strictly, so satisfy it exactly: (a) analysis.files lists every '
         'analysis file the workflow writes, each a distinct flat filename with no directory part; (b) every '
         'table file and every operation file must be one of those declared analysis.files, and an operation '

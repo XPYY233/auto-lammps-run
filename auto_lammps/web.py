@@ -150,6 +150,10 @@ class TargetSelection(Revision):
     exclusion_reason: str = Field(max_length=2000)
 
 
+class ConditionInput(Revision):
+    attempt: int = Field(default=0, ge=0, le=20)
+
+
 class CandidateInput(Revision):
     answers: str | None = Field(default=None, max_length=4000)
 
@@ -773,7 +777,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                         headers={'Content-Disposition': f'attachment; filename="{name}"'})
 
     @app.post('/api/tasks/{identifier}/complete-conditions')
-    def complete_conditions(identifier: str, data: Revision):
+    def complete_conditions(identifier: str, data: ConditionInput):
         if model_client is None:
             return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
         # The completion must know which potentials are actually installed, otherwise it
@@ -788,7 +792,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             except (ValueError, KeyError, TypeError, OSError):
                 resources = None
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
-                                           operation='complete-conditions-v1')))[:32]
+                                           operation='complete-conditions-v1',
+                                           attempt=getattr(data, 'attempt', 0))))[:32]
         guidance = [item['note'] for item in store.guidance(identifier)]
         return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources, guidance)
 
@@ -822,7 +827,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return store.freeze(identifier, data.revision)
 
     @app.post('/api/tasks/{identifier}/generate-conditions')
-    def generate(identifier: str, data: Revision):
+    def generate(identifier: str, data: ConditionInput):
         if model_client is None:
             return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
         doc = store.get(identifier)

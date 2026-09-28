@@ -9,6 +9,8 @@ const source=fs.readFileSync('auto_lammps/web_assets/app.js','utf8');
 const panelCode=source.slice(source.indexOf('const candidateStatuses = {'),source.indexOf("$('#prepare-candidate').onclick="));
 const labelCode=source.slice(source.indexOf('function acceptanceLabel('),source.indexOf('function renderFlow('));
 const nodeCode=source.slice(source.indexOf('function node(tag, value, className) {'),source.indexOf('function notice('));
+// 逐条问答的纯函数位于面板切片之外，必须一并注入沙箱，否则渲染路径会因未定义而中断。
+const clarifyCode=source.slice(source.indexOf('function questionText('),source.indexOf('function taskState(t)'));
 const TASK='a'.repeat(32);
 
 function element(tag){
@@ -38,6 +40,7 @@ function setupPanel({status='conditions_frozen',automatic=false,candidatePrepara
     action:async work=>work(),
   });
   vm.runInContext(nodeCode,context);
+  vm.runInContext(clarifyCode,context);
   vm.runInContext(panelCode,context);
   return {context,elements,calls,notices,documents};
 }
@@ -218,4 +221,15 @@ test('已删除的硬编码结论和反向的助手文案不再出现',async()=>
   assert.ok(!source.includes('基准已验收 · 用户确认'),'不得硬编码基准验收结论');
   assert.ok(source.includes("result.enabled?'可围绕已有数据提问"),'结果助手启用时应提示可提问');
   assert.ok(source.includes('结果助手尚未启用'),'未启用时应如实说明');
+});
+
+test('逐条问答按问题组装答复，跳过空回答，并支持结构化问题',()=>{
+  const context=vm.createContext({});
+  const code=source.slice(source.indexOf('function questionText('),source.indexOf('function taskState(t)'));
+  vm.runInContext(code,context);
+  assert.equal(context.questionText('纯文本问题'),'纯文本问题');
+  assert.equal(context.questionText({question:'结构化问题'}),'结构化问题');
+  assert.equal(context.buildClarificationAnswers(['q1',{question:'q2'}],['a1','   ']),'Q1: q1\nA1: a1');
+  assert.equal(context.buildClarificationAnswers([{question:'q'}],['x']),'Q1: q\nA1: x');
+  assert.equal(context.buildClarificationAnswers(['q'],[]),'');
 });
