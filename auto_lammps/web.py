@@ -447,9 +447,35 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 'candidate_preparation': candidate_service.availability() if candidate_service else
                     {'enabled': False, 'reason': '方案准备服务尚未配置。'}}
 
+    def reproduction_status(document):
+        """A user-accepted scope is a real reproduction result; science stays gated.
+
+        Previously this version never emitted 'reproduced' at all, so a paper the user
+        had accepted kept showing 复现中 and the in-app AI described it as unfinished.
+        The accepted scope comes from the same closeout the task page shows.
+        """
+        if not closeouts or document.get('status') == 'pending':
+            return document
+        accepted = []
+        for task in document.get('tasks') or []:
+            try:
+                acceptance = (closeouts.get(task['id']) or {}).get('acceptance') or {}
+            except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+                continue
+            if acceptance.get('status') == 'accepted_by_user':
+                accepted.append({'task': task['id'], 'scope': acceptance.get('scope'),
+                                 'date': acceptance.get('date')})
+        if not accepted:
+            return document
+        scopes = '；'.join((item['scope'] or '').rstrip('。；') for item in accepted if item.get('scope'))
+        return document | {'status': 'reproduced',
+                           'stage': ('用户已验收的复现范围：' + (scopes or '（范围未记录）')
+                                     + '。该范围是基准工况；论文其余工况、独立科学核验与评分发布尚未完成。'),
+                           'reproduction_accepted': accepted}
+
     @app.get('/api/papers')
     def paper_list():
-        return papers.list()
+        return papers.list(transform=reproduction_status)
 
     @app.get('/api/resource-discoveries')
     def resource_discoveries():
@@ -460,7 +486,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/papers/{identifier}')
     def paper_get(identifier: str):
-        return papers.get(identifier)
+        return reproduction_status(papers.get(identifier))
 
     @app.post('/api/papers/{identifier}/select')
     def paper_select(identifier: str, data: Revision):
