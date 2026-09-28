@@ -94,6 +94,7 @@ footer{display:flex;justify-content:space-between;color:#8795ac;font-size:10px;p
 .task-top h1{font-size:23px;overflow-wrap:anywhere}
 .badge{border-radius:6px;background:#fff4db;color:#92681f;font-size:11px;padding:4px 8px;display:inline-block;white-space:nowrap;align-self:start}
 .badge.confirmed,.badge.completed{background:#e6f6ee;color:#288767}
+.badge.accepted{background:#e6f6ee;color:#288767}
 .badge.pending{background:#eef4ff;color:#456da8}
 .badge.failed,.badge.conflict,.badge.missing{background:#fff0ee;color:#ad5a4e}
 .request{font-size:13px;color:#5e7190;margin:10px 0}
