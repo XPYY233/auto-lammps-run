@@ -657,14 +657,29 @@ async function refreshPlanReview(){
     files.append(block);
   }
   const approve=$('#plan-approve');
-  approve.disabled=Boolean(review.approved);
-  approve.textContent=review.approved?'已批准（等待提交）':'批准并提交 HPC';
+  const note=$('#plan-note');
+  // 按钮永远给出可执行动作与真实结果：批准→提交；已提交→显示状态；失败→可重试并显示具体原因。
+  let execution={};
+  try { execution=await api(`/api/tasks/${current.id}/execution`); } catch(error) { execution={}; }
+  const job=execution.job||{};
+  const dispatched=Boolean(job.job_id);
+  const active=['queued','running','waiting','dispatching'].includes(job.state);
+  approve.disabled=dispatched||active;
+  approve.textContent=dispatched?'已提交，等待计算':(active?'提交中…':(review.approved?'提交计算':'批准并提交 HPC'));
+  const reason=job.reason?('　当前状态：'+(job.label||job.state||'')+'（'+job.reason+'）'):'';
+  note.textContent=(dispatched?'已产生作业号 '+job.job_id+'。':(review.approved?'方案已批准，点“提交计算”即提交真实计算。':'批准后应用才会提交真实计算；方案一旦变化需要重新批准。'))
+    +' 方案变化需要重新批准。'+reason;
   approve.onclick=()=>action(async()=>{
     approve.disabled=true;
-    await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
+    if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
     const automatic=schema.automatic_workflow?.configured;
-    await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
-    await afterChange('已批准；应用会按这道流程提交并自动跟进计算状态。');
+    try {
+      await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
+      await afterChange('已提交申请；应用会提交 HPC 并自动跟进状态。');
+    } catch(error) {
+      // 失败必须说清原因，并保留可重试状态（按钮不会永久变灰）。
+      await afterChange('提交未通过：'+error.message);
+    }
     await refreshPlanReview(); await refreshCandidate();
   });
   $('#plan-revise').onclick=()=>action(async()=>{

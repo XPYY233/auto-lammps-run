@@ -975,3 +975,15 @@ Issue #120 交互审计：目标选择已有前置规则，但网页冻结按钮
 → `Candidate provenance or supported analysis is incomplete`。
 因此下一步只有一件事：得到一份**带合法 `analysis.plan`** 的已准备方案
 （契约现已由校验器派生 + 内嵌合法样例 + 最多 3 轮自动修复），随后批准并提交即可产生作业号。
+
+### 追加：界面布局根因与"已批准"按钮
+
+- **布局根因**（用户两次截图均反映）：`.research-main` 是 grid，其子项默认 `min-width:auto`，
+  我新增的脚本/JSON 预览把中间栏撑宽 → 横向滚动、右栏被"压住"。已修：
+  `.research-main>*{min-width:0}`、`.panel{min-width:0}`、`.task-rail{min-width:0}`、
+  预览块 `white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%`。
+- **"已批准"按钮**：原来批准后被禁用、不显示后续结果。现改为**永远给出可执行动作**：
+  未批准→"批准并提交 HPC"；已批准→"提交计算"；已提交→"已提交，等待计算"；
+  失败→可重试且按钮下方显示**具体原因**（不再出现"点了没反应"）。
+- 最后一道门（未过）：授权要求候选带**完整数值分析计划**（`plan_adapter(analysis.plan)`），
+  当前生成的方案在写路径/分析表契约上仍会失败；这是提交前唯一剩余项。
