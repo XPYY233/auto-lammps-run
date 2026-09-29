@@ -102,7 +102,8 @@ async function openTask(id) {
   window.scrollTo({top:0});
   await listTasks();
   await renderHistory();
-  await refreshCandidate(); await refreshActivity(); await refreshGuidance(); await refreshPlanReview();
+  await refreshCandidate(); await refreshGuidance(); await refreshPlanReview();
+  if($('#ai-activity-panel')?.open) await refreshActivity();
   await refreshResults();
   await refreshReferenceHistory();
   await refreshWorkspace();
@@ -1651,7 +1652,10 @@ for(const id of ['top-help','home-help'])$('#'+id).onclick=()=>requestRoute('#he
 $('#mode-research').onclick=()=>setMode('research');$('#mode-reproduction').onclick=()=>setMode('reproduction');
 $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-view').hidden)taskCards();});};
 
-bind('ai-activity-refresh',()=>action(refreshActivity));bind('guidance-send',()=>action(sendGuidance));
+// 展开时自动加载活动明细（收起时不请求）。
+const activityPanel=document.getElementById('ai-activity-panel');
+if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)action(refreshActivity);};
+bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();action(refreshActivity);});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
 

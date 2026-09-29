@@ -711,3 +711,17 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .plan-code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;max-height:320px;overflow:auto}
 .plan-edit{max-width:100%}
 #plan-summary,#plan-files{min-width:0;overflow-wrap:anywhere}
+
+/* AI 活动列表：此前样式未写入，导致标题与时间挤在一起。 */
+details#ai-activity-panel>summary{cursor:pointer;display:flex;align-items:center;gap:10px;margin:0}
+details#ai-activity-panel>summary h2{margin:0;font-size:15px}
+details#ai-activity-panel>summary::-webkit-details-marker{display:none}
+details#ai-activity-panel>summary .subtle{flex:1;font-size:11px}
+details#ai-activity-panel[open]>summary{margin-bottom:12px}
+.ai-activity-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.ai-activity-list li{border-left:2px solid #e3ecf5;padding:2px 0 2px 10px}
+.ai-activity-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.ai-activity-head strong{font-size:12px;color:#22384d}
+.ai-activity-head small{font-size:10px;color:#94a0b2}
+.ai-activity-list p{margin:4px 0 0;overflow-wrap:anywhere}
+.attention-detail{margin:4px 0 0;font-size:12px;color:#ad5a4e;background:#fff6f5;border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
