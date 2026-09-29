@@ -18,11 +18,12 @@ ACTIVE={'queued','running','waiting'}
 PENDING_APPROVAL={'awaiting_approval'}
 WORKABLE=ACTIVE|PENDING_APPROVAL
 # 记账类事件不参与状态判定（否则会把已完成/待处理的作业顶成未知状态）。
-BOOKKEEPING={'config_rebased'}
+BOOKKEEPING={'config_rebased','request_replaced','recheck_failed'}
 LABELS={'queued':'等待执行','running':'核验许可并推进计算','waiting':'自动跟进计算',
         'analyzed':'数值分析完成','analysis_failed':'分析未完成','diagnostics_saved':'计算未成功，诊断已保存',
         'attention':'执行需要核对','rejected':'提交被拒绝','config_rebased':'已按当前部署重新基线',
         'awaiting_approval':'等待你批准方案',
+        'request_replaced':'已按当前方案重新预留请求','recheck_failed':'重新核对未通过',
         'stale_intent_cancelled':'旧意图已作废，按当前方案重新预留'}
 
 
@@ -108,6 +109,21 @@ class ExecutionJobs:
                     submissions=dict(count=evaluation['dispatch_claims'],maximum=evaluation['max_attempts']) if evaluation else None,
                     message='方案已准备，可开始计算。' if ready else '确认需求并生成方案后可开始计算。' if self.enrollment is not None and binding is None else '计算部署尚未绑定此任务。' if binding is None else '计算方案尚未准备完成。')
 
+    def current_request_id(self, identifier):
+        """作业行里的 request_id 不可改；被替换过时以最新 request_replaced 事件为准。"""
+        job = self.get(identifier)
+        if job is None:
+            return None
+        current = job['request_id']
+        for event in job['events']:
+            if event['state'] == 'request_replaced' and event['reason']:
+                current = event['reason']
+        return current
+
+    def request_replaced(self, identifier):
+        job = self.get(identifier)
+        return bool(job) and any(e['state'] == 'request_replaced' for e in job['events'])
+
     def plan_scope(self, identifier):
         """当前已准备方案的摘要；没有已准备方案时返回 None。"""
         job = self.history.get(identifier)
@@ -160,6 +176,16 @@ class ExecutionJobs:
             if job['config_sha256']!=self.config_sha256:
                 self._event(db,job['id'],'config_rebased',self.config_sha256)
             self._event(db,job['id'],'queued','user_recheck')
+        # 主动按当前方案重新预留一条请求，并把"权威请求"通过事件记录下来。
+        try:
+            plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
+            new_id=plan['row']['id']
+            if new_id != self.current_request_id(identifier):
+                with self.tasks.transaction() as db:
+                    self._event(db,job['id'],'request_replaced',str(new_id))
+        except Exception as error:
+            with self.tasks.transaction() as db:
+                self._event(db,job['id'],'recheck_failed',type(error).__name__.lower()[:30])
         self._reprepare.add(identifier)
         self.wake.set()
         return self.status(identifier)
@@ -186,7 +212,7 @@ class ExecutionJobs:
             if job['state']=='queued':
                 with self.tasks.transaction() as db:self._event(db,job['id'],'running')
             try:
-                allow = identifier in self._reprepare
+                allow = identifier in self._reprepare or self.request_replaced(identifier)
                 self._reprepare.discard(identifier)
                 # 只在"用户显式重新核对"这一条路径上传新参数，保持默认调用签名不变。
                 result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True)

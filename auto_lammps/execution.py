@@ -137,10 +137,9 @@ class CandidateExecution:
         base='candidate_'+job['id']+'_'+digest[:12]
         key=base
         if allow_reprepare:
-            # 显式重新核对时允许换一个键重新预留（被作废的旧意图不会被复用）；
-            # 普通的运维取消不传这个标志，因此仍然阻止提交。
-            reservations=self.ledger.evaluation_snapshot(evaluation).get('reserved_attempts') or 0
-            key=base+'_r'+str(reservations)
+            # 显式重新核对着一条路径上传入：改用**内容寻址**的键，
+            # 既不会与早期不同摘要的旧行撞键，又在同一方案下保持幂等。
+            key=base+'_r'+digest[:8]
         row=self.ledger.reserve(evaluation,key,digest,resources)
         from .hpc_transport import bind_request
         bind_request(self.ledger,row['id'],self.staging.client)
