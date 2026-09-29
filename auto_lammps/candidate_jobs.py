@@ -258,6 +258,35 @@ class CandidateService:
             with self.tasks.transaction() as db:
                 self.history._event(db, job['id'], state, payload)
 
+    def plan_review(self, identifier):
+        """用户审核方案所需的内容：脚本、结构、分析定义与文件摘要（不含模型私密回答）。"""
+        public = ('in.lammps', 'structure.data', 'analysis.json', 'generation.json')
+        job = self.history.get(identifier)
+        if job is None:
+            return {'state': None, 'files': []}
+        result = job.get('result') or {}
+        review = {'state': job['state'], 'label': job.get('label'), 'revision': job['revision'],
+                  'summary': result.get('summary'), 'geometry': result.get('geometry'),
+                  'analysis': result.get('analysis'), 'questions': result.get('questions') or [],
+                  'detail': result.get('detail'), 'snapshot_sha256': result.get('snapshot_sha256'),
+                  'execution_authorized': result.get('execution_authorized', False), 'files': []}
+        if job['state'] != 'prepared' or not result.get('snapshot_sha256'):
+            return review
+        digest = result['snapshot_sha256']
+        snapshot = Snapshot(self.snapshots / digest, digest)
+        record = snapshot.verify()
+        for item in record['files']:
+            if item['path'] not in public:
+                continue
+            entry = {'name': item['path'], 'sha256': item['sha256'], 'size': item['size']}
+            if item['size'] <= 200000:
+                try:
+                    entry['content'] = self.file(identifier, item['path']).decode('utf-8', 'replace')
+                except (OSError, ValueError):
+                    entry['content'] = None
+            review['files'].append(entry)
+        return review
+
     def file(self, identifier, name):
         if name not in {'in.lammps', 'structure.data', 'analysis.json', 'generation.json'}:
             raise KeyError('Candidate file not available')

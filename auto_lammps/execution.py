@@ -97,7 +97,7 @@ class CandidateExecution:
                 following.snapshots!=self.snapshots):
             raise ValueError('Batch, snapshots and result collection must use the same deployment')
 
-    def prepare(self, task_id, evaluation):
+    def prepare(self, task_id, evaluation, *, allow_reprepare=False):
         """Reserve once and render a reviewable plan; no model/network/physics call."""
         task=self.tasks.get(task_id)
         inputs=research_inputs(self.tasks,task_id,task['revision'])
@@ -132,15 +132,46 @@ class CandidateExecution:
         if context.get('output_layout','isolated')!=expected_layout:
             raise Conflict('Candidate output layout differs from the frozen execution deployment')
         # The key is owned by the controller; callers cannot rename an attempt.
-        key='candidate_'+job['id']
+        # 幂等键必须绑定"这次准备出来的方案"：同一方案重复提交仍然幂等，
+        # 但部署/代码变化后重新准备出的新方案应另立一条可记账请求，而不是撞旧键。
+        base='candidate_'+job['id']+'_'+digest[:12]
+        key=base
+        if allow_reprepare:
+            # 显式重新核对时允许换一个键重新预留（被作废的旧意图不会被复用）；
+            # 普通的运维取消不传这个标志，因此仍然阻止提交。
+            reservations=self.ledger.evaluation_snapshot(evaluation).get('reserved_attempts') or 0
+            key=base+'_r'+str(reservations)
         row=self.ledger.reserve(evaluation,key,digest,resources)
         from .hpc_transport import bind_request
         bind_request(self.ledger,row['id'],self.staging.client)
         request=Submission(row['id'],digest,resources)
         return dict(row=row,key=key,snapshot=snapshot,submission=request,batch=render_batch(request,self.environment))
 
-    def advance(self, task_id, evaluation):
-        plan=self.prepare(task_id,evaluation);row=plan['row'];request_id=row['id']
+    def cancel_stale_intent(self, request_id):
+        """作废一个尚未派发的陈旧意图（零计费）；已派发的请求一律不动。"""
+        row=self.ledger.request(request_id) if hasattr(self.ledger,'request') else None
+        try:
+            rows=self.ledger.requests()
+            row=next((r for r in rows if r['id']==request_id), row)
+        except Exception:
+            pass
+        if row is not None and (row.get('dispatch_claimed') or row.get('job_id')):
+            return False
+        self.ledger.cancel_intent(request_id)
+        # 未派发即作废的意图从未上传任何输出：按"实际保留 0 字节"结算，释放存储预留。
+        # 账本要求提供证据摘要，这里绑定请求本身与"未暂存"这一事实。
+        evidence = sha256(canonical({'request_id': request_id, 'staged': False,
+                                     'reason': 'stale_intent_cancelled'}))
+        try:
+            self.ledger.settle_cancelled_preparation_storage(request_id, retained_bytes=0,
+                                                             evidence_sha256=evidence)
+        except Exception:
+            # 结算失败不应掩盖"已作废"这一事实；额度问题会在下一次预留时如实报出。
+            pass
+        return True
+
+    def advance(self, task_id, evaluation, *, allow_reprepare=False):
+        plan=self.prepare(task_id,evaluation,allow_reprepare=allow_reprepare);row=plan['row'];request_id=row['id']
         if row['dispatch_claimed']:
             if row['state']=='rejected':return dict(request_id=request_id,state='rejected',scientific_status='not_evaluated')
             # An expired grant cannot authorize a new dispatch, but must not

@@ -154,6 +154,14 @@ class ConditionInput(Revision):
     attempt: int = Field(default=0, ge=0, le=20)
 
 
+class ApprovalInput(Revision):
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ReviseInput(Revision):
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class CandidateInput(Revision):
     answers: str | None = Field(default=None, max_length=4000)
 
@@ -272,8 +280,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return JSONResponse({'detail': str(exc)}, status_code=409 if isinstance(exc, (StaleTask, FrozenTask)) else 422)
 
     @app.exception_handler(KeyError)
-    async def not_found(request: Request, exc: KeyError):
-        return JSONResponse({'detail': '任务不存在'}, status_code=404)
+    async def internal_key_missing(request: Request, exc: KeyError):
+        # 之前把所有 KeyError 都报成"任务不存在"，会误导排查（例如事件缺少标签）。
+        # 真正的"任务不存在"由 store 显式抛 TaskError；这里如实说明缺少哪个键。
+        missing = exc.args[0] if exc.args else 'unknown'
+        return JSONResponse({'detail': '内部状态缺少条目：' + str(missing)[:80]}, status_code=404)
 
     @app.exception_handler(ModelError)
     async def model_error(request: Request, exc: ModelError):
@@ -751,6 +762,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 detail += '：' + extra
             return JSONResponse({'detail':detail},status_code=409)
 
+    @app.post('/api/tasks/{identifier}/execution/recheck',status_code=202)
+    @serialized_task_action
+    def execution_recheck(identifier: str,data: Revision):
+        require_open_task(identifier)
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        return execution_jobs.recheck(identifier,data.revision)
+
     @app.post('/api/tasks/{identifier}/workflow',status_code=202)
     @serialized_task_action
     def workflow_start(identifier: str,data: Revision):
@@ -773,6 +792,42 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
         if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
         return {'candidate': candidate_service.enqueue(identifier, data.revision, data.answers)}
+
+    @app.get('/api/tasks/{identifier}/plan')
+    def plan_review(identifier: str):
+        """第一道人工关卡：把已准备的方案（脚本/结构/分析）交给用户审阅。"""
+        if candidate_service is None:
+            return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        review = candidate_service.plan_review(identifier)
+        scope = None
+        job = preparations.get(identifier) if preparations else None
+        digest = (job or {}).get('result', {}).get('snapshot_sha256') if job else None
+        if isinstance(digest, str) and digest:
+            scope = 'plan:' + digest
+        review['approved'] = bool(scope) and store.plan_approved(identifier, scope)
+        review['approvals'] = store.approvals(identifier)
+        return review
+
+    @app.post('/api/tasks/{identifier}/plan/approve')
+    @serialized_task_action
+    def plan_approve(identifier: str, data: ApprovalInput):
+        job = preparations.get(identifier) if preparations else None
+        digest = (job or {}).get('result', {}).get('snapshot_sha256') if job else None
+        if not isinstance(digest, str) or not digest or (job or {}).get('state') != 'prepared':
+            raise TaskError('当前没有可批准的方案；请先在"计算方案"里准备方案。')
+        approvals = store.approve_plan(identifier, data.revision, scope='plan:' + digest, note=data.note or '')
+        return {'approved': True, 'scope': 'plan:' + digest, 'approvals': approvals}
+
+    @app.post('/api/tasks/{identifier}/plan/revise', status_code=202)
+    @serialized_task_action
+    def plan_revise(identifier: str, data: ReviseInput):
+        """用户对方案有意见：写入引导并立刻按意见重新组织一次方案。"""
+        if candidate_service is None:
+            return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        store.add_guidance(identifier, data.revision, data.note)
+        current = store.get(identifier)
+        return {'candidate': candidate_service.enqueue(identifier, current['revision'],
+                                                       answers='用户对当前方案的意见（必须据此修改方案）：' + data.note)}
 
     @app.get('/api/tasks/{identifier}/candidate/files/{name}')
     def candidate_file(identifier: str, name: str):

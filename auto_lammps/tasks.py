@@ -144,7 +144,11 @@ class TaskStore:
                        'sequence INTEGER NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
             db.execute('CREATE TABLE IF NOT EXISTS task_control (task_id TEXT NOT NULL REFERENCES tasks(id), '
                        'sequence INTEGER NOT NULL, action TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(task_id,sequence))')
-            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle', 'task_guidance', 'task_control'):
+            # 用户对"方案"的批准：绑定方案摘要，方案一变就需要重新批准。
+            db.execute('CREATE TABLE IF NOT EXISTS task_approvals (task_id TEXT NOT NULL REFERENCES tasks(id), '
+                       'sequence INTEGER NOT NULL, scope TEXT NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL, '
+                       'PRIMARY KEY(task_id,sequence))')
+            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle', 'task_guidance', 'task_control', 'task_approvals'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable task evidence'); END")
@@ -190,6 +194,33 @@ class TaskStore:
             self._read(db, identifier)
             return [dict(row) for row in db.execute(
                 'SELECT sequence,note,at FROM task_guidance WHERE task_id=? ORDER BY sequence', (identifier,))]
+
+    def approvals(self, identifier):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            return [dict(row) for row in db.execute(
+                'SELECT sequence,scope,note,at FROM task_approvals WHERE task_id=? ORDER BY sequence', (identifier,))]
+
+    def approve_plan(self, identifier, revision, *, scope, note=''):
+        """记录用户对当前方案的批准；scope 绑定方案摘要，方案变化即失效。"""
+        value = text(scope, 200)
+        with self.transaction() as db:
+            doc = self._control_plane(db, identifier, revision)
+            sequence = (db.execute('SELECT MAX(sequence) FROM task_approvals WHERE task_id=?',
+                                   (identifier,)).fetchone()[0] or 0) + 1
+            db.execute('INSERT INTO task_approvals VALUES (?,?,?,?,?)',
+                       (identifier, sequence, value, text(note, 1000, required=False) or '',
+                        datetime.now(timezone.utc).isoformat()))
+            # 批准是控制面动作：不改动冻结条件，也不推进 revision，
+            # 因此批准后可以立即提交，不会让调用方的版本变成陈旧。
+        return self.approvals(identifier)
+
+    def plan_approved(self, identifier, scope):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            row = db.execute('SELECT 1 FROM task_approvals WHERE task_id=? AND scope=? LIMIT 1',
+                             (identifier, text(scope, 200))).fetchone()
+        return row is not None
 
     def _control_plane(self, db, identifier, revision):
         """引导与暂停不改动冻结的条件记录，因此允许在冻结之后使用；只校验版本。"""

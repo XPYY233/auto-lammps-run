@@ -102,7 +102,7 @@ async function openTask(id) {
   window.scrollTo({top:0});
   await listTasks();
   await renderHistory();
-  await refreshCandidate(); await refreshActivity(); await refreshGuidance();
+  await refreshCandidate(); await refreshActivity(); await refreshGuidance(); await refreshPlanReview();
   await refreshResults();
   await refreshReferenceHistory();
   await refreshWorkspace();
@@ -588,7 +588,7 @@ async function refreshGuidance() {
   const button=$('#task-pause');
   if(button){ button.textContent=paused?'继续任务':'暂停任务';
               button.className=paused?'primary':'quiet'; }
-  $('#guidance-note').disabled=paused&&false;
+  const noteBox=$('#guidance-note'); if(noteBox) noteBox.disabled=false;
   list.replaceChildren();
   const items=data.guidance||[];
   if(!items.length){ list.append(node('li','还没有中途引导。','subtle')); return; }
@@ -613,7 +613,71 @@ async function togglePause() {
   await refreshGuidance();
 }
 
+
+function planFilesText(review){
+  return (review?.files||[]).map(file=>`${file.name}  ${(file.size/1024).toFixed(1)} KiB  ${String(file.sha256||'').slice(0,12)}`).join('\n');
+}
+
+async function refreshPlanReview(){
+  const panel=$('#plan-review-panel'); if(!panel) return;
+  const id=current?.id; if(!id){panel.hidden=true;return;}
+  let review;
+  try { review=await api(`/api/tasks/${id}/plan`); }
+  catch(error){ panel.hidden=true; return; }
+  if(current?.id!==id) return;
+  const prepared=review.state==='prepared';
+  panel.hidden=!prepared;
+  if(!prepared) return;
+  $('#plan-status').textContent=(review.approved?'已批准当前方案，可以提交。':'方案已准备，等待你审核。')
+    + (review.summary?'　摘要：'+review.summary:'');
+  const summary=$('#plan-summary'); summary.replaceChildren();
+  const geometry=review.geometry||{};
+  if(geometry.formula||geometry.atoms)summary.append(node('p',`结构：${geometry.formula||''} ${geometry.atoms?geometry.atoms+' 原子':''}`,'subtle'));
+  const analysis=review.analysis||{};
+  if(analysis.quantity)summary.append(node('p',`分析：${analysis.quantity}（文件 ${(analysis.files||[]).join('、')}）`,'subtle'));
+  const files=$('#plan-files'); files.replaceChildren();
+  for(const file of (review.files||[])){
+    const block=node('details',undefined,'plan-file');
+    block.append(node('summary',`${file.name} · ${(file.size/1024).toFixed(1)} KiB · ${String(file.sha256||'').slice(0,12)}`));
+    if(file.content){
+      const pre=node('pre',file.content.slice(0,20000),'plan-code');
+      block.append(pre);
+      if(file.name==='in.lammps'){
+        const box=node('textarea',undefined,'plan-edit'); box.rows=8; box.value=file.content;
+        box.placeholder='如需直接改脚本，可在此编辑后点“保存脚本并重新准备”（会重新生成方案并需要再次批准）';
+        const save=node('button','保存脚本并重新准备','quiet'); save.type='button';
+        save.onclick=()=>action(async()=>{
+          await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,
+            note:'请按以下我直接修改过的脚本内容重新准备方案：\n'+box.value});
+          await afterChange('已提交你的脚本修改，应用会重新组织方案（需再次批准）。');
+        });
+        block.append(box,save);
+      }
+    }
+    files.append(block);
+  }
+  const approve=$('#plan-approve');
+  approve.disabled=Boolean(review.approved);
+  approve.textContent=review.approved?'已批准（等待提交）':'批准并提交 HPC';
+  approve.onclick=()=>action(async()=>{
+    approve.disabled=true;
+    await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
+    const automatic=schema.automatic_workflow?.configured;
+    await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
+    await afterChange('已批准；应用会按这道流程提交并自动跟进计算状态。');
+    await refreshPlanReview(); await refreshCandidate();
+  });
+  $('#plan-revise').onclick=()=>action(async()=>{
+    const note=($('#guidance-note')?.value||'').trim();
+    if(!note){notice('请在“引导与暂停”里写下你的修改意见，再点这里。',true);return;}
+    await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,note});
+    await afterChange('已把你的意见交给应用内 AI，它会重新组织方案（需再次批准）。');
+    await refreshPlanReview(); await refreshCandidate();
+  });
+}
+
 async function refreshActivity() {
+  try {
   const box=$('#ai-activity'); if(!box) return;
   const id=current?.id; if(!id){box.replaceChildren();return;}
   let data;
@@ -644,6 +708,7 @@ async function refreshActivity() {
     list.append(item);
   }
   box.append(list);
+  } catch(error){ const box=$('#ai-activity'); if(box) box.replaceChildren(node('p','AI 活动读取失败：'+error.message,'subtle')); }
 }
 
 async function refreshCandidate() {
@@ -1571,11 +1636,16 @@ for(const id of ['top-help','home-help'])$('#'+id).onclick=()=>requestRoute('#he
 $('#mode-research').onclick=()=>setMode('research');$('#mode-reproduction').onclick=()=>setMode('reproduction');
 $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-view').hidden)taskCards();});};
 
+bind('ai-activity-refresh',()=>action(refreshActivity));bind('guidance-send',()=>action(sendGuidance));
+bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
 
 // Shared navigation follows the approved home; all counts come from saved evidence.
 let taskFilter='all', selectedPlot='full', discussionRequest=null;
 function taskFinished(t){return Boolean(t.user_finished)||Boolean((t.lifecycle_events||[]).some(e=>e&&e.action==='finish'));}
+
+// 统一绑定：元素不存在时安静跳过，避免"少一个元素就整页停止渲染"。
+function bind(id,handler){const el=document.getElementById(id);if(el)el.onclick=handler;return Boolean(el);}
 
 function questionText(question){return typeof question==='string'?question:String(question?.question||'');}
 

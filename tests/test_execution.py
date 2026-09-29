@@ -48,6 +48,10 @@ class ExecutionTests(unittest.TestCase):
                                  snapshots=self.root/'snapshots',output_layout=layout)
         service.enqueue(self.doc['id'],self.doc['revision']);service.close(wait=True)
         self.assertEqual(service.history.get(self.doc['id'])['state'],'prepared')
+        # 产品契约：提交真实计算前必须由用户批准当前方案；夹具模拟这次批准。
+        job=service.history.get(self.doc['id'])
+        self.tasks.approve_plan(self.doc['id'],self.doc['revision'],
+                                scope='plan:'+job['result']['snapshot_sha256'])
         self.ledger=Ledger(self.root/'ledger.sqlite')
         self.ledger.create_campaign('synthetic',Policy(1000,8,120,128*1024*1024,16*1024*1024,1,'a'*64))
         self.condition_hash=sha256(self.tasks.export(self.doc['id']))

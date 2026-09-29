@@ -94,6 +94,7 @@ class EnrollmentTests(unittest.TestCase):
         url='/api/tasks/'+self.doc['id']
         with ExitStack() as stack,TestClient(create_app(self.f.tasks,model_client=client,candidate_service=candidates,execution_jobs=jobs),base_url=ORIGIN) as web:
             before=web.get(url+'/execution').json();self.assertFalse(before['can_start'])
+            # 方案准备好之后仍不允许直接开工：必须先由用户批准。
             bad=web.post(url+'/candidate',headers=HEADERS,json={'revision':self.doc['revision'],'repetition':1})
             self.assertEqual(bad.status_code,422);self.assertIsNone(self.enrollment.get(self.doc['id']))
             reply=web.post(url+'/candidate',headers=HEADERS,json={'revision':self.doc['revision']})
@@ -105,6 +106,11 @@ class EnrollmentTests(unittest.TestCase):
                 time.sleep(.01)
             self.assertEqual(candidate['state'],'prepared',candidate)
             self.assertTrue(web.get(url+'/execution').json()['can_start'])
+            # 第一道人工关卡：未批准不能开工；批准后按原流程继续。
+            self.assertEqual(web.post(url+'/execution',headers=HEADERS,
+                                      json={'revision':self.doc['revision']}).status_code,409)
+            self.assertEqual(web.post(url+'/plan/approve',headers=HEADERS,
+                                      json={'revision':self.doc['revision']}).status_code,200)
             self.assertEqual(jobs.bindings,{})
             self.f.evaluation=jobs.evaluation_for(self.doc['id'])
             self.f.plan=self.f.controller.prepare(self.doc['id'],self.f.evaluation);self.f.request_id=self.f.plan['row']['id']

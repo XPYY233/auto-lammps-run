@@ -14,9 +14,16 @@ from .manifest import canonical, sha256
 from .tasks import TaskError, StaleTask, task_id
 
 ACTIVE={'queued','running','waiting'}
+# 等待用户批准：工作线程仍需推进它（批准后自动放行），但它不属于“在飞行中”。
+PENDING_APPROVAL={'awaiting_approval'}
+WORKABLE=ACTIVE|PENDING_APPROVAL
+# 记账类事件不参与状态判定（否则会把已完成/待处理的作业顶成未知状态）。
+BOOKKEEPING={'config_rebased'}
 LABELS={'queued':'等待执行','running':'核验许可并推进计算','waiting':'自动跟进计算',
         'analyzed':'数值分析完成','analysis_failed':'分析未完成','diagnostics_saved':'计算未成功，诊断已保存',
-        'attention':'执行需要核对','rejected':'提交被拒绝'}
+        'attention':'执行需要核对','rejected':'提交被拒绝','config_rebased':'已按当前部署重新基线',
+        'awaiting_approval':'等待你批准方案',
+        'stale_intent_cancelled':'旧意图已作废，按当前方案重新预留'}
 
 
 class ExecutionJobs:
@@ -40,6 +47,7 @@ class ExecutionJobs:
         if enrollment is not None:config['enrollment']=enrollment.identity
         self.config_sha256=sha256(canonical(config))
         self.stop=threading.Event();self.wake=threading.Event();self.thread=None
+        self._reprepare=set()
         with self.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS execution_jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), '
                        'revision INTEGER NOT NULL, evaluation TEXT NOT NULL, request_id TEXT NOT NULL, config_sha256 TEXT NOT NULL)')
@@ -77,7 +85,8 @@ class ExecutionJobs:
             row=db.execute('SELECT * FROM execution_jobs WHERE task_id=?',(identifier,)).fetchone()
             if row is None:return None
             events=[dict(r) for r in db.execute('SELECT * FROM execution_job_events WHERE job_id=? ORDER BY seq',(row['id'],))]
-        return dict(row)|{'events':events,'state':events[-1]['state'],'reason':events[-1]['reason']}
+        significant=[e for e in events if e['state'] not in BOOKKEEPING] or events
+        return dict(row)|{'events':events,'state':significant[-1]['state'],'reason':significant[-1]['reason']}
 
     def status(self, identifier):
         job=self.get(identifier)
@@ -86,11 +95,11 @@ class ExecutionJobs:
             evaluation=self.ledger.evaluation_snapshot(job['evaluation'])
             row=self.ledger.get(job['request_id'])
             return dict(configured=True,worker_alive=live,can_start=False,job=dict(
-                state=job['state'],label=LABELS[job['state']],request_id=job['request_id'],job_id=row['job_id'],
+                state=job['state'],label=LABELS.get(job['state'],job['state']),request_id=job['request_id'],job_id=row['job_id'],
                 scheduler_state=row['state'],accounted=bool(row['accounted']),
                 dispatch_count=evaluation['dispatch_claims'],max_attempts=evaluation['max_attempts'],
                 scientific_status='not_evaluated',reason=job['reason'],
-                events=[dict(at=e['at'],label=LABELS[e['state']],reason=e['reason']) for e in job['events']]))
+                events=[dict(at=e['at'],label=LABELS.get(e['state'],e['state']),reason=e['reason']) for e in job['events']]))
         candidate=self.history.get(identifier)
         binding=self.evaluation_for(identifier)
         ready=binding is not None and candidate is not None and candidate['state']=='prepared'
@@ -99,11 +108,26 @@ class ExecutionJobs:
                     submissions=dict(count=evaluation['dispatch_claims'],maximum=evaluation['max_attempts']) if evaluation else None,
                     message='方案已准备，可开始计算。' if ready else '确认需求并生成方案后可开始计算。' if self.enrollment is not None and binding is None else '计算部署尚未绑定此任务。' if binding is None else '计算方案尚未准备完成。')
 
+    def plan_scope(self, identifier):
+        """当前已准备方案的摘要；没有已准备方案时返回 None。"""
+        job = self.history.get(identifier)
+        if job is None or job['state'] != 'prepared':
+            return None
+        digest = (job.get('result') or {}).get('snapshot_sha256')
+        return 'plan:' + digest if isinstance(digest, str) and digest else None
+
+    def approved_plan(self, identifier):
+        scope = self.plan_scope(identifier)
+        return bool(scope) and self.tasks.plan_approved(identifier, scope)
+
     def enqueue(self, identifier, revision):
         doc=self.tasks.get(identifier)
         if doc['revision']!=revision:raise StaleTask('任务已变化，请刷新后再开始。')
         job=self.get(identifier)
         if job:return self.status(identifier)
+        # 第一道人工关卡：用户必须先看到方案并批准，才允许提交真实计算。
+        if not self.approved_plan(identifier):
+            raise TaskError('请先审阅并批准当前方案，再提交计算。方案一旦变化需要重新批准。')
         evaluation=self.evaluation_for(identifier)
         if evaluation is None:raise TaskError('此任务尚未接入已核验的计算部署。')
         # Only the controller can select evaluation and reserve the existing key.
@@ -120,21 +144,53 @@ class ExecutionJobs:
         self.wake.set()
         return self.status(identifier)
 
+    def recheck(self, identifier, revision):
+        """用户显式要求重新核对一个"需要处理"的执行作业。
+
+        追加事件（含必要的配置再基线），不改写任何历史；随后由工作线程重新核验并派发。
+        """
+        doc=self.tasks.get(identifier)
+        if doc['revision']!=revision:raise StaleTask('任务已更新，请刷新后再试。')
+        job=self.get(identifier)
+        if job is None:raise TaskError('尚无执行记录，请先开始计算。')
+        significant=[e for e in job['events'] if e['state'] not in BOOKKEEPING]
+        state=significant[-1]['state'] if significant else job['state']
+        if state in WORKABLE:return self.status(identifier)
+        with self.tasks.transaction() as db:
+            if job['config_sha256']!=self.config_sha256:
+                self._event(db,job['id'],'config_rebased',self.config_sha256)
+            self._event(db,job['id'],'queued','user_recheck')
+        self._reprepare.add(identifier)
+        self.wake.set()
+        return self.status(identifier)
+
     def advance(self, identifier):
         job=self.get(identifier)
-        if job is None or job['state'] not in ACTIVE:return self.status(identifier)
+        if job is None or job['state'] not in WORKABLE:return self.status(identifier)
         # The OS lease, rather than a timestamp or persisted running flag, owns work.
         with self.history.lease(job['id']) as acquired:
             if not acquired:return self.status(identifier)
             job=self.get(identifier)
-            if job['state'] not in ACTIVE:return self.status(identifier)
-            if job['config_sha256']!=self.config_sha256 or self.evaluation_for(identifier)!=job['evaluation']:
+            if job['state'] not in WORKABLE:return self.status(identifier)
+            if not self.approved_plan(identifier):
+                # 方案变了或还没批准：停在"等待批准"，绝不派发。
+                with self.tasks.transaction() as db:self._event(db,job['id'],'awaiting_approval','plan_not_approved')
+                return self.status(identifier)
+            baseline=job['config_sha256']
+            for event in job['events']:
+                if event['state']=='config_rebased' and event['reason']:
+                    baseline=event['reason']
+            if baseline!=self.config_sha256 or self.evaluation_for(identifier)!=job['evaluation']:
                 with self.tasks.transaction() as db:self._event(db,job['id'],'attention','deployment_changed')
                 return self.status(identifier)
             if job['state']=='queued':
                 with self.tasks.transaction() as db:self._event(db,job['id'],'running')
             try:
-                result=self.controller.advance(identifier,job['evaluation'])
+                allow = identifier in self._reprepare
+                self._reprepare.discard(identifier)
+                # 只在"用户显式重新核对"这一条路径上传新参数，保持默认调用签名不变。
+                result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True)
+                        if allow else self.controller.advance(identifier,job['evaluation']))
                 if result.get('request_id')!=job['request_id']:raise ValueError('Execution identity changed')
                 state=result['state']
                 if state not in LABELS:raise ValueError('Unexpected execution state')
@@ -143,10 +199,17 @@ class ExecutionJobs:
                 import re
                 if not isinstance(reason,str) or not re.fullmatch(r'[a-z_]{0,80}',reason):reason='adapter_attention'
             except Exception as exc:
-                # 只暴露异常类别（安全字符），否则"执行需要核对"无法定位问题。
+                # 只暴露异常类别（安全字符），否则"执行需要核对"无法定位问题；
+                # 完整回溯只写日志（私有），不进入事件与页面。
+                import sys as _sys, traceback as _tb
+                _tb.print_exc(file=_sys.stderr)
                 import re as _re
                 kind=_re.sub(r'[^a-z]','',type(exc).__name__.lower())[:24] or 'error'
-                state='attention';reason='execution_check_failed_'+kind
+                if type(exc).__name__ == 'Conflict' and self.controller.cancel_stale_intent(job['request_id']):
+                    # 旧意图从未派发（零计费）：作废后按当前方案重新预留，而不是永久卡在核对。
+                    state='queued';reason='stale_intent_cancelled'
+                else:
+                    state='attention';reason='execution_check_failed_'+kind
                 # Class name only; private paths, grants and remote output stay private.
                 if isinstance(exc,FileNotFoundError):reason='deployment_file_missing'
             with self.tasks.transaction() as db:self._event(db,job['id'],state,reason)
@@ -158,7 +221,18 @@ class ExecutionJobs:
                 tasks=[r['task_id'] for r in db.execute('SELECT task_id FROM execution_jobs ORDER BY rowid')]
             for identifier in tasks:
                 if self.stop.is_set():break
-                self.advance(identifier)
+                try:
+                    self.advance(identifier)
+                except Exception as error:
+                    # 单个任务的问题绝不能杀死整个执行工作线程（此前正是这样：
+                    # 一个任务绑定失效会让所有任务都不再被跟进）。
+                    import sys as _sys, traceback as _tb
+                    _tb.print_exc(file=_sys.stderr)
+                    with self.tasks.transaction() as db:
+                        job=self.get(identifier)
+                        if job is not None:
+                            self._event(db,job['id'],'attention',
+                                        'worker_error_'+type(error).__name__.lower()[:24])
             self.wake.wait(5);self.wake.clear()
 
     def start(self):

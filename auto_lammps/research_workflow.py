@@ -64,8 +64,8 @@ class ResearchWorkflow:
     def status(self, identifier):
         row = self.get(identifier)
         return dict(worker_alive=bool(self.thread and self.thread.is_alive()), workflow=None if row is None else
-            dict(state=row['state'], label=LABELS[row['state']], reason=row['reason'],
-                 events=[dict(at=e['at'], label=LABELS[e['state']], reason=e['reason']) for e in row['events']]))
+            dict(state=row['state'], label=LABELS.get(row['state'],row['state']), reason=row['reason'],
+                 events=[dict(at=e['at'], label=LABELS.get(e['state'],e['state']), reason=e['reason']) for e in row['events']]))
 
     def enqueue(self, identifier, revision):
         inputs = research_inputs(self.tasks, identifier, revision)
