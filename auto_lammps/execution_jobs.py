@@ -176,6 +176,11 @@ class ExecutionJobs:
             if job['config_sha256']!=self.config_sha256:
                 self._event(db,job['id'],'config_rebased',self.config_sha256)
             self._event(db,job['id'],'queued','user_recheck')
+        # 先清理该评估下"从未派发"的残留预留（零计费），否则账本会拒绝新的预留。
+        try:
+            self.ledger.cancel_undispatched(job['evaluation'])
+        except Exception:
+            pass
         # 主动按当前方案重新预留一条请求，并把"权威请求"通过事件记录下来。
         try:
             plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
@@ -184,6 +189,9 @@ class ExecutionJobs:
                 with self.tasks.transaction() as db:
                     self._event(db,job['id'],'request_replaced',str(new_id))
         except Exception as error:
+            # 具体原因写日志（私有），事件里只放类别，避免把内部细节带进页面。
+            import sys as _sys, traceback as _tb
+            _tb.print_exc(file=_sys.stderr)
             with self.tasks.transaction() as db:
                 self._event(db,job['id'],'recheck_failed',type(error).__name__.lower()[:30])
         self._reprepare.add(identifier)
@@ -231,8 +239,18 @@ class ExecutionJobs:
                 _tb.print_exc(file=_sys.stderr)
                 import re as _re
                 kind=_re.sub(r'[^a-z]','',type(exc).__name__.lower())[:24] or 'error'
-                if type(exc).__name__ == 'Conflict' and self.controller.cancel_stale_intent(job['request_id']):
-                    # 旧意图从未派发（零计费）：作废后按当前方案重新预留，而不是永久卡在核对。
+                cleared = 0
+                if type(exc).__name__ == 'Conflict':
+                    # 账本要求同一评估下只能有一条活动请求：把"从未派发"的残留预留全部
+                    # 零计费作废后重试（否则会永久卡在"已有请求未结束"）。
+                    if 'must finish or be reconciled first' in str(exc):
+                        try:
+                            cleared = self.ledger.cancel_undispatched(job['evaluation'])
+                        except Exception:
+                            cleared = 0
+                    if not cleared and self.controller.cancel_stale_intent(job['request_id']):
+                        cleared = 1
+                if cleared:
                     state='queued';reason='stale_intent_cancelled'
                 else:
                     state='attention';reason='execution_check_failed_'+kind

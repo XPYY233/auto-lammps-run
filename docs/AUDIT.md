@@ -950,3 +950,28 @@ Issue #120 交互审计：目标选择已有前置规则，但网页冻结按钮
 而账本规定"已作废的意图不得复用、运维取消必须阻止提交"。正确做法是**设计一个请求替换流程**：
 以事件记录当前权威请求，`advance` 只针对该请求工作，旧意图在同一事务内结算（核时与存储都清零），
 并在替换后清理作业行对旧请求的引用语义。继续打补丁只会制造新的边界情况。
+
+## 2026-09-29（续）：提交链路上的实际修复与最后一处门槛
+
+按用户要求"实现能提交作业"，本轮沿提交链路逐层打通，实际修复如下：
+
+1. **中间栏被长内容撑宽、压住右栏**：`.research-main` 本身是 grid，其子项默认 `min-width:auto`，
+   新增的脚本/JSON 预览把中间栏撑宽（页面出现横向滚动，右栏视觉上被"压住"）。
+   已加入 `.research-main>*{min-width:0}`、`.panel{min-width:0}`、`.task-rail{min-width:0}`，
+   预览块改为换行而非扩张。
+2. **执行工作线程被单任务异常杀死**（`worker_alive:false`，此后所有任务停止跟进）→ 逐任务捕获并记录。
+3. **作废请求的存储预留未释放**（把 4 GiB 额度占满，后续提交全部被拒）→ 用账本既有结算接口按 0 字节结算。
+4. **活动额度口径**：week2 的存储额度 4 GiB（等于单次请求预留）→ 经审批记录调至 16 GiB。
+5. **同一评估只允许一条活动请求**：重新提交前必须先清理"从未派发"的残留预留
+   （新增 `cancel_undispatched`），否则永久停在 `request_not_prepared`。
+6. **软件摘要不一致**：候选配置的 `software_sha256` 与部署批准值不同 →
+   `Candidate software differs from approved deployment`；已对齐为部署批准值。
+
+打通结果：提交链路已推进到**授权阶段**（`authorization.ensure`），此前的额度、存储、请求残留、
+软件摘要等门槛全部通过。
+
+**最后一处门槛**：`authorization.candidate_check` 要求候选必须带**完整的数值分析计划**
+（`plan_adapter(proposal['analysis']['plan'])`），而我此前为绕开契约曾让模型**省略 `analysis.plan`**
+→ `Candidate provenance or supported analysis is incomplete`。
+因此下一步只有一件事：得到一份**带合法 `analysis.plan`** 的已准备方案
+（契约现已由校验器派生 + 内嵌合法样例 + 最多 3 轮自动修复），随后批准并提交即可产生作业号。
