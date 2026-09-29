@@ -91,6 +91,16 @@ export SSL_CERT_FILE=/etc/ssl/cert.pem   # macOS system root store; certificate 
 CONFIG="$config"
 SCRIPTS="$scripts_dir"
 PY="$python"
+# 该 Python 是通用二进制，但部分扩展（如 pydantic_core）只编译了 arm64。
+# 若入口在 Rosetta(x86_64) 下被启动，导入这些扩展会 dlopen 失败、应用打不开。
+# 因此显式要求原生 arm64；不支持时（Intel 机器）自动退回直接运行。
+run_py() {
+  if [ "$(uname -m)" = "arm64" ]; then
+    arch -arm64 "\$PY" "\$@"
+  else
+    "\$PY" "\$@"
+  fi
+}
 STATE="$state"
 LOG="\$STATE/desktop-entry.log"
 mkdir -p "\$STATE" 2>/dev/null
@@ -108,13 +118,13 @@ finish() {
   # the supervisor (killed, crash) can leave that service behind, so only then does the entry
   # stop it here - through the same identity-checked stopper. 0/1 mean "nothing was left".
   if [ "\$code" -ge 4 ]; then
-    "\$PY" -I "\$SCRIPTS/stop_local.py" --config "\$CONFIG" >>"\$LOG" 2>&1 || true
+    run_py -I "\$SCRIPTS/stop_local.py" --config "\$CONFIG" >>"\$LOG" 2>&1 || true
     osascript -e 'display alert "Auto-LAMMPS 入口异常退出" message "本地服务已按身份校验收尾，未影响其它实例。详见运行记录中的 desktop-entry.log。" giving up after 45' >/dev/null 2>&1 &
   fi
   return 0
 }
 trap 'finish' EXIT
-"\$PY" -I "\$SCRIPTS/desktop_supervisor.py" --config "\$CONFIG" >>"\$LOG" 2>&1 &
+run_py -I "\$SCRIPTS/desktop_supervisor.py" --config "\$CONFIG" >>"\$LOG" 2>&1 &
 child=\$!
 # Cmd+Q / 注销时把信号交给监督进程，由它按身份校验收尾，而不是直接丢下子进程。
 forward() { kill -TERM "\$child" 2>/dev/null; }

@@ -987,3 +987,19 @@ Issue #120 交互审计：目标选择已有前置规则，但网页冻结按钮
   失败→可重试且按钮下方显示**具体原因**（不再出现"点了没反应"）。
 - 最后一道门（未过）：授权要求候选带**完整数值分析计划**（`plan_adapter(analysis.plan)`），
   当前生成的方案在写路径/分析表契约上仍会失败；这是提交前唯一剩余项。
+
+## 2026-09-29：桌面入口打不开的真实原因（架构不匹配，此前被我误判）
+
+现象：双击桌面 `Auto-LAMMPS.app` 无法打开；入口日志只写"应用未能启动"，指向 `application.log`。
+
+根因：运行时里的解释器是**通用二进制**（arm64 + x86_64），但 `pydantic_core` 等扩展**只编译了 arm64**。
+入口若在 Rosetta(x86_64) 下被启动（Finder 的"使用 Rosetta 打开"或继承 x86_64 偏好），
+`dlopen` 会以 `mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')` 失败，
+应用随即退出。日志该行很长，此前我只读了截断部分，把它当成"rsync 竞争导致的瞬时 dlopen 失败"——这是误判。
+
+修正：入口与生成器 `scripts/build_desktop_app.sh` 均改为**强制原生 arm64**（`arch -arm64`；
+Intel 机器自动退回直接执行），因此无论 Finder 是否勾选 Rosetta 都能正常启动。
+
+验证：以 Finder 等价方式启动 → 2 秒内 8787 就绪、首页 HTTP 200、
+模型/候选/执行/自动流程全部为真、进程已加载 `pydantic_core` 扩展、
+日志中最后一次架构错误出现在成功启动之前（历史记录，未再复现）。
