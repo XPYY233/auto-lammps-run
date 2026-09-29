@@ -688,18 +688,47 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/ai-activity')
     def ai_activity(identifier: str):
-        """What the in-app AI actually did for this task, step by step.
+        """面向用户的进度播报：每一步都是一句看得懂的中文，并标明"现在进行到哪"。
 
-        The user could not see which model calls happened or why a step stopped, so this
-        projects the task history, the preparation events and the private ledger receipts
-        (state, model, tokens, output keys, specific failure detail) into one timeline.
+        内部事件名、字段名、账本术语都不直接暴露给用户；需要的技术细节
+        （模型、用量、失败原因）放在 detail 里，作为补充而不是主体。
         """
         document = store.get(identifier)
-        steps = [{'at': event['at'], 'kind': 'task', 'label': event['event'],
-                  'revision': event['revision'], 'state': 'recorded'}
-                 for event in store.history(identifier)]
+        steps = []
 
-        def add_model(request_id, label):
+        def add(at, title, detail='', kind='ai', state='ok'):
+            if not at:
+                return
+            steps.append(dict(at=at, title=title, detail=detail, kind=kind,
+                              state=state, done=state == 'ok'))
+
+        # ① 需求 → 条件阶段（来自任务历史）
+        field_labels = FIELDS if isinstance(FIELDS, dict) else {}
+        phrasing = {
+            'created': ('已收到你的需求，开始理解研究目标', 'user'),
+            'guidance_added': ('记录了你的引导意见', 'user'),
+            'conditions_generated': ('已从需求中整理出计算条件', 'ai'),
+            'confirmed': ('你确认了当前条件', 'user'),
+            'conditions_frozen': ('条件已冻结，可以开始准备计算方案', 'ai'),
+            'plan_approved': ('你批准了计算方案，可以提交计算', 'user'),
+        }
+        for event in store.history(identifier):
+            name = event['event']
+            if name in phrasing:
+                title, kind = phrasing[name]
+                detail = ''
+                if name == 'conditions_frozen':
+                    detail = '条件版本 ' + str(event['revision'])
+                add(event['at'], title, detail, kind)
+            elif name.startswith('candidate_added:'):
+                field = name.split(':', 1)[1]
+                add(event['at'], '补充了条件：' + field_labels.get(field, field), '', 'ai')
+            elif name.startswith('literature_imported:'):
+                field = name.split(':', 1)[1]
+                add(event['at'], '从文献中导入条件：' + field_labels.get(field, field), '', 'ai')
+
+        # ② 应用内 AI 的模型调用（整理条件 / 生成方案）
+        def add_model(request_id, purpose):
             if model_client is None or not request_id:
                 return
             try:
@@ -707,30 +736,75 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             except (ValueError, KeyError, ModelError):
                 return
             receipt = (found or {}).get('receipt') or {}
-            value = receipt.get('structured_output')
             usage = receipt.get('usage') or {}
-            questions = value.get('questions') if isinstance(value, dict) else None
-            steps.append({'at': receipt.get('at') or '', 'kind': 'model', 'label': label,
-                          'request_id': request_id, 'model': receipt.get('requested_model'),
-                          'state': receipt.get('state') or 'unknown',
-                          'tokens': usage.get('total_tokens'),
-                          'output_keys': sorted(value)[:10] if isinstance(value, dict) else [],
-                          'questions': [str(item)[:300] for item in (questions or [])][:5]})
+            tokens = usage.get('total_tokens')
+            state = receipt.get('state') or 'unknown'
+            detail = '模型 ' + str(receipt.get('requested_model') or '')
+            if tokens:
+                detail += ' · ' + str(tokens) + ' tokens'
+            if state != 'completed':
+                detail += ' · 未完成（' + str(receipt.get('error') or state) + '）'
+            add(receipt.get('at'), '应用内 AI ' + purpose, detail,
+                'ai', 'ok' if state == 'completed' else 'attention')
 
         for request_id in (document.get('generated_batches') or {}):
-            add_model(request_id, '整理需求中的条件')
+            add_model(request_id, '整理了你的计算条件')
+
+        # ③ 方案准备阶段
         job = preparations.get(identifier) if preparations else None
+        candidate_steps = {
+            'queued': '正在排队准备计算方案',
+            'running': '正在核对准备条件',
+            'model_requested': '正在让应用内 AI 生成计算方案',
+            'preparing_files': '正在生成待提交的脚本与结构文件',
+            'clarification_answered': '已把你补充的信息交给应用内 AI',
+            'config_rebased': '已按当前部署重新核对方案基线',
+            'prepared': '方案已准备完成，等待你审核批准',
+            'clarification': '需要你补充信息才能继续准备方案',
+            'failed': '方案准备未通过，需要处理',
+            'rejected': '方案被拒绝',
+        }
         for event in (job or {}).get('events') or []:
+            state = event.get('state')
+            if state not in candidate_steps:
+                continue
             payload = event.get('payload') or {}
-            steps.append({'at': event.get('at'), 'kind': 'preparation',
-                          'label': event.get('label') or event.get('state'),
-                          'state': event.get('state'),
-                          'detail': payload.get('detail') or payload.get('message'),
-                          'questions': [str(item)[:300] for item in (payload.get('questions') or [])][:5]})
+            detail = str(payload.get('detail') or payload.get('message') or '')[:200]
+            if payload.get('questions'):
+                detail = ('需要确认：' + str(payload['questions'][0]))[:200]
+            add(event.get('at'), candidate_steps[state], detail, 'ai',
+                'attention' if state in ('failed', 'clarification', 'rejected') else 'ok')
         if job and (job.get('result') or {}).get('request_id'):
-            add_model(job['result']['request_id'], '生成计算方案')
+            add_model(job['result']['request_id'], '生成了计算方案')
+
+        # ④ 计算阶段（提交 → 运行 → 回收 → 分析）
+        execution = (execution_jobs.get(identifier) if execution_jobs is not None else None) or {}
+        execution_steps = {
+            'queued': '正在提交计算到 HPC',
+            'running': '正在核验许可并推进计算',
+            'awaiting_approval': '等待你批准方案后提交',
+            'waiting': '计算已在 HPC 运行，正在跟进状态',
+            'analyzed': '计算完成，结果与分析已就绪',
+            'analysis_failed': '计算完成，但自动分析未完成',
+            'diagnostics_saved': '计算未成功，已保存诊断信息',
+            'attention': '计算需要你处理后继续',
+            'rejected': '提交被拒绝',
+        }
+        for event in execution.get('events') or []:
+            state = event.get('state')
+            if state in execution_steps:
+                add(event.get('at'), execution_steps[state], '', 'compute',
+                    'attention' if state in ('attention', 'rejected', 'diagnostics_saved', 'analysis_failed') else 'ok')
+        job_id = execution.get('job_id')
+        if job_id:
+            add(execution.get('updated_at'), '已提交到 HPC，作业号 ' + str(job_id),
+                '你可以在结果页签查看实时状态', 'compute')
+
+        steps.sort(key=lambda item: str(item['at']))
+        latest = steps[-1] if steps else None
         return {'task_id': identifier, 'steps': steps,
-                'note': '这是应用内 AI 的实际步骤。模型回答原文保存在私有账本中；这里给出状态、用量与具体原因。'}
+                'now': (latest or {}).get('title') or '',
+                'note': '这是应用内 AI 的实时进度。技术细节（模型、用量、具体失败原因）在每一步的补充说明里。'}
 
     @app.get('/api/tasks/{identifier}/history')
     def history(identifier: str):

@@ -144,3 +144,33 @@ class WebTests(unittest.TestCase):
             self.assertEqual(client.post(url,json={'revision':1},headers=HEADERS).status_code,422)
             self.assertEqual(client.post(url,json={'revision':2},headers=HEADERS).status_code,422)
             self.assertEqual(transport.call_count,1)
+
+class ActivityFeedTests(unittest.TestCase):
+    """AI 活动必须是"给用户看的进度播报"，不能是内部事件名。"""
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.store=TaskStore(Path(self.tmp.name)/'tasks.sqlite')
+        self.client=TestClient(create_app(self.store),base_url=ORIGIN);self.addCleanup(self.client.close)
+        self.doc=self.store.create('合成任务','合成需求文本','research')
+
+    def test_steps_are_human_sentences_with_time_and_current_marker(self):
+        reply=self.client.get('/api/tasks/'+self.doc['id']+'/ai-activity')
+        self.assertEqual(reply.status_code,200,reply.text)
+        body=reply.json()
+        titles=[step['title'] for step in body['steps']]
+        self.assertTrue(any('已收到你的需求' in title for title in titles),titles)
+        # 内部事件名不得出现在给用户看的标题里
+        for raw in ('created','conditions_generated','guidance_added','config_rebased'):
+            self.assertFalse(any(title==raw or title.startswith(raw+':') for title in titles),titles)
+        # 每条都要有时间和类型，供界面画时间线
+        for step in body['steps']:
+            self.assertTrue(step.get('at'))
+            self.assertIn(step.get('kind'),('user','ai','compute','system'))
+        self.assertIn('now',body)
+
+    def test_guidance_appears_as_the_user_s_own_words(self):
+        self.store.add_guidance(self.doc['id'],self.doc['revision'],'势函数请从我们的势函数库中选取')
+        body=self.client.get('/api/tasks/'+self.doc['id']+'/ai-activity').json()
+        self.assertTrue(any('引导' in step['title'] for step in body['steps']),[s['title'] for s in body['steps']])
+

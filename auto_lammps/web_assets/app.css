@@ -725,3 +725,16 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 .ai-activity-head small{font-size:10px;color:#94a0b2}
 .ai-activity-list p{margin:4px 0 0;overflow-wrap:anywhere}
 .attention-detail{margin:4px 0 0;font-size:12px;color:#ad5a4e;background:#fff6f5;border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
+
+/* 进度播报：时间线（每步一句人话 + 时间，最新一条标"现在"） */
+.timeline{list-style:none;margin:0;padding:0}
+.timeline-item{position:relative;padding:0 0 14px 22px;border-left:1px solid #e3ecf5;margin-left:5px}
+.timeline-item:last-child{border-left-color:transparent;padding-bottom:0}
+.timeline-dot{position:absolute;left:-5px;top:3px;width:9px;height:9px;border-radius:50%;background:#c7d6e6}
+.timeline-item.current .timeline-dot{background:#2baa77;box-shadow:0 0 0 3px rgba(43,170,119,.15)}
+.timeline-item.attention .timeline-dot{background:#e0a33c}
+.timeline-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.timeline-head strong{font-size:13px;color:#22384d}
+.timeline-head small{font-size:11px;color:#94a0b2;font-variant-numeric:tabular-nums}
+.timeline-body p{margin:4px 0 0;font-size:12px;overflow-wrap:anywhere}
+#ai-activity{max-height:340px;overflow:auto}
