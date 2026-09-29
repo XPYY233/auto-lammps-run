@@ -1769,6 +1769,8 @@ $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-
 // 展开时自动加载活动明细（收起时不请求）。
 const activityPanel=document.getElementById('ai-activity-panel');
 if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)action(refreshActivity);};
+checkForUpdate();setInterval(checkForUpdate,30000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkForUpdate();});
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();action(refreshActivity);});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
@@ -1778,6 +1780,17 @@ let taskFilter='all', selectedPlot='full', discussionRequest=null;
 function taskFinished(t){return Boolean(t.user_finished)||Boolean((t.lifecycle_events||[]).some(e=>e&&e.action==='finish'));}
 
 // 统一绑定：元素不存在时安静跳过，避免"少一个元素就整页停止渲染"。
+// 版本自检：我改完并部署后，页面会自动刷新，用户不需要手动清缓存或刷新。
+let assetsSignature=null;
+async function checkForUpdate(){
+  try{
+    const data=await api('/api/schema');
+    const now=JSON.stringify(data.assets||{});
+    if(assetsSignature===null){assetsSignature=now;return;}
+    if(now!==assetsSignature){assetsSignature=now;notice('检测到界面已更新，正在自动刷新…');setTimeout(()=>location.reload(),600);}
+  }catch(error){/* 网络抖动时忽略，不影响使用 */}
+}
+
 function bind(id,handler){const el=document.getElementById(id);if(el)el.onclick=handler;return Boolean(el);}
 
 function questionText(question){return typeof question==='string'?question:String(question?.question||'');}

@@ -4,6 +4,7 @@ The browser can save operator model connections, and versioned HPC settings. Exi
 """
 import argparse
 from contextlib import asynccontextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -471,6 +472,10 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 # Which copy of the application is really serving this port; the desktop launcher
                 # refuses to run when it differs from the environment its configuration names.
                 'installation': {'package': str(Path(__file__).resolve().parent), 'python': sys.executable},
+                # 前端资产指纹：页面据此判断自己是否为旧版本并自动刷新。
+                'assets': {name: (hashlib.sha256((ASSETS/name).read_bytes()).hexdigest()
+                                  if (ASSETS/name).is_file() else None)
+                           for name in ('app.js', 'app.css')},
                 'automatic_workflow': workflow.availability() if workflow else {'configured':False,'enabled':False},
                 'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else
