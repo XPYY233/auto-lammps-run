@@ -704,6 +704,13 @@ async function refreshPlanReview(){
   if(geometry.formula||geometry.atoms)summary.append(node('p',`结构：${geometry.formula||''} ${geometry.atoms?geometry.atoms+' 原子':''}`,'subtle'));
   const analysis=review.analysis||{};
   if(analysis.quantity)summary.append(node('p',`分析：${analysis.quantity}（文件 ${(analysis.files||[]).join('、')}）`,'subtle'));
+  if(review.automatic_check){
+    const check=review.automatic_check;
+    summary.append(node('p','应用已检查需求与步骤的一致性；实际运行后还会核对输出。','form-note'));
+    const details=node('details');details.append(node('summary','查看应用的需求核对记录'));
+    for(const item of check.coverage||[])details.append(node('p',item.requirement+'：'+item.evidence));
+    summary.append(details);
+  }
   const files=$('#plan-files'); files.replaceChildren();
   for(const file of (review.files||[])){
     const block=node('details',undefined,'plan-file');

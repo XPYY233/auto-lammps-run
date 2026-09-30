@@ -16,7 +16,7 @@ from .slurm_read import _write_new
 
 VERSION = 1
 UNITS = {'1','step','K','bar','atm','Pa','MPa','GPa','eV','kcal/mol',
-         'angstrom','angstrom^2','nm','nm^2','ps','fs','g/cm^3'}
+         'eV/angstrom','angstrom','angstrom^2','nm','nm^2','ps','fs','g/cm^3'}
 MAX_TABLE_BYTES = 8*1024*1024
 MAX_ROWS = 100000
 # 契约上限：校验器与候选提示词共用同一来源，禁止在提示词里手写副本（防漂移）。

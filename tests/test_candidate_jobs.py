@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -72,6 +72,17 @@ class CandidateJobTests(unittest.TestCase):
                 return job
             time.sleep(.01)
         self.fail('Preparation did not reach a terminal event')
+
+    def test_guidance_revision_does_not_replace_frozen_conditions(self):
+        with patch.object(self.service.pool,'submit'):
+            original=self.enqueue()
+        self.tasks.add_guidance(self.doc['id'],self.doc['revision'],'Retain all requested scientific conditions')
+        self.service.run(self.doc['id'])
+        final=self.finished()
+        self.assertEqual(final['state'],'prepared',final.get('result'))
+        self.assertEqual(final['revision'],original['revision'])
+        self.assertEqual(final['condition_sha256'],original['condition_sha256'])
+        self.assertEqual(self.fixture.transport.call_count,1)
 
     def test_duplicate_concurrent_clients_and_restart_keep_one_request(self):
         second = self.make_service()

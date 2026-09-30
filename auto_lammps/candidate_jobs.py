@@ -234,9 +234,15 @@ class CandidateService:
                     answers = (json.loads(row['payload']) or {}).get('answers')
             guidance = [item['note'] for item in self.tasks.guidance(identifier)]
             try:
-                result = generate_research_candidate(self.client, self.tasks, identifier, job['revision'], self.adapter,
+                revision=self.tasks.get(identifier)['revision']
+                inputs=research_inputs(self.tasks,identifier,revision)
+                if inputs['condition_record_sha256']!=job['condition_sha256']:
+                    raise CandidateError('Frozen research conditions changed; preserve the original preparation identity')
+                result = generate_research_candidate(self.client, self.tasks, identifier, revision, self.adapter,
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
                             output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan)
+                if self.tasks.get(identifier)['revision']!=revision:
+                    raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
                 if result['status'] == 'clarification_required':
                     state, payload = 'clarification', {'summary': result['proposal']['summary'],
                         'questions': result['proposal']['questions'], 'request_id': result['request_id']}
@@ -286,6 +292,10 @@ class CandidateService:
                 except (OSError, ValueError):
                     entry['content'] = None
             review['files'].append(entry)
+            if item['path']=='generation.json' and entry.get('content'):
+                checks=json.loads(entry['content']).get('plan_reviews',[])
+                if checks:
+                    review['automatic_check']={k:checks[-1][k] for k in ('issues','coverage','summary')}
         return review
 
     def file(self, identifier, name):
