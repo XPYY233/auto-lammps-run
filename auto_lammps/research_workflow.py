@@ -10,10 +10,10 @@ from .authorization import AutomaticAuthorization
 from .manifest import canonical, sha256
 from .tasks import TaskError, StaleTask
 
-ACTIVE = {'queued', 'preparing'}
+ACTIVE = {'queued', 'preparing', 'awaiting_approval'}
 BOOKKEEPING = {'rebased'}
 LABELS = {'queued': '等待自动准备', 'preparing': '正在自动准备计算方案',
-          'handed_off': '已进入自动计算流程', 'attention': '需要处理后继续',
+          'awaiting_approval':'方案已就绪 · 等待确认', 'handed_off': '已进入自动计算流程', 'attention': '需要处理后继续',
           'rebased': '已按当前版本重新基线'}
 
 
@@ -77,9 +77,10 @@ class ResearchWorkflow:
             available = self.availability()
             if not available['enabled']:
                 raise TaskError(available['reason'])
+            changed = self.candidates.effective_config_sha256(identifier) != self.candidates.config_sha256
             self.candidates.rebaseline(identifier)
             job = self.candidates.history.get(identifier)
-            if job is not None and job['state'] in ('prepared', 'failed', 'interrupted', 'configuration_changed'):
+            if job is not None and (changed or job['state'] in ('failed', 'interrupted', 'configuration_changed')):
                 # 部署/配置已更新：旧方案不能沿用到新部署，显式重启时按当前部署重新组织一次。
                 # 每轮必须有不同的请求 id，否则会被账本按幂等拒绝；轮次取自已有事件。
                 rounds = sum(1 for event in (job.get('events') or [])
@@ -137,8 +138,11 @@ class ResearchWorkflow:
                     if candidate_baseline != self.candidates.config_sha256:
                         state, reason = 'attention', 'configuration_changed'
                     elif candidate['state'] == 'prepared':
-                        self.execution.enqueue(identifier, current_revision)
-                        state, reason = 'handed_off', ''
+                        if self.execution.approved_plan(identifier):
+                            self.execution.enqueue(identifier, current_revision)
+                            state, reason = 'handed_off', ''
+                        else:
+                            state, reason = 'awaiting_approval', ''
                     elif candidate['state'] in {'queued', 'running', 'model_requested', 'preparing_files'}:
                         state, reason = 'preparing', ''
                     else:

@@ -47,7 +47,7 @@ def candidate_check(snapshot, *, max_atoms):
                 or context['resources']!=manifest['resources']
                 or generation['request_id']!=sha256(canonical(context))[:32]):
             raise Conflict('Frozen analysis, model identity or resources changed')
-        expected=render_candidate_script(proposal,generation['potential_receipt']['units'],generation['potential_receipt']['commands'])
+        expected=render_candidate_script(proposal,generation['potential_receipt']['units'],generation['potential_receipt']['commands'],output_layout=layout)
         if load(manifest['entrypoint'])!=expected:
             raise Conflict('Input differs from the frozen adapter and model workflow')
     return dict(schema_version=1,manifest_sha256=snapshot.digest,condition_sha256=context['condition_record_sha256'],

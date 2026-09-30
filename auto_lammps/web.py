@@ -1054,7 +1054,7 @@ def main():
                     software_sha256=config['software_sha256'], packages=config['packages'],
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
-                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'))
+                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'), review_plan=True)
     execution_jobs=None
     if args.execution_config:
         if ledger is None:parser.error('Execution requires an existing ledger')

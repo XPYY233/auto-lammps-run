@@ -101,20 +101,21 @@ class CandidateHistory:
 
 
 class CandidateService:
-    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000, output_layout='isolated'):
+    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000, output_layout='isolated', review_plan=False):
         output_prefix(output_layout)
         self.output_layout = output_layout
+        self.review_plan = review_plan
         self.tasks, self.client, self.adapter = tasks, client, adapter
         self.resources, self.max_atoms = resources, max_atoms
         self.snapshots = private_directory(snapshots)
         self.history = CandidateHistory(tasks)
-        config = {'resources': asdict(resources), 'max_atoms': max_atoms, 'model': asdict(client.calls.config),
+        config = {'review_plan':review_plan, 'resources': asdict(resources), 'max_atoms': max_atoms, 'model': asdict(client.calls.config),
                   'requested_model': getattr(client,'model',client.calls.config.model), 'model_ledger': str(client.calls.path.resolve()), 'catalog': str(adapter.catalog.directory),
                   'pins': sorted(adapter.allowed_pins), 'software': adapter.software_sha256,
                   'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
-                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'analysis.py', 'structures.py', 'potentials.py')}}
+                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'candidate_tools.py', 'analysis.py', 'structures.py', 'potentials.py')}}
         if output_layout != 'isolated': config['output_layout'] = output_layout
         self.config_sha256 = sha256(canonical(config))
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-preparation')
@@ -235,7 +236,7 @@ class CandidateService:
             try:
                 result = generate_research_candidate(self.client, self.tasks, identifier, job['revision'], self.adapter,
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
-                            output_layout=self.output_layout, answers=answers, guidance=guidance)
+                            output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan)
                 if result['status'] == 'clarification_required':
                     state, payload = 'clarification', {'summary': result['proposal']['summary'],
                         'questions': result['proposal']['questions'], 'request_id': result['request_id']}

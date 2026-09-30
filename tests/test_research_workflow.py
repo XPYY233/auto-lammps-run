@@ -86,12 +86,15 @@ class WorkflowTests(unittest.TestCase):
             self.wait_for(lambda:self.candidates.history.get(self.doc['id']),lambda x:bool(x) and x.get('state')=='prepared')
             refused=web.post(self.url+'/execution',headers=HEADERS,json={'revision':self.doc['revision']})
             self.assertEqual(refused.status_code,409,refused.text)
+            waiting=self.wait_for(lambda:web.get(self.url+'/execution').json(),lambda x:(x.get('automatic_workflow',{}).get('workflow') or {}).get('state')=='awaiting_approval')
+            before=self.candidates.history.get(self.doc['id'])['result']['snapshot_sha256']
             self.approve_plan()
             reply=web.post(self.url+'/workflow',headers=HEADERS,json={'revision':self.doc['revision']})
             self.assertEqual(reply.status_code,202,reply.text)
             for _ in range(3):
                 self.assertEqual(web.post(self.url+'/workflow',headers=HEADERS,json={'revision':self.doc['revision']}).status_code,202)
             result=self.wait_for(lambda:web.get(self.url+'/execution').json(),lambda x:(x.get('job') or {}).get('state')=='analyzed')
+            self.assertEqual(self.candidates.history.get(self.doc['id'])['result']['snapshot_sha256'],before)
             self.assertEqual(result['job']['dispatch_count'],1)
             self.assertEqual(result['job']['max_attempts'],2)
             self.assertEqual(result['job']['scientific_status'],'not_evaluated')

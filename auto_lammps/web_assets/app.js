@@ -646,79 +646,6 @@ function planFilesText(review){
   return (review?.files||[]).map(file=>`${file.name}  ${(file.size/1024).toFixed(1)} KiB  ${String(file.sha256||'').slice(0,12)}`).join('\n');
 }
 
-async function refreshPlanReview(){
-  const panel=$('#plan-review-panel'); if(!panel) return;
-  const id=current?.id; if(!id){panel.hidden=true;return;}
-  let review;
-  try { review=await api(`/api/tasks/${id}/plan`); }
-  catch(error){ panel.hidden=true; return; }
-  if(current?.id!==id) return;
-  const prepared=review.state==='prepared';
-  panel.hidden=!prepared;
-  if(!prepared) return;
-  $('#plan-status').textContent=(review.approved?'已批准当前方案，可以提交。':'方案已准备，等待你审核。')
-    + (review.summary?'　摘要：'+review.summary:'');
-  const summary=$('#plan-summary'); summary.replaceChildren();
-  const geometry=review.geometry||{};
-  if(geometry.formula||geometry.atoms)summary.append(node('p',`结构：${geometry.formula||''} ${geometry.atoms?geometry.atoms+' 原子':''}`,'subtle'));
-  const analysis=review.analysis||{};
-  if(analysis.quantity)summary.append(node('p',`分析：${analysis.quantity}（文件 ${(analysis.files||[]).join('、')}）`,'subtle'));
-  const files=$('#plan-files'); files.replaceChildren();
-  for(const file of (review.files||[])){
-    const block=node('details',undefined,'plan-file');
-    block.append(node('summary',`${file.name} · ${(file.size/1024).toFixed(1)} KiB · ${String(file.sha256||'').slice(0,12)}`));
-    if(file.content){
-      const pre=node('pre',file.content.slice(0,20000),'plan-code');
-      block.append(pre);
-      if(file.name==='in.lammps'){
-        const box=node('textarea',undefined,'plan-edit'); box.rows=8; box.value=file.content;
-        box.placeholder='如需直接改脚本，可在此编辑后点“保存脚本并重新准备”（会重新生成方案并需要再次批准）';
-        const save=node('button','保存脚本并重新准备','quiet'); save.type='button';
-        save.onclick=()=>action(async()=>{
-          await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,
-            note:'请按以下我直接修改过的脚本内容重新准备方案：\n'+box.value});
-          await afterChange('已提交你的脚本修改，应用会重新组织方案（需再次批准）。');
-        });
-        block.append(box,save);
-      }
-    }
-    files.append(block);
-  }
-  const approve=$('#plan-approve');
-  const note=$('#plan-note');
-  // 按钮永远给出可执行动作与真实结果：批准→提交；已提交→显示状态；失败→可重试并显示具体原因。
-  let execution={};
-  try { execution=await api(`/api/tasks/${current.id}/execution`); } catch(error) { execution={}; }
-  const job=execution.job||{};
-  const dispatched=Boolean(job.job_id);
-  const active=['queued','running','waiting','dispatching'].includes(job.state);
-  approve.disabled=dispatched||active;
-  approve.textContent=dispatched?'已提交，等待计算':(active?'提交中…':(review.approved?'提交计算':'批准并提交 HPC'));
-  const reason=job.reason?('　当前状态：'+(job.label||job.state||'')+'（'+job.reason+'）'):'';
-  note.textContent=(dispatched?'已产生作业号 '+job.job_id+'。':(review.approved?'方案已批准，点“提交计算”即提交真实计算。':'批准后应用才会提交真实计算；方案一旦变化需要重新批准。'))
-    +' 方案变化需要重新批准。'+reason;
-  approve.onclick=()=>action(async()=>{
-    approve.disabled=true;
-    if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
-    const automatic=schema.automatic_workflow?.configured;
-    try {
-      await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
-      await afterChange('已提交申请；应用会提交 HPC 并自动跟进状态。');
-    } catch(error) {
-      // 失败必须说清原因，并保留可重试状态（按钮不会永久变灰）。
-      await afterChange('提交未通过：'+error.message);
-    }
-    await refreshPlanReview(); await refreshCandidate();
-  });
-  $('#plan-revise').onclick=()=>action(async()=>{
-    const note=($('#guidance-note')?.value||'').trim();
-    if(!note){notice('请在“引导与暂停”里写下你的修改意见，再点这里。',true);return;}
-    await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,note});
-    await afterChange('已把你的意见交给应用内 AI，它会重新组织方案（需再次批准）。');
-    await refreshPlanReview(); await refreshCandidate();
-  });
-}
-
 let activityTimer=null;
 
 async function refreshActivity(){
@@ -791,6 +718,7 @@ async function refreshPlanReview(){
         save.onclick=()=>action(async()=>{
           await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,
             note:'请按以下我直接修改过的脚本内容重新准备方案：\n'+box.value});
+          current=await api(`/api/tasks/${current.id}`);
           await afterChange('已提交你的脚本修改，应用会重新组织方案（需再次批准）。');
         });
         block.append(box,save);
@@ -814,6 +742,7 @@ async function refreshPlanReview(){
   approve.onclick=()=>action(async()=>{
     approve.disabled=true;
     if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
+    current=await api(`/api/tasks/${current.id}`);
     const automatic=schema.automatic_workflow?.configured;
     try {
       await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
@@ -828,44 +757,10 @@ async function refreshPlanReview(){
     const note=($('#guidance-note')?.value||'').trim();
     if(!note){notice('请在“引导与暂停”里写下你的修改意见，再点这里。',true);return;}
     await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,note});
+    current=await api(`/api/tasks/${current.id}`);
     await afterChange('已把你的意见交给应用内 AI，它会重新组织方案（需再次批准）。');
     await refreshPlanReview(); await refreshCandidate();
   });
-}
-
-async function refreshActivity() {
-  try {
-  const box=$('#ai-activity'); if(!box) return;
-  const id=current?.id; if(!id){box.replaceChildren();return;}
-  let data;
-  try { data=await api(`/api/tasks/${id}/ai-activity`); }
-  catch(error){ box.replaceChildren(node('p','无法读取 AI 活动：'+error.message,'subtle')); return; }
-  if(current?.id!==id) return;
-  $('#ai-activity-note').textContent=data.note||'';
-  box.replaceChildren();
-  const steps=data.steps||[];
-  if(!steps.length){box.append(node('p','这个任务还没有 AI 活动记录。','subtle'));return;}
-  const list=node('ol',undefined,'ai-activity-list');
-  for(const step of steps){
-    const item=node('li');
-    const head=node('div',undefined,'ai-activity-head');
-    const label=step.kind==='model'?'模型调用':(step.kind==='preparation'?'方案准备':'任务记录');
-    head.append(node('span',label,'badge '+(step.state==='failed'?'failed':step.state==='completed'?'completed':'pending')),
-                node('strong',step.label||''),
-                node('small',(step.at||'').replace('T',' ').slice(0,19),'subtle'));
-    item.append(head);
-    const facts=[];
-    if(step.model)facts.push('模型 '+step.model);
-    if(step.tokens!==undefined&&step.tokens!==null)facts.push(step.tokens+' tokens');
-    if(step.state)facts.push('状态 '+step.state);
-    if(step.output_keys&&step.output_keys.length)facts.push('产出 '+step.output_keys.join('/'));
-    if(facts.length)item.append(node('p',facts.join(' · '),'subtle'));
-    if(step.detail)item.append(node('p','具体原因：'+step.detail,'attention-detail'));
-    for(const question of (step.questions||[]))item.append(node('p','待处理：'+question,'subtle'));
-    list.append(item);
-  }
-  box.append(list);
-  } catch(error){ const box=$('#ai-activity'); if(box) box.replaceChildren(node('p','AI 活动读取失败：'+error.message,'subtle')); }
 }
 
 async function refreshCandidate() {
@@ -985,9 +880,9 @@ $('#prepare-candidate').onclick=()=>action(async()=>{
 });
 setInterval(async()=>{
   if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
-     !['queued','running','model_requested','preparing_files'].includes(candidateState)) return;
+     !['queued','running','model_requested','preparing_files',null].includes(candidateState)) return;
   candidatePolling=true;
-  try {await refreshCandidate();await renderHistory();await refreshModelStatus();}
+  try {await refreshCandidate();await renderHistory();await refreshModelStatus();if(candidateState==='prepared') await refreshPlanReview();}
   catch(error) {notice('暂时无法读取准备进度；不会重新发起模型请求。',true);}
   finally {candidatePolling=false;}
 },3000);

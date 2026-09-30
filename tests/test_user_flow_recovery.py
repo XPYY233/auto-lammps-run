@@ -70,3 +70,46 @@ class ExecutionRecoveryTests(unittest.TestCase):
         self.assertEqual(reopened.current_request_id(self.task),new_id)
         self.assertEqual(reopened.status(self.task)['job']['request_id'],new_id)
         self.assertEqual(reopened.status(self.task)['job']['dispatch_count'],0)
+
+class AdapterPlanningTests(unittest.TestCase):
+    setUp=candidate_tests.AgentCandidateTests.setUp
+    def test_table_tool_writes_headers_once_and_preserves_frozen_scalar(self):
+        from auto_lammps.candidate_tools import expand_tools, check_table_writers
+        plan={'tables':[{'file':'result.dat','columns':[{'name':'step','unit':'step'},{'name':'energy','unit':'eV'}]}]}
+        body=expand_tools('capture saved pe\nemit_table result.dat "0 ${saved}"\nemit_table result.dat "1 $(pe)"',plan,'/output/')
+        self.assertIn('variable saved equal $(pe)',body)
+        self.assertEqual(body.count('file /output/result.dat'),1)
+        check_table_writers(body,plan,'/output/')
+        for bad in (body.replace('# units: step eV','# units: step 1'),body+'\nprint "0 5" file /output/result.dat'):
+            with self.assertRaises(ValueError):check_table_writers(bad,plan,'/output/')
+        with self.assertRaises(ValueError):expand_tools('emit_table result.dat "0 1 2"',plan,'')
+
+    def test_accounted_reviewer_repairs_omission_before_freezing(self):
+        import json
+        from auto_lammps.agent_candidates import generate_candidate_draft
+        from auto_lammps.deepseek import DeepSeekClient,ModelCalls
+        from test_deepseek import response
+        value=deepcopy(self.value)
+        value['analysis']['files']=['result.dat']
+        value['analysis']['plan']['tables'][0]['file']='result.dat'
+        value['analysis']['plan']['operations'][0]['file']='result.dat'
+        value['workflow']='run 0\nemit_table result.dat "0 $(pe)"'
+        calls=ModelCalls(self.root/'review-models.sqlite',self.calls.config,max_requests=4)
+        seen=[]
+        def transport(body,*args):
+            messages=json.loads(body)['messages'];seen.append(messages)
+            if messages[0]['content'].startswith('Audit a proposed'):
+                issues=['Missing requested synthetic stage'] if len(seen)==2 else []
+                answer={'issues':issues,'coverage':[{'requirement':'synthetic stage','evidence':'run 0 and result.dat'}],'summary':'Static check only'}
+            else:answer=value
+            return 200,response(answer)
+        client=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
+        result=generate_candidate_draft(client,self.adapter,task_text='synthetic task',units='metal',
+            resources=self.resources,store=self.root/'reviewed',require_analysis_plan=True,review_plan=True)
+        self.assertEqual(len(seen),4)
+        self.assertIn('Missing requested synthetic stage',seen[2][-1]['content'])
+        generation=result['generation']
+        self.assertEqual(len(generation['plan_reviews']),2)
+        self.assertFalse(generation['scientific_conditions_verified'])
+        self.assertEqual(len(generation['model_receipts']),4)
+        self.assertIn('file /output/result.dat',(result['snapshot'].path/'in.lammps').read_text())
