@@ -19,7 +19,7 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers
 
-GENERATOR_VERSION = 8
+GENERATOR_VERSION = 9
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -60,6 +60,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
     writes, evaluations = set(), 0
     undeclared=set()
     groups, deleted, loaded = {}, set(), set()
+    variables = {}
     counts = structures or {}
     atom_count = counts.get("initial")
     for line in lines:
@@ -93,6 +94,14 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
             raise CandidateError('Unsupported variable definition')
         if command == 'variable' and tokens[2]=='equal' and len(tokens)!=4:
             raise CandidateError('variable '+tokens[1]+' equal needs ONE expression argument: quote the entire expression if it contains spaces')
+        if command == 'variable':
+            name, style = tokens[1:3]
+            if style=='delete':
+                variables.pop(name,None)
+            else:
+                if variables.get(name)=='index':
+                    raise CandidateError('Index variable '+name+' survives load_structure/clear and cannot be reassigned; delete it first or use distinct names')
+                variables[name]=style
         if command == 'fix' and (len(tokens) < 4 or tokens[3] not in FIX_STYLES):
             raise CandidateError('Unsupported fix style')
         if command == 'compute' and (len(tokens) < 4 or tokens[3] not in COMPUTE_STYLES):
@@ -463,6 +472,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'The immutable snapshot retains potential files, resource metadata, provenance and checksums; '
                      'the controller retains log.lammps. These do not need LAMMPS copy/print operations or an '
                      'extra analysis.files entry. Do not request fabricated potential_source files. '
+                     'LAMMPS parser fact: variable E equal $(pe) stores the IMMEDIATE numeric energy at '
+                     'that line (for example variable E equal -100), unlike variable E equal pe. '
+                     'Do NOT flag correct capture output as dynamic or request it be repaired. '
                      'Do not report these as missing from the partial workflow. Supplied resource_metadata is the '
                      'source of potential provenance; fabricated source claims in workflow must be removed. '
                      'Check actual commands, not claims in summary: every condition and '

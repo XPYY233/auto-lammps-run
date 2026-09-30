@@ -141,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 8)
+        self.assertEqual(record['input']['generator_version'], 9)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -217,6 +217,13 @@ class AgentCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(CandidateError, 'ONE expression'):
             validate_body('variable energy equal v_a - v_b'+tail, ['final.data'])
         validate_body('variable energy equal "v_a - v_b"'+tail, ['final.data'])
+
+    def test_index_variable_survives_structure_switch(self):
+        body='variable n index 1\nload_structure second\nvariable n index 2\nrun 0\nprint "x" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError,'survives'):
+            validate_body(body,['final.data'],structures={'initial':2,'second':4})
+        validate_body(body.replace('variable n index 2','variable n delete\nvariable n index 2'),
+                      ['final.data'],structures={'initial':2,'second':4})
 
     def test_existing_research_task_uses_selected_conditions_without_free_prompt(self):
         tasks = TaskStore(self.root / 'tasks.sqlite')

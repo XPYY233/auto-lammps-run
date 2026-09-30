@@ -19,8 +19,22 @@ Conventional cubic cells contain bcc=2, fcc=4, diamond=8 atoms; count(all) gives
 minimize changes atoms only; box relaxation requires an active fix box/relax, and
 unfix before a later fixed-box stage. vmax if specified must be strictly positive. Do not use box/relax with vmax=0 for a fixed-box stage; omit the fix entirely. Check each requested condition separately.
 Thermo keywords and stored energies must be current for the stage being recorded.
+Parser facts: $(pe) is evaluated IMMEDIATELY before the variable command executes.
+Thus capture E pe -> variable E equal $(pe) stores a numeric constant, NOT a dynamic
+reference to pe. It is different from variable E equal pe. Do not repair this correct
+capture into a dynamic reference. emit_table lowers to print with exact headers.
+load_structure uses clear, which does NOT delete input variables. Repeated index
+variables cannot be reassigned by redefining them; use distinct names or delete first.
+Use numeric literal IDs for static group/delete operations. Quote the entire equal
+expression when it contains spaces. A conventional cubic lattice constant is lx/nx,
+not the full supercell length lx. Retain both the pre-defect and post-defect initial
+structures when requested. Define computes before minimization and include their
+values in thermo output so they are current; do not create a new pressure compute
+after minimization and read it without initialization. Use thermo pressure keywords
+already evaluated in that stage when possible.
 Sources: https://docs.lammps.org/variable.html , https://docs.lammps.org/print.html ,
 https://docs.lammps.org/fix_box_relax.html , https://docs.lammps.org/thermo_style.html .
+https://docs.lammps.org/Commands_parse.html , https://docs.lammps.org/clear.html .
 These rules are tool knowledge, not reference answers or proof of scientific success.
 '''
 
