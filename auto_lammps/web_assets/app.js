@@ -1576,6 +1576,11 @@ function renderExecutionControls(){
   addInfo('资源核算',job.accounted?'已核算':'待核算');addInfo('科学结论','尚未核验');
   if(!executionState.worker_alive&&['queued','running','waiting'].includes(job.state))box.append(node('p','后台当前未运行；恢复服务后继续已有请求，不会重复提交。','form-note'));
   if(job.state==='attention')box.append(node('p',job.reason==='deployment_file_missing'?'执行所需的部署文件尚未就绪，记录已保留。':job.reason==='deployment_changed'?'执行配置发生变化，需要核对后恢复。':'执行检查未通过，记录已保留；不会自动重提计算。','form-note'));
+  if(job.state==='attention'){
+   const resume=node('button',job.job_id?'恢复状态跟进':'重新核对并继续提交','primary');
+   resume.onclick=()=>action(async()=>{resume.disabled=true;await api(`/api/tasks/${current.id}/execution/recheck`,{revision:current.revision});await refreshWorkspace();await refreshPlanReview();});
+   box.append(resume);
+  }
   const details=node('details');details.append(node('summary','执行历史'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
  }else{
   $('#task-information').replaceChildren();
