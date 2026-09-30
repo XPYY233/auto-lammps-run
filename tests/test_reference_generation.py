@@ -100,7 +100,7 @@ class ReferenceGenerationTests(unittest.TestCase):
         self.transport.side_effect = TimeoutError('synthetic unknown')
         with self.assertRaises(ModelError): self.generate()
         with self.assertRaisesRegex(ModelError, 'requires_attention'): self.generate()
-        self.assertEqual(self.transport.call_count, 2, '完全没有响应的传输失败现在做一次有界重试，重试次数如实记录')
+        self.assertEqual(self.transport.call_count, 1, '未知响应保留意图，不隐式重发')
         self.assertEqual(self.store.get(self.doc['id']), self.doc)
         with self.store.transaction() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM reference_intents').fetchone()[0], 1)
