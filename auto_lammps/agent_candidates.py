@@ -503,8 +503,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             try:
                 if on_stage: on_stage('repairing_plan')
                 repaired = client.complete_json(repair_id, repair_messages)
-            except ModelError:
-                # Preserve the actual provider failure, not the previous validator diagnosis.
+            except ModelError as model_error:
+                # If no repair was sent, the known validation error remains the cause.
+                # A real provider failure must not be disguised as that old diagnosis.
+                if str(model_error)=='model_budget_exhausted': raise error
                 raise
             if (repaired['receipt']['state'] != 'completed'
                     or repaired['receipt']['output_sha256'] != sha256(canonical(repaired['value']))):
