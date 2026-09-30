@@ -18,9 +18,9 @@ from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
 BOOKKEEPING = {'config_rebased', 'clarification_answered'}
-ACTIVE = {'running', 'model_requested', 'preparing_files'}
+ACTIVE = {'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
 LABELS = {'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
-          'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
+          'checking_plan':'核对需求与方案', 'repairing_plan':'自动修正方案', 'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
           'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
 ERRORS = {'model_budget_exhausted': '模型额度已用完，没有自动重试。',

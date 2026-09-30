@@ -15,8 +15,9 @@ stage, before another minimization/deletion changes it. It compiles to variable 
 equal $(expression). Refer to saved variables as v_name inside formulas and $(...),
 or ${name} in output. Bare variable names inside $(...) are not valid thermo keywords.
 Use fnorm/fmax thermo keywords for force diagnostics, not max(all,fx).
+Conventional cubic cells contain bcc=2, fcc=4, diamond=8 atoms; count(all) gives the actual current atom count. Do not confuse cell count with atom count.
 minimize changes atoms only; box relaxation requires an active fix box/relax, and
-unfix before a later fixed-box stage. Check each requested condition separately.
+unfix before a later fixed-box stage. vmax if specified must be strictly positive. Do not use box/relax with vmax=0 for a fixed-box stage; omit the fix entirely. Check each requested condition separately.
 Thermo keywords and stored energies must be current for the stage being recorded.
 Sources: https://docs.lammps.org/variable.html , https://docs.lammps.org/print.html ,
 https://docs.lammps.org/fix_box_relax.html , https://docs.lammps.org/thermo_style.html .

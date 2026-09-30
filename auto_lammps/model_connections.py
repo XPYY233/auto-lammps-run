@@ -150,7 +150,7 @@ class ModelConnections:
             return value.get('key')
         value = self._read(provider) or {}
         return DeepSeekClient(calls, transport=transport or https_transport,
-                              key_reader=key_reader, model=value.get('model') or None)
+                              key_reader=key_reader, model=value.get('model') or None, thinking=True)
 
     def check(self, provider='deepseek-official', *, calls, identifier=None, transport=None):
         """One minimal accounted request proving the saved route can be called."""

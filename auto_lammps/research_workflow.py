@@ -143,7 +143,7 @@ class ResearchWorkflow:
                             state, reason = 'handed_off', ''
                         else:
                             state, reason = 'awaiting_approval', ''
-                    elif candidate['state'] in {'queued', 'running', 'model_requested', 'preparing_files'}:
+                    elif candidate['state'] in {'queued', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}:
                         state, reason = 'preparing', ''
                     else:
                         state, reason = 'attention', 'candidate_'+candidate['state']

@@ -101,7 +101,9 @@ class AdapterPlanningTests(unittest.TestCase):
             if messages[0]['content'].startswith('Audit a proposed'):
                 issues=['Missing requested synthetic stage'] if len(seen)==2 else []
                 answer={'issues':issues,'coverage':[{'requirement':'synthetic stage','evidence':'run 0 and result.dat'}],'summary':'Static check only'}
-            else:answer=value
+            else:
+                answer=deepcopy(value)
+                if len(seen)==3: answer['workflow']='run 0\n'+answer['workflow']
             return 200,response(answer)
         client=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
         result=generate_candidate_draft(client,self.adapter,task_text='synthetic task',units='metal',

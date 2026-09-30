@@ -80,6 +80,16 @@ class DeepSeekTests(unittest.TestCase):
             DeepSeekClient(reopened, transport=self.transport).complete_json('a'*32, MESSAGES)
         self.assertEqual(self.transport.call_count, 1)
 
+    def test_explicit_thinking_mode_preserves_accounting_and_json(self):
+        client=self.client(1)
+        client.thinking=True
+        result=client.complete_json('b'*32, MESSAGES)
+        body=json.loads(self.transport.call_args.args[0])
+        self.assertEqual(body['thinking'], {'type':'enabled'})
+        self.assertEqual(body['response_format'], {'type':'json_object'})
+        self.assertTrue(result['receipt']['thinking'])
+        self.assertEqual(self.calls.status()['remaining_requests'],0)
+
     def test_concurrent_workers_share_last_request_slot(self):
         self.client(1)
         def execute(index):

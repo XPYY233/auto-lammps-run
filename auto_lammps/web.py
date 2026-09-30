@@ -593,7 +593,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if workflow and (workflow.status(identifier).get('workflow') or {}).get('state') in {'queued','preparing'}:
             raise TaskError('任务仍在自动准备，不能删除或确认结束。')
         preparation=preparations.get(identifier)
-        if preparation and preparation['state'] in {'queued','running','model_requested','preparing_files','interrupted'}:
+        if preparation and preparation['state'] in {'queued','running','model_requested','checking_plan','repairing_plan','preparing_files','interrupted'}:
             raise TaskError('方案仍在准备或状态待核对，不能删除或确认结束。')
         if execution_jobs:
             job=execution_jobs.status(identifier).get('job')
@@ -762,6 +762,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             'queued': '正在排队准备计算方案',
             'running': '正在核对准备条件',
             'model_requested': '正在让应用内 AI 生成计算方案',
+            'checking_plan':'正在核对需求、计算步骤与结果', 'repairing_plan':'正在自动修正方案',
             'preparing_files': '正在生成待提交的脚本与结构文件',
             'clarification_answered': '已把你补充的信息交给应用内 AI',
             'config_rebased': '已按当前部署重新核对方案基线',

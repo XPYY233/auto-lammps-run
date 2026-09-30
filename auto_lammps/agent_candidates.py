@@ -58,6 +58,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
         raise CandidateError('Declared outputs must be flat filenames')
     paths = {output_prefix + name for name in outputs}
     writes, evaluations = set(), 0
+    undeclared=set()
     groups, deleted, loaded = {}, set(), set()
     counts = structures or {}
     atom_count = counts.get("initial")
@@ -116,8 +117,10 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
                 targets.append(tokens[i + 1])
         for target in targets:
             if target not in paths:
-                raise CandidateError('Workflow writes must use declared flat '+output_prefix+' filenames')
+                undeclared.add(target)
             writes.add(target.removeprefix(output_prefix))
+    if undeclared:
+        raise CandidateError('Undeclared output paths: '+', '.join(sorted(undeclared))+'. Add ALL corresponding flat basenames to analysis.files, including structure/data/dump outputs; use only the declared output prefix '+repr(output_prefix))
     if loaded != set(counts)-{'initial'}:
         raise CandidateError('Every additional structure must have one explicit workflow stage')
     if not evaluations:
@@ -393,6 +396,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'potential_compatibility': adapter.compatibility_policy(),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
                'requested_model': getattr(client,'model',client.calls.config.model),
+               'thinking': getattr(client, 'thinking', False),
                'condition_record_sha256': condition_record_sha256}
     if output_layout != 'isolated':
         context['output_layout'] = output_layout
@@ -421,7 +425,12 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     # 最多自动修复 3 轮（每轮都是一次可记账调用），常见结果是从"少一个字段"逐轮收敛到合法方案。
     screen = None
     last_error = None
+    seen_proposals=set()
     for attempt in range(4):
+        digest=sha256(canonical(proposal))
+        if digest in seen_proposals:
+            raise CandidateError('Model repeated an unchanged rejected plan: '+str(last_error))
+        seen_proposals.add(digest)
         try:
             screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout, require_analysis_plan=require_analysis_plan)
             if screen is not None and review_plan:
@@ -431,6 +440,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                 except ValueError as error:
                     raise CandidateError(str(error)) from None
                 review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal}))[:32]
+                if on_stage: on_stage('checking_plan')
                 review=client.complete_json(review_id, [
                     {'role':'system','content':
                      'Audit a proposed LAMMPS workflow against the permitted research requirements. '
@@ -446,7 +456,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'requirements are issues; no stylistic issues. An empty issues list means static consistency '
                      'only, never scientific success. '+GUIDE},
                     {'role':'user','content':canonical({'requirements':task_text,'guidance':guidance or [],
-                        'proposal':proposal,'geometry_order':'x outer, y middle, z inner, basis innermost; '
+                        'proposal':proposal,'atom_counts':structure_counts(proposal,max_atoms=max_atoms),'geometry_order':'x outer, y middle, z inner, basis innermost; '
                         'conventional bcc basis [0,0,0],[0.5,0.5,0.5]; one-based LAMMPS atom IDs'}).decode()}])
                 value=review['value']; receipt=review['receipt']
                 if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
@@ -482,6 +492,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                                   '单列表格一律被拒；operations 的 x、y 必须取自该表声明的列名。不要改变科研范围。',
                     'failure': str(error)[:6000]}).decode()}]
             try:
+                if on_stage: on_stage('repairing_plan')
                 repaired = client.complete_json(repair_id, repair_messages)
             except ModelError:
                 # 没有额度继续修复时，用户看到的是真正的校验失败原因。
