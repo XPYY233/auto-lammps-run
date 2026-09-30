@@ -170,18 +170,28 @@ class DeepSeekTests(unittest.TestCase):
         self.assertEqual(self.calls.history(), [])
         self.transport.assert_not_called()
 
+    def test_keepalive_cannot_extend_total_response_deadline(self):
+        with patch('auto_lammps.deepseek.http.client.HTTPSConnection') as connection, patch('auto_lammps.deepseek.time.monotonic',side_effect=[0,1,2,31]):
+            stream=connection.return_value.getresponse.return_value
+            stream.isclosed.return_value=False
+            stream.read1.return_value=b' '
+            with self.assertRaises(TimeoutError):https_transport(b'{}','synthetic-key',30)
+            self.assertEqual(stream.read1.call_count,1)
+            connection.return_value.close.assert_called_once()
+
     def test_fixed_https_transport_does_not_follow_redirects(self):
         with patch('auto_lammps.deepseek.http.client.HTTPSConnection') as connection:
             stream = connection.return_value.getresponse.return_value
             stream.status = 307
-            stream.read.return_value = b'redirect'
+            stream.isclosed.return_value = False
+            stream.read1.side_effect = [b'redirect',b'']
             self.assertEqual(https_transport(b'{}', 'synthetic-key', 30), (307, b'redirect'))
             # The fixed host is still the only target, and the connection now carries
             # a verifying TLS context instead of relying on an implicit default.
             connection.assert_called_once_with('api.deepseek.com', timeout=30,
                                                context=connection.call_args.kwargs['context'])
             self.assertEqual(connection.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
-            stream.read.assert_called_once_with(MAX_RESPONSE_BYTES+1)
+            self.assertEqual(stream.read1.call_count,2)
             connection.return_value.close.assert_called_once()
 
 class LenientJsonTests(unittest.TestCase):

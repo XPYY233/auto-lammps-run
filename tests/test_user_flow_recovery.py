@@ -99,6 +99,11 @@ class AdapterPlanningTests(unittest.TestCase):
         def transport(body,*args):
             messages=json.loads(body)['messages'];seen.append(messages)
             if messages[0]['content'].startswith('Audit a proposed'):
+                audit=json.loads(messages[1]['content'])
+                self.assertIn('units metal',audit['rendered_script'])
+                self.assertIn('read_data structure.data',audit['rendered_script'])
+                self.assertIn('pair_style',audit['rendered_script'])
+                self.assertTrue(audit['resource_metadata'])
                 issues=['Missing requested synthetic stage'] if len(seen)==2 else []
                 answer={'issues':issues,'coverage':[{'requirement':'synthetic stage','evidence':'run 0 and result.dat'}],'summary':'Static check only'}
             else:

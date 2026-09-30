@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import http.client
 import json
 import os
+import time
 from pathlib import Path
 import re
 import sqlite3
@@ -56,7 +57,7 @@ class DeepSeekConfig:
                 raise ModelError('invalid_model_limits')
 
 
-def request_body(config, messages, model=None, *, thinking=False):
+def request_body(config, messages, model=None, *, thinking=False, reasoning_effort=None):
     if not isinstance(messages, list) or not messages or len(messages) > 32:
         raise ModelError('invalid_messages')
     for message in messages:
@@ -66,9 +67,13 @@ def request_body(config, messages, model=None, *, thinking=False):
             raise ModelError('invalid_messages')
     if not any('json' in item['content'].lower() for item in messages):
         raise ModelError('json_instruction_required')
-    body = canonical(dict(model=model or config.model, messages=messages, stream=False,
-                          thinking={'type': 'enabled' if thinking else 'disabled'}, max_tokens=config.max_output_tokens,
-                          response_format={'type': 'json_object'}))
+    payload = dict(model=model or config.model, messages=messages, stream=False,
+                   thinking={'type': 'enabled' if thinking else 'disabled'}, max_tokens=config.max_output_tokens,
+                   response_format={'type': 'json_object'})
+    if reasoning_effort is not None:
+        if reasoning_effort not in {'low','high','max'}: raise ModelError('invalid_reasoning_effort')
+        if thinking: payload['reasoning_effort'] = reasoning_effort
+    body = canonical(payload)
     if len(body) > config.max_input_bytes:
         raise ModelError('input_too_large')
     return body
@@ -80,12 +85,26 @@ def https_transport(body, key, timeout):
         context = ssl_context()
     except OSError:
         raise ModelError('model_tls_trust_unavailable') from None
+    deadline = time.monotonic() + timeout
     connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout, context=context)
     try:
         connection.request('POST', '/chat/completions', body=body,
                            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
+        sock = connection.sock
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0: raise TimeoutError('model response deadline')
+            sock.settimeout(value)
+        remaining()
         response = connection.getresponse()
-        content = response.read(MAX_RESPONSE_BYTES + 1)
+        chunks, size = [], 0
+        while size <= MAX_RESPONSE_BYTES:
+            if response.isclosed(): break
+            remaining()
+            chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - size))
+            if not chunk: break
+            chunks.append(chunk); size += len(chunk)
+        content = b''.join(chunks)
         if len(content) > MAX_RESPONSE_BYTES:
             raise ModelError('response_too_large')
         return response.status, content
@@ -319,10 +338,10 @@ class DeepSeekClient:
         # receipt always records the model actually requested.
         self.model = model or calls.config.model
 
-    def complete_json(self, identifier, messages):
-        body = request_body(self.calls.config, messages, model=self.model, thinking=self.thinking)
+    def complete_json(self, identifier, messages, *, reasoning_effort=None):
+        body = request_body(self.calls.config, messages, model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort)
         self.calls.reserve(identifier, body)
-        receipt = dict(provider='deepseek', requested_model=self.model, thinking=self.thinking,
+        receipt = dict(provider='deepseek', requested_model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort,
                        request_sha256=sha256(body), state='not_sent', usage=None,
                        http_status=None, response_sha256=None, output_sha256=None)
         try:
