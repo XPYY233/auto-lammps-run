@@ -84,6 +84,20 @@ class AdapterPlanningTests(unittest.TestCase):
             with self.assertRaises(ValueError):check_table_writers(bad,plan,'/output/')
         with self.assertRaises(ValueError):expand_tools('emit_table result.dat "0 1 2"',plan,'')
 
+    def test_formula_compiler_preserves_math_and_never_changes_raw_proposal(self):
+        from auto_lammps.candidate_tools import expand_tools
+        from auto_lammps.agent_candidates import validate_body
+        raw='capture saved pe - v_offset\nvariable result equal v_saved - ( v_n - 1 ) * v_reference / v_n'
+        compiled=expand_tools(raw,None,'')
+        self.assertEqual(compiled, 'variable saved equal "$(pe - v_offset)"\nvariable result equal "v_saved - ( v_n - 1 ) * v_reference / v_n"')
+        validate_body(compiled+'\nrun 0\nwrite_data final.data',['final.data'],output_prefix='')
+        self.assertTrue(raw.startswith('capture saved pe - v_offset'))
+        # Do not normalize unsafe syntax into a permitted expression.
+        unsafe='variable result equal v_a ; shell unsafe'
+        self.assertEqual(expand_tools(unsafe,None,''),unsafe)
+        with self.assertRaises(CandidateError):
+            validate_body(unsafe+'\nrun 0\nwrite_data final.data',['final.data'],output_prefix='')
+
     def test_accounted_reviewer_repairs_omission_before_freezing(self):
         import json
         from auto_lammps.agent_candidates import generate_candidate_draft

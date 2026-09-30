@@ -2,8 +2,8 @@
 import re
 import shlex
 
-VERSION = 1
-GUIDE = '''Adapter capabilities (version 1):
+VERSION = 2
+GUIDE = '''Adapter capabilities (version 2):
 emit_table <declared-basename> "<one numerical row with LAMMPS substitutions>" writes a
 table declared in analysis.plan.tables. The adapter supplies its exact columns/units
 headers once, then appends rows. Use this tool for labeled numeric tables instead of
@@ -12,7 +12,8 @@ column, with no labels or units. Choose expressions from the physical calculatio
 never put expected answers into the row. The adapter never computes physics locally.
 capture <variable_name> <equal-style-expression> freezes a scalar evaluated at that
 stage, before another minimization/deletion changes it. It compiles to variable name
-equal $(expression). Refer to saved variables as v_name inside formulas and $(...),
+equal $(expression). Formula whitespace is preserved and quoted deterministically;
+the adapter never changes variable names, operators, values or stages. Refer to saved variables as v_name inside formulas and $(...),
 or ${name} in output. Bare variable names inside $(...) are not valid thermo keywords.
 Use fnorm/fmax thermo keywords for force diagnostics, not max(all,fx).
 Conventional cubic cells contain bcc=2, fcc=4, diamond=8 atoms; count(all) gives the actual current atom count. Do not confuse cell count with atom count.
@@ -50,10 +51,20 @@ def expand_tools(body, plan, prefix):
         if not words:
             result.append(line); continue
         if words[0] == 'capture':
-            if (len(words) != 3 or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', words[1])
-                    or not re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=:\-]+', words[2])):
-                raise ValueError('capture requires a safe name and one scalar expression without spaces')
-            result.append(f'variable {words[1]} equal $({words[2]})')
+            expression = ' '.join(words[2:])
+            if (len(words) < 3 or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', words[1])
+                    or not re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=: \-]+', expression)):
+                raise ValueError('capture requires a safe name and scalar expression')
+            immediate = f'$({expression})'
+            if ' ' in expression:
+                immediate = '"' + immediate + '"'
+            result.append(f'variable {words[1]} equal {immediate}')
+        elif (words[0] == 'variable' and len(words) > 4 and words[2] == 'equal'
+                and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', words[1])
+                and re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=:$ {}\-]+', ' '.join(words[3:]))):
+            # Lexical compilation only: preserve every operand/operator and its order.
+            # Raw proposal + rendered script are both retained in the snapshot.
+            result.append(f'variable {words[1]} equal "{" ".join(words[3:])}"')
         elif words[0] == 'emit_table':
             if len(words) != 3 or words[1] not in tables or 'format' in tables[words[1]]:
                 raise ValueError('emit_table requires a labeled plan table basename and a quoted row')
