@@ -118,6 +118,14 @@ CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
  policy TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
  PRIMARY KEY(campaign, revision)
 );
+CREATE TABLE IF NOT EXISTS development_allowances (
+ evaluation TEXT PRIMARY KEY REFERENCES evaluations(id),
+ max_attempts INTEGER NOT NULL CHECK(max_attempts=3), approval_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_development_update BEFORE UPDATE ON development_allowances
+ BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_development_delete BEFORE DELETE ON development_allowances
+ BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
 CREATE TABLE IF NOT EXISTS reference_continuations (
  evaluation TEXT PRIMARY KEY REFERENCES evaluations(id), approval_sha256 TEXT NOT NULL
 );
@@ -331,6 +339,8 @@ class Ledger:
 
     @staticmethod
     def _attempt_allowance(db, evaluation):
+        development=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation['id'],)).fetchone()
+        if development:return development['max_attempts'],'development_validation'
         continuation = db.execute('SELECT 1 FROM reference_continuations WHERE evaluation=?',
                                   (evaluation['id'],)).fetchone()
         if continuation and json.loads(evaluation['identity'])['role'] == 'reference':
@@ -383,6 +393,25 @@ class Ledger:
             self._event(db, None, 'week_one_third_attempt_approved',
                         {'evaluation': evaluation, 'max_attempts': 3, 'product_max_attempts': 2,
                          'approval_sha256': approval_sha256})
+
+    def approve_development_third_attempt(self, evaluation: str, *, approval_sha256: str):
+        """Controller-only explicit one-attempt exception; preserve the product limit."""
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            old=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256']!=approval_sha256:raise Conflict('Cannot replace development approval')
+                return
+            ev=db.execute('SELECT * FROM evaluations WHERE id=?',(evaluation,)).fetchone()
+            rows=db.execute('SELECT * FROM requests WHERE evaluation=?',(evaluation,)).fetchall()
+            submitted=[r for r in rows if r['dispatch_claimed']]
+            if (ev is None or ev['max_attempts']!=2 or json.loads(ev['identity'])['role']!='agent'
+                    or len(submitted)!=2 or any(r['state']!='failed' or not r['accounted'] for r in submitted)
+                    or any(r['state'] in ACTIVE for r in rows)):
+                raise Conflict('Requires two accounted failures and explicit development authorization')
+            db.execute('INSERT INTO development_allowances VALUES (?,?,?)',(evaluation,3,approval_sha256))
+            self._event(db,None,'development_third_attempt_approved',dict(evaluation=evaluation,
+                approval_sha256=approval_sha256,max_attempts=3,product_max_attempts=2))
 
     def settle_cancelled_preparation_storage(self, request_id: str, *, retained_bytes: int, evidence_sha256: str):
         """Settle never-dispatched preparation from a verified retained-file inventory.

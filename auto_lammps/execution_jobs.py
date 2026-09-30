@@ -340,7 +340,8 @@ def load_execution_jobs(tasks, ledger, path):
         if (profile['partition']!=value['environment']['partition'] or
                 (profile['account'] or None)!=value['environment']['account']):
             raise ValueError('Deployment partition/account differs from saved HPC settings')
-    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'],retain_queue_identity=True,transport=transport)),
+    submitter=SlurmSubmitter(ledger,submit,audit/'dispatch',transport=transport)
+    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'],retain_queue_identity=True,transport=transport,accepted_receipt=submitter.accepted_identity)),
         VersionedAnalysisService(OutputCollector(ledger,collect,value['collections_directory'],transport=transport),value['reports_directory']),
         value['snapshots_directory'],max_polls=value['max_polls'],interval_seconds=value['interval_seconds'])
     mode=value.get('authorization_mode','existing')
@@ -352,7 +353,7 @@ def load_execution_jobs(tasks, ledger, path):
     else: raise ValueError('Unknown authorization mode')
     controller=CandidateExecution(tasks,ledger,value['snapshots_directory'],
         StagingService(ledger,StageClient(stage,audit/'uploads',transport=transport)),
-        SubmissionService(ledger,SlurmSubmitter(ledger,submit,audit/'dispatch',transport=transport)),following,
+        SubmissionService(ledger,submitter),following,
         authorization,BatchEnvironment(**value['environment']),
         runtime_profile_path=value['runtime_profile_path'])
     enrollment=None

@@ -83,6 +83,20 @@ class ExecutionJobTests(unittest.TestCase):
         with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
         self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
         with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        self.f.ledger.approve_development_third_attempt(self.f.evaluation,approval_sha256='e'*64)
+        self.f.ledger.approve_development_third_attempt(self.f.evaluation,approval_sha256='e'*64)
+        third=self.jobs.retry(self.task,self.revision)
+        self.assertEqual(third['job']['max_attempts'],3)
+        self.assertEqual(third['job']['dispatch_count'],2)
+        rid3=third['job']['request_id'];self.assertNotEqual(rid,rid3)
+        self.f.ledger.begin_dispatch(rid3);self.f.ledger.accepted(rid3,'125',{})
+        self.f.ledger.observe(rid3,'125','failed',{});self.f.ledger.account(rid3,0,'a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        snap=self.f.ledger.evaluation_snapshot(self.f.evaluation)
+        self.assertEqual(snap['original_max_attempts'],2)
+        self.assertEqual(snap['attempt_scope'],'development_validation')
 
     def test_retry_rejects_unknown_or_unaccounted_and_stale_actions(self):
         self.enqueue()

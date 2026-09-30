@@ -199,7 +199,7 @@ class SlurmReader:
     not be published. An audit write error propagates rather than being ignored.
     """
     def __init__(self, host_alias, audit_directory, *, timeout=20, max_bytes=1_000_000,
-                 retain_queue_identity=False, transport=None):
+                 retain_queue_identity=False, transport=None, accepted_receipt=None):
         if not isinstance(host_alias, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}', host_alias):
             raise ValueError('Invalid SSH alias')
         if not 0 < timeout <= 60 or type(max_bytes) is not int or not 1024 <= max_bytes <= 4_000_000:
@@ -211,6 +211,7 @@ class SlurmReader:
         if type(retain_queue_identity) is not bool:
             raise ValueError('Identity retention must be an explicit boolean')
         self.retain_queue_identity = retain_queue_identity
+        self.accepted_receipt = accepted_receipt
 
     def _accounting_identity(self, queue, accounting, request_id, manifest_sha256, queue_proof):
         """Fill only empty root comments from exact, retained queue evidence.
@@ -255,8 +256,11 @@ class SlurmReader:
                 except FileExistsError:
                     # Another reader won. Revalidate its exact evidence, never overwrite.
                     return self._accounting_identity(queue, accounting, request_id, manifest_sha256, queue_proof)
-        if binding is None:
-            return accounting, ''
+        acceptance=None
+        if binding is None and self.accepted_receipt is not None:
+            acceptance=self.accepted_receipt(request_id,manifest_sha256)
+            if acceptance:binding=acceptance
+        if binding is None:return accounting, ''
         if accounting and not accounting.endswith('\n'):
             return accounting, ''
         rows = []
@@ -266,7 +270,8 @@ class SlurmReader:
                     and fields[2].strip() == name and not fields[3].strip()):
                 fields[3] = comment
             rows.append('|'.join(fields))
-        return ''.join(row + '\n' for row in rows), sha256(read_regular(binding_path, 4096, private=True))
+        return ''.join(row + '\n' for row in rows), (acceptance['evidence_sha256'] if acceptance
+            else sha256(read_regular(binding_path, 4096, private=True)))
 
     def _query(self, arguments):
         path = self.audit_directory / uuid.uuid4().hex

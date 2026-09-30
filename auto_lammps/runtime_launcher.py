@@ -800,7 +800,7 @@ def execute_native(profile, profile_data, case, manifest, grant, *, request_id, 
         raise ExecutionDenied('Native output list differs from frozen analysis')
     for path, checksum in native['files'].items():
         if digest(read_regular(path, 1024*1024*1024)) != checksum:
-            raise ExecutionDenied('Native environment file changed')
+            raise ExecutionDenied('Native environment file changed: '+Path(path).name)
     outputs = grant['outputs']
     inputs = {item['path'].split('/')[0] for item in manifest['files']}
     if inputs.intersection(outputs):

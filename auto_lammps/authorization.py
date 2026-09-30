@@ -93,7 +93,10 @@ class AutomaticAuthorization:
             raise Conflict('Only an existing undispatched reservation can receive authorization')
         evaluation=self.ledger.evaluation_snapshot(row['evaluation'])
         report=candidate_check(snapshot,max_atoms=self.max_atoms)
-        if (evaluation['identity']['role']!='agent' or evaluation['max_attempts']!=2
+        allowed_attempts=(evaluation['max_attempts']==2 or
+            (evaluation['max_attempts']==3 and evaluation['original_max_attempts']==2
+             and evaluation['attempt_scope']=='development_validation'))
+        if (evaluation['identity']['role']!='agent' or not allowed_attempts
                 or evaluation['identity']['task']!=report['condition_sha256']):
             raise Conflict('Automatic grants require the registered research task identity')
         manifest=snapshot.verify()

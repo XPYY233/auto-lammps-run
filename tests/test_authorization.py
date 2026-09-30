@@ -60,12 +60,30 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(self.install_calls,1);self.assertEqual(f.dispatch.call_count,1)
         self.assertEqual(first['job']['dispatch_count'],1)
         self.assertEqual(first['job']['max_attempts'],2)
+        receipt=f.controller.submission.scheduler.accepted_identity(f.request_id,f.plan['snapshot'].digest)
+        self.assertEqual(receipt['job_id'],first['job']['job_id'])
+        trace=f.controller.submission.scheduler.audit_directory/f.request_id/'result.json'
+        saved_trace=trace.read_bytes();trace.write_bytes(saved_trace+b' ')
+        with self.assertRaises(ValueError):f.controller.submission.scheduler.accepted_identity(f.request_id,f.plan['snapshot'].digest)
+        trace.write_bytes(saved_trace)
         payload=json.loads((self.auth.directory/(f.request_id+'.json')).read_bytes())['payload']
         self.assertEqual(payload['scientific_status'],'not_evaluated')
         self.assertEqual(payload['reviewed_commit'],f.pins['reviewed_commit'])
         self.assertEqual((f.remote.control/(f.request_id+'.sh')).read_bytes(),f.plan['batch'].script)
         self.assertEqual((f.remote.control/(f.request_id+'.json')).read_bytes(),(self.auth.directory/(f.request_id+'.json')).read_bytes())
         if self.native_mode:self.assertFalse(payload['formal_isolation'])
+
+    def test_explicit_development_exception_authorizes_same_plan_third_attempt(self):
+        f=self.f
+        for jid in ('123','124'):
+            rid=f.plan['row']['id'];f.ledger.begin_dispatch(rid);f.ledger.accepted(rid,jid,{})
+            f.ledger.observe(rid,jid,'failed',{});f.ledger.account(rid,0,'a'*64)
+            if jid=='123':f.plan=f.controller.prepare(f.doc['id'],f.evaluation,retry_after=rid)
+        f.ledger.approve_development_third_attempt(f.evaluation,approval_sha256='e'*64)
+        f.plan=f.controller.prepare(f.doc['id'],f.evaluation,retry_after=rid)
+        f.request_id=f.plan['row']['id']
+        with self.patches():self.assertTrue(self.ensure())
+        self.assertEqual(f.ledger.evaluation_snapshot(f.evaluation)['dispatch_claims'],2)
 
     def test_lost_receipt_retries_identical_installation_before_any_submission(self):
         f=self.f;first=True
