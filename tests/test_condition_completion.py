@@ -15,6 +15,13 @@ PROPOSALS = dict(proposals=[dict(field=key, value='合成值 '+key, unit='', bas
 
 
 class CompletionTests(unittest.TestCase):
+    def test_model_cannot_replace_approved_cpu_budget_with_old_guess(self):
+        result=validate_completion(['resources'], {'proposals':[
+            dict(field='resources',value='24 hours with GPU',unit='',basis='guess')]})
+        self.assertIn('9,216 CPU', result[0]['value'])
+        self.assertIn('禁止使用 GPU', result[0]['value'])
+        self.assertNotIn('24 hours', result[0]['value'])
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=TaskStore(Path(self.tmp.name)/'tasks.sqlite')
@@ -132,7 +139,7 @@ class CompletionTests(unittest.TestCase):
         user=__import__('json').loads(messages[1]['content'])
         self.assertEqual(user['user_request'], '研究铜在 300 K 下的弹性常数')
         self.assertEqual(sorted(user['essential_fields']), ['resources','scope'])
-        self.assertIn('项目已批准', messages[0]['content'])
+        self.assertIn('用户已批准', messages[0]['content'])
         self.assertIn('必须覆盖用户完整需求', messages[0]['content'])
 
     def test_message_contract_forbids_claiming_the_source(self):

@@ -468,7 +468,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def schema():
         status = model_client.calls.status() if model_client else None
         reference_status = reference_model_client.calls.status() if reference_model_client else None
-        return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
+        from .resource_limits import POLICY_RECORD, description
+        return {'fields': FIELDS, 'task_resource_policy': POLICY_RECORD | {'description': description()},
+                'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': execution_jobs is not None,
                 # Which copy of the application is really serving this port; the desktop launcher
                 # refuses to run when it differs from the environment its configuration names.

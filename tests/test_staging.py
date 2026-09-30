@@ -243,6 +243,13 @@ class StagingTests(unittest.TestCase):
         self.assertIn('#SBATCH --mem=2M\n',script)
         self.assertIn('#SBATCH --export=NIL\n',script)
         self.assertIn('#SBATCH --no-requeue\n',script)
+        import subprocess
+        for gpu in ({'SLURM_JOB_GPUS':'0'}, {'SLURM_GPUS_ON_NODE':'1'}):
+            result=subprocess.run(['/bin/sh'], input=script, text=True, capture_output=True,
+                env={'PATH':'/usr/bin:/bin','SLURM_JOB_ID':'123',**gpu})
+            self.assertEqual(result.returncode,96)  # Never reaches the nonexistent launcher.
+        self.assertNotIn('#SBATCH --gpus',script)
+        self.assertNotIn('#SBATCH --gres',script)
         self.assertEqual(plan.sha256,sha256(plan.script))
         with self.assertRaises(ValueError):
             render_batch(Submission(REQUEST,self.snapshot.digest,replace(RESOURCE,memory_bytes=100)),environment)

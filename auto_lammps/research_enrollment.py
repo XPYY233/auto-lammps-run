@@ -27,6 +27,9 @@ class ResearchEnrollment:
                            role='agent',repetition=0,max_attempts=2,source_sha256=ENROLLMENT_PROTOCOL_SHA256)
         self.digest=sha256(canonical(self.identity));self.history=CandidateHistory(tasks)
         self._check_policy()
+        from .resource_limits import TASK_CPU_CORE_SECONDS, APPROVAL_SHA256
+        self.ledger.approve_task_resource_limit(campaign, TASK_CPU_CORE_SECONDS,
+                                               approval_sha256=APPROVAL_SHA256)
         with tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS research_execution_bindings ('
                        'task_id TEXT PRIMARY KEY REFERENCES tasks(id), revision INTEGER NOT NULL, '

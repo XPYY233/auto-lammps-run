@@ -206,11 +206,15 @@ function render() {
       head.append(actions);
     }
     const content = node('div');
+    const activePolicy = key==='resources' ? schema.task_resource_policy : null;
+    if (activePolicy) content.append(node('p',activePolicy.description,'selected'),node('small','当前生效 · 用户已批准；旧条件记录保留在下方历史中。'));
+    const history=node('details');history.append(node('summary','查看旧建议与选择记录'));
     if (!field.candidates.length) content.append(node('p','尚未填写，也没有自动采用默认值。','missing-text'));
     for (const choice of field.candidates) {
       const card = node('div',undefined,'candidate'+(choice.id===field.selected?' selected':''));
       const value = (choice.applicability === 'not_applicable' ? '不适用：' : '') + choice.value + (choice.unit ? ' '+choice.unit : '');
-      card.append(node('p',value),node('small',origins[choice.origin]+(choice.source_locator ? ' · '+choice.source_locator : '')));
+      const selected = choice.id===field.selected;
+      card.append(node('p',value),node('small',(selected&&field.confirmed?'当前已确认':origins[choice.origin])+(choice.source_locator ? ' · '+choice.source_locator : '')));
       if (choice.generated_evidence) {
         const details=node('details');
         details.append(node('summary','查看整理依据'),node('p',choice.generated_evidence.quote),
@@ -235,9 +239,10 @@ function render() {
         };
         card.append(use);
       }
-      content.append(card);
+      (activePolicy || (frozen && !selected) ? history : content).append(card);
     }
-    if (field.resolution) content.append(node('p','选择依据：'+field.resolution,'resolution'));
+    if (history.children.length>1) content.append(history);
+    if (field.resolution) (activePolicy?history:content).append(node('p','选择依据：'+field.resolution,'resolution'));
     row.append(head,content); $('#conditions').append(row);
   }
   $('#freeze').hidden = frozen;
@@ -846,6 +851,7 @@ async function refreshCandidate() {
     available.enabled ? '根据已确认条件生成结构、势函数调用与计算输入；可关闭页面，稍后查看进度。' : available.reason;
   const summary=$('#candidate-summary'); summary.replaceChildren(); $('#candidate-downloads').replaceChildren();
   $('#candidate-outcome').textContent=candidateOutcome||'';
+  if(automatic && schema.task_resource_policy) summary.append(node('p',schema.task_resource_policy.description));
   if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件自动准备、提交与分析。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
   if(!candidate) {renderCandidateClarification(null);return;}
   const result=candidate.result||{};

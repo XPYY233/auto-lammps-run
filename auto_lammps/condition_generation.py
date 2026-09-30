@@ -6,6 +6,7 @@ unconfirmed; this module has no tool executor, file fetcher or HPC permission.
 from .deepseek import ModelError
 from .manifest import canonical, sha256
 from .tasks import ESSENTIAL, FIELDS, TaskError, candidate, text
+from .resource_limits import description as resource_policy_description
 
 
 class ModelOutputError(TaskError):
@@ -176,8 +177,9 @@ def completion_messages(missing, extracted, mode='research', request='', resourc
         '没有单位时 unit 用空字符串。applicability 只能是 required 或 not_applicable：'
         '当用户需求明确不涉及该字段时用 not_applicable，并把不适用理由写进 value；'
         '必要字段（' + '、'.join(essential) + '）不允许标为 not_applicable，必须给出可执行的具体值。'
-        'resources 与 scope 属于用户/政策决策：请给出保守且明确的可执行默认值（例如按项目已批准的'
-        '基准资源包络），并在 basis 中写明这是建议、需用户确认。scope 必须覆盖用户完整需求，不能缩小多尺寸或多条件任务。'
+        'resources 必须沿用用户已批准的执行政策，不允许模型另造24小时或其他资源上限：'
+        + resource_policy_description() +
+        'scope 必须覆盖用户完整需求，不能缩小多尺寸或多条件任务。'
         '初始结构建议应包含起始晶格常数、原子质量与晶向的具体值和依据（起始值不是弛豫结果）。'
         '必须区分静态能量最小化与有限温度动力学；纯0 K静态任务不应建议NVT/NPT恒温动力学、随机速度或物理时间采样。'
         '纯静态任务的系综、时间步长和速度种子可标不适用，说明理由。初始化或分析中给出最小化方法、能量/力收敛阈值、最大迭代/求值次数及近零压力检查。'
@@ -220,6 +222,12 @@ def validate_completion(missing, result, resources=None):
         if applicability == 'not_applicable' and field in ESSENTIAL:
             raise ModelOutputError('必要字段不能标记为不适用')
         value = text(item['value'], 4000)
+        if field == 'resources':
+            # Resource authority comes from the approved policy, never a model guess.
+            proposals.append(dict(field=field, value=resource_policy_description(), unit='',
+                                  basis='用户已批准的执行政策；模型不能修改额度或启用 GPU。',
+                                  applicability='required'))
+            continue
         if resources and field == 'potential':
             formats = {str(r.get('format', '')).upper() for r in resources}
             words = {w.upper() for w in __import__('re').findall(r'[A-Za-z]{2,}', value)}

@@ -141,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 7)
+        self.assertEqual(record['input']['generator_version'], 8)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -211,6 +211,12 @@ class AgentCandidateTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(CandidateError):
                 validate_body(body, ['final.data'])
         self.assertEqual(validate_body('run 0\nprint "value" file /output/final.data', ['final.data'])['calculation_commands'], 1)
+
+    def test_equal_expression_must_be_one_lammps_argument(self):
+        tail='\nrun 0\nprint "value" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError, 'ONE expression'):
+            validate_body('variable energy equal v_a - v_b'+tail, ['final.data'])
+        validate_body('variable energy equal "v_a - v_b"'+tail, ['final.data'])
 
     def test_existing_research_task_uses_selected_conditions_without_free_prompt(self):
         tasks = TaskStore(self.root / 'tasks.sqlite')
@@ -329,4 +335,3 @@ class EmptyAnalysisPlanTests(unittest.TestCase):
                                                'x': 'x', 'y': 'x', 'window': [0, 1]}]})
         with self.assertRaises(CandidateError):
             validate_proposal(value, max_atoms=100000)
-

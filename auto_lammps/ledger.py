@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
 CREATE TABLE IF NOT EXISTS reference_continuations (
  evaluation TEXT PRIMARY KEY REFERENCES evaluations(id), approval_sha256 TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_resource_limits (
+ campaign TEXT PRIMARY KEY REFERENCES campaigns(id), core_seconds INTEGER NOT NULL,
+ approval_sha256 TEXT NOT NULL, gpu_allowed INTEGER NOT NULL CHECK(gpu_allowed=0)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_task_limits_update BEFORE UPDATE ON task_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_task_limits_delete BEFORE DELETE ON task_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_update BEFORE UPDATE ON reference_continuations
  BEGIN SELECT RAISE(ABORT, 'reference continuation is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_delete BEFORE DELETE ON reference_continuations
@@ -287,6 +295,40 @@ class Ledger:
             self._event(db,None,'campaign_policy_amended',{'campaign':campaign,'revision':revision,
                 'previous_sha256':expected_previous_sha256,'policy':asdict(policy)})
 
+    def approve_task_resource_limit(self, campaign, core_seconds, *, approval_sha256):
+        """Append a CPU-only per-task cap without rewriting the campaign or identity.
+
+        Existing costs, including overrun, are retained. This gates future
+        reservations and dispatches; it never cancels a running calculation.
+        """
+        _positive(core_seconds); _digest(approval_sha256)
+        with self._transaction() as db:
+            self._policy(db, campaign)
+            old = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (campaign,)).fetchone()
+            if old:
+                if old['core_seconds'] != core_seconds or old['approval_sha256'] != approval_sha256:
+                    raise Conflict('Task resource policy already recorded; explicit amendment required')
+                return
+            db.execute('INSERT INTO task_resource_limits VALUES (?,?,?,0)',
+                       (campaign, core_seconds, approval_sha256))
+            self._event(db, None, 'task_resource_limit_approved', dict(campaign=campaign,
+                core_seconds=core_seconds, approval_sha256=approval_sha256, gpu_allowed=False))
+
+    @staticmethod
+    def _task_resource_status(db, evaluation):
+        ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+        limit = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (ev['campaign'],)).fetchone()
+        if limit is None:
+            return None
+        task = json.loads(ev['identity'])['task']
+        # Repetitions, roles or system versions cannot reset one task's budget.
+        rows = db.execute('SELECT e.identity,r.charge_core_seconds FROM requests r '
+                          'JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?', (ev['campaign'],))
+        charged = sum(r['charge_core_seconds'] for r in rows if json.loads(r['identity'])['task'] == task)
+        return dict(limit_core_seconds=limit['core_seconds'], charged_or_reserved_core_seconds=charged,
+                    remaining_core_seconds=max(0, limit['core_seconds']-charged), gpu_allowed=False,
+                    approval_sha256=limit['approval_sha256'])
+
     @staticmethod
     def _attempt_allowance(db, evaluation):
         continuation = db.execute('SELECT 1 FROM reference_continuations WHERE evaluation=?',
@@ -381,6 +423,10 @@ class Ledger:
             if not ev:
                 raise LedgerError("Unregistered evaluation")
             policy = self._policy(db, ev["campaign"])
+            task_limit = self._task_resource_status(db, evaluation)
+            if task_limit and (task_limit['charged_or_reserved_core_seconds'] + resources.core_seconds
+                               > task_limit['limit_core_seconds']):
+                raise LimitExceeded('Task cumulative CPU budget exhausted (including failed runs and reservations)')
             if (resources.cores > policy["max_cores"] or resources.wall_seconds > policy["max_wall_seconds"]
                     or resources.memory_bytes > policy["max_memory_bytes"]):
                 raise LimitExceeded("Per-job resources exceed approved limits")
@@ -418,6 +464,9 @@ class Ledger:
             # shared budget since reservation. Never dispatch a stale reservation.
             campaign = db.execute("SELECT campaign FROM evaluations WHERE id=?", (row["evaluation"],)).fetchone()[0]
             policy = self._policy(db, campaign)
+            task_limit = self._task_resource_status(db, row['evaluation'])
+            if task_limit and task_limit['charged_or_reserved_core_seconds'] > task_limit['limit_core_seconds']:
+                raise LimitExceeded('Task cumulative CPU budget exhausted; dispatch blocked')
             rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
                               (campaign,)).fetchall()
             if any(r["state"] == "reconcile_required" for r in rows):
@@ -738,6 +787,7 @@ class Ledger:
             maximum, scope = self._attempt_allowance(db, row)
             used = sum(r['dispatch_claimed'] or r['state']=='prepared' for r in requests)
             return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=maximum,
+                        task_resource_limit=self._task_resource_status(db, evaluation),
                         original_max_attempts=row['max_attempts'], attempt_scope=scope,
                         reserved_attempts=len(requests), dispatch_claims=sum(r['dispatch_claimed'] for r in requests),
                         remaining_attempts=None if maximum is None else max(0,maximum-used), requests=requests)
