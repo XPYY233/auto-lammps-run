@@ -17,9 +17,9 @@ from .analysis_v2 import AnalysisError, adapter_identity, plan_adapter, validate
 from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX_TABLES,
                        MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
-from .candidate_tools import GUIDE, expand_tools, check_table_writers
+from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 10
+GENERATOR_VERSION = 11
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -61,22 +61,29 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
     undeclared=set()
     groups, deleted, loaded = {}, set(), set()
     variables = {}
+    semantic_errors=[]
+    pressure_computes,current_computes=set(),set()
     counts = structures or {}
     atom_count = counts.get("initial")
     for line in lines:
         try:
-            tokens = shlex.split(line, comments=True, posix=True)
+            tokens = workflow_tokens(line)
         except ValueError:
             raise CandidateError('Unclosed workflow quote') from None
         if not tokens:
             continue
         command = tokens[0]
+        undefined=set(re.findall(r'\$\{([A-Za-z][A-Za-z0-9_]*)\}',line))-set(variables)
+        if undefined:
+            semantic_errors.append('Undefined LAMMPS variables: '+', '.join(sorted(undefined))+
+                '; ${name} requires a declared variable; use $(step) for the thermo step keyword')
         if command not in COMMANDS:
             raise CandidateError('Unsupported workflow command: ' + command[:40])
         if command == 'load_structure':
             if len(tokens)!=2 or tokens[1]=='initial' or tokens[1] not in counts or tokens[1] in loaded:
                 raise CandidateError('load_structure must select each supplied additional structure exactly once')
             loaded.add(tokens[1]);atom_count=counts[tokens[1]];groups={};deleted=set()
+            pressure_computes,current_computes=set(),set()
         if command == 'group' and len(tokens)>2:
             name=tokens[1]
             if len(tokens)==4 and tokens[2]=='id' and tokens[3].isdigit() and name not in groups:
@@ -92,9 +99,14 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
         if command == 'variable'  and not ((len(tokens)==3 and tokens[2]=='delete') or
                 (len(tokens)>=4 and tokens[2] in {'equal', 'index', 'string'})):
             raise CandidateError('Unsupported variable definition')
+        if command=='variable' and tokens[2]=='equal' and re.match(r"variable\s+\S+\s+equal\s+[\"'].*\$",line.strip()):
+            raise CandidateError('Quoted equal formula prevents $ substitution; use unquoted $(...) for immediate capture, or v_name in a quoted dynamic formula')
         if command == 'variable' and tokens[2]=='equal' and len(tokens)!=4:
             raise CandidateError('variable '+tokens[1]+' equal needs ONE expression argument: quote the entire expression if it contains spaces')
         if command == 'variable':
+            stale=(set(re.findall(r'\bc_([A-Za-z][A-Za-z0-9_]*)',line)) & pressure_computes)-current_computes
+            if stale and '$(' in line:
+                semantic_errors.append('Pressure computes not initialized by a preceding calculation: '+', '.join(sorted(stale))+'; define computes before minimization or use an already initialized thermo keyword')
             name, style = tokens[1:3]
             if style=='delete':
                 variables.pop(name,None)
@@ -106,8 +118,11 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
             raise CandidateError('Unsupported fix style')
         if command == 'compute' and (len(tokens) < 4 or tokens[3] not in COMPUTE_STYLES):
             raise CandidateError('Unsupported compute style')
+        if command=='compute' and tokens[3]=='pressure':
+            pressure_computes.add(tokens[1]);current_computes.discard(tokens[1])
         if command in {'run', 'minimize'}:
             evaluations += 1
+            current_computes=set(pressure_computes)
         targets = []
         if command == 'dump':
             if len(tokens) < 6 or tokens[3] not in {'custom', 'atom', 'xyz'}:
@@ -130,6 +145,8 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
             if target not in paths:
                 undeclared.add(target)
             writes.add(target.removeprefix(output_prefix))
+    if semantic_errors:
+        raise CandidateError('; '.join(dict.fromkeys(semantic_errors)))
     if undeclared:
         raise CandidateError('Undeclared output paths: '+', '.join(sorted(undeclared))+'. Add ALL corresponding flat basenames to analysis.files, including structure/data/dump outputs; use only the declared output prefix '+repr(output_prefix))
     if loaded != set(counts)-{'initial'}:
@@ -380,7 +397,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
 
 
 def generate_candidate_draft(client, adapter, *, task_text, units, resources, store, max_atoms=100000,
-                             condition_record_sha256=None, on_stage=None, output_layout='isolated',
+                             condition_record_sha256=None, on_stage=None, previous_proposal=None, on_proposal=None, output_layout='isolated',
                              answers=None, guidance=None, require_analysis_plan=False, review_plan=False):
     """Trusted product service API; task text must already be permitted for the Agent.
 
@@ -412,21 +429,32 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'condition_record_sha256': condition_record_sha256}
     if output_layout != 'isolated':
         context['output_layout'] = output_layout
+    if previous_proposal is not None:
+        if (not isinstance(previous_proposal, dict) or set(previous_proposal)!={'value','request_id','receipt'}
+                or previous_proposal['receipt'].get('state')!='completed'
+                or previous_proposal['receipt'].get('output_sha256')!=sha256(canonical(previous_proposal['value']))):
+            raise CandidateError('Cannot resume an unverified model proposal')
+        context['previous_proposal']={'request_id':previous_proposal['request_id'],
+                                      'sha256':previous_proposal['receipt']['output_sha256']}
     request_id = sha256(canonical(context))[:32]
-    if on_stage:
-        on_stage('model_requested')
-    try:
-        completion = client.complete_json(request_id, messages)
-    except ModelError as error:
-        # 模型偶尔返回非法 JSON（例如夹带 markdown 或未转义换行）。给恰好一次重发机会，
-        # 只要求"严格合法的 JSON"，不放宽任何内容契约。
-        if 'invalid_json' not in str(error):
-            raise
-        repair_id = sha256(canonical({'base': request_id, 'repair': 'json'}))[:32]
-        completion = client.complete_json(repair_id, messages + [
-            {'role': 'user', 'content': '上一条回答不是合法 JSON。请重新输出严格的单个 JSON 对象：'
-                                        '不要 markdown 代码块、不要注释、不要尾随逗号，字符串内不要出现未转义的换行，'
-                                        '键名与契约完全一致。'}])
+    if previous_proposal is not None:
+        completion = previous_proposal
+        if on_stage: on_stage('reusing_plan')
+    else:
+        if on_stage:
+            on_stage('model_requested')
+        try:
+            completion = client.complete_json(request_id, messages)
+        except ModelError as error:
+            # 模型偶尔返回非法 JSON（例如夹带 markdown 或未转义换行）。给恰好一次重发机会，
+            # 只要求"严格合法的 JSON"，不放宽任何内容契约。
+            if 'invalid_json' not in str(error):
+                raise
+            repair_id = sha256(canonical({'base': request_id, 'repair': 'json'}))[:32]
+            completion = client.complete_json(repair_id, messages + [
+                {'role': 'user', 'content': '上一条回答不是合法 JSON。请重新输出严格的单个 JSON 对象：'
+                                            '不要 markdown 代码块、不要注释、不要尾随逗号，字符串内不要出现未转义的换行，'
+                                            '键名与契约完全一致。'}])
     if (completion['receipt']['state'] != 'completed'
             or completion['receipt']['output_sha256'] != sha256(canonical(completion['value']))):
         raise ModelError('candidate_generation_not_completed')
@@ -439,6 +467,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     last_error = None
     seen_proposals=set()
     for attempt in range(4):
+        if on_proposal:
+            on_proposal({'request_id':completion['request_id'],
+                         'proposal_sha256':sha256(canonical(proposal))})
         digest=sha256(canonical(proposal))
         if digest in seen_proposals:
             raise CandidateError('Model repeated an unchanged rejected plan: '+str(last_error))
@@ -531,6 +562,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             if (repaired['receipt']['state'] != 'completed'
                     or repaired['receipt']['output_sha256'] != sha256(canonical(repaired['value']))):
                 raise error
+            completion = repaired
             proposal = repaired['value']
             receipts.append(repaired['receipt'])
     if last_error is not None:
@@ -605,11 +637,12 @@ def research_inputs(tasks, identifier, revision):
             'condition_record_sha256': sha256(frozen)}
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, output_layout='isolated', answers=None, guidance=None, review_plan=False):
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, previous_proposal=None, on_proposal=None, output_layout='isolated', answers=None, guidance=None, review_plan=False):
     """Research bridge; reference tasks still need the separate release/isolation gate."""
     inputs = research_inputs(tasks, identifier, revision)
     # Only selected confirmed values; no task title, free prompt, discarded
     # alternatives, source context or reference-side export enters the model.
     return generate_candidate_draft(client, adapter, **inputs, resources=resources,
                                     store=store, max_atoms=max_atoms, on_stage=on_stage, output_layout=output_layout,
-                                    answers=answers, guidance=guidance, require_analysis_plan=True, review_plan=review_plan)
+                                    answers=answers, guidance=guidance, require_analysis_plan=True, review_plan=review_plan,
+                                    previous_proposal=previous_proposal,on_proposal=on_proposal)

@@ -89,7 +89,7 @@ class AdapterPlanningTests(unittest.TestCase):
         from auto_lammps.agent_candidates import validate_body
         raw='capture saved pe - v_offset\nvariable result equal v_saved - ( v_n - 1 ) * v_reference / v_n'
         compiled=expand_tools(raw,None,'')
-        self.assertEqual(compiled, 'variable saved equal "$(pe - v_offset)"\nvariable result equal "v_saved - ( v_n - 1 ) * v_reference / v_n"')
+        self.assertEqual(compiled, 'variable saved equal $(pe - v_offset)\nvariable result equal "v_saved - ( v_n - 1 ) * v_reference / v_n"')
         validate_body(compiled+'\nrun 0\nwrite_data final.data',['final.data'],output_prefix='')
         self.assertTrue(raw.startswith('capture saved pe - v_offset'))
         # Do not normalize unsafe syntax into a permitted expression.

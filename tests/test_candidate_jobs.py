@@ -91,12 +91,50 @@ class CandidateJobTests(unittest.TestCase):
         self.assertEqual(len({job['id'] for job in jobs}), 1)
         final = self.finished()
         self.assertEqual(final['state'], 'prepared')
-        self.assertEqual([e['state'] for e in final['events']], ['queued', 'running', 'model_requested', 'preparing_files', 'prepared'])
+        self.assertEqual([e['state'] for e in final['events']], ['queued', 'running', 'model_requested', 'model_proposal', 'preparing_files', 'prepared'])
         restarted = self.make_service()
         restarted.start()
         self.assertEqual(self.enqueue(restarted)['id'], final['id'])
         self.assertEqual(self.fixture.transport.call_count, 1)
         self.assertEqual(CandidateHistory(TaskStore(self.tasks.path)).get(self.doc['id']), final)
+
+    def test_restart_preserves_linked_proposal_without_regeneration(self):
+        f=self.fixture
+        f.client.calls=ModelCalls(f.root/"iteration-models.sqlite",f.calls.config,max_requests=3)
+        self.service=self.make_service()
+        self.enqueue(); first=self.finished()
+        self.assertEqual(first['state'],'prepared')
+        before=self.fixture.transport.call_count
+        restarted=self.make_service()
+        restarted.enqueue(self.doc['id'],self.doc['revision'],answers='Keep the existing plan')
+        last=self.finished()
+        self.assertEqual(last['state'],'prepared',last['result'])
+        self.assertEqual(self.fixture.transport.call_count,before)
+        self.assertIn('reusing_plan',[x['state'] for x in last['events']])
+        self.assertEqual(restarted.previous_proposal(self.doc['id'])['value']['workflow'],self.fixture.value['workflow'])
+
+    def test_legacy_prepared_snapshot_resumes_only_matching_model_receipt(self):
+        self.enqueue(); final=self.finished()
+        # Emulate the old reader, where no model_proposal events were recorded.
+        original=self.history.get
+        def legacy(identifier):
+            job=original(identifier)
+            job['events']=[e for e in job['events'] if e['state']!='model_proposal']
+            return job
+        with patch.object(self.history,'get',side_effect=legacy):
+            previous=self.service.previous_proposal(self.doc['id'])
+        self.assertEqual(previous['value']['workflow'],self.fixture.value['workflow'])
+        self.assertEqual(self.fixture.transport.call_count,1)
+
+    def test_other_task_cannot_reuse_unlinked_global_model_receipt(self):
+        f=self.fixture
+        f.client.calls=ModelCalls(f.root/"iteration-models.sqlite",f.calls.config,max_requests=3)
+        self.service=self.make_service()
+        self.enqueue();self.finished()
+        other=frozen_research(self.tasks)
+        with patch.object(self.service.pool,'submit'):
+            self.service.enqueue(other['id'],other['revision'])
+        self.assertIsNone(self.service.previous_proposal(other['id']))
 
     def test_meam_resource_reaches_prepared_history_and_download_without_execution(self):
         import test_meam_potentials as meam
@@ -117,7 +155,7 @@ class CandidateJobTests(unittest.TestCase):
         final = self.finished()
         self.assertEqual(final['state'], 'prepared')
         self.assertEqual([e['state'] for e in final['events']],
-                         ['queued', 'running', 'model_requested', 'preparing_files', 'prepared'])
+                         ['queued', 'running', 'model_requested', 'model_proposal', 'preparing_files', 'prepared'])
         self.assertIn(b'pair_style meam', self.service.file(self.doc['id'], 'in.lammps'))
         receipt = json.loads(self.service.file(self.doc['id'], 'generation.json'))
         self.assertFalse(receipt['execution_authorized'])

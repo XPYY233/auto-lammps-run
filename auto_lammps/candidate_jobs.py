@@ -17,9 +17,9 @@ from .potentials import PotentialError
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
-BOOKKEEPING = {'config_rebased', 'clarification_answered'}
-ACTIVE = {'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
-LABELS = {'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
+BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal'}
+ACTIVE = {'reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
+LABELS = {'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'checking_plan':'核对需求与方案', 'repairing_plan':'自动修正方案', 'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
           'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
@@ -203,6 +203,45 @@ class CandidateService:
     def close(self, *, wait=False):
         self.pool.shutdown(wait=wait, cancel_futures=True)
 
+    def previous_proposal(self, identifier):
+        """Read only a receipt linked to this task's immutable preparation history."""
+        job=self.history.get(identifier)
+        for event in reversed(job['events']):
+            if event['state']=='prepared' and event['payload'].get('snapshot_sha256'):
+                # Upgrade path: legacy prepared snapshots already bind task inputs and receipts.
+                digest=event['payload']['snapshot_sha256']
+                snapshot=Snapshot(self.snapshots/digest,digest)
+                snapshot.verify()
+                with root_descriptor(snapshot.path) as root:
+                    generation=json.loads(read_file(root,'generation.json',2000000))
+                if generation['input'].get('condition_record_sha256')!=job['condition_sha256']:
+                    continue
+                proposal_digest=sha256(canonical(generation['proposal']))
+                matches={r['request_sha256'] for r in generation['model_receipts']
+                         if r.get('output_sha256')==proposal_digest and r.get('state')=='completed'}
+                for prior in self.client.calls.history():
+                    receipt=prior.get('receipt') or {}
+                    if (prior['request_sha256'] in matches and receipt.get('state')=='completed'
+                            and receipt.get('output_sha256')==proposal_digest
+                            and sha256(canonical(receipt.get('structured_output')))==proposal_digest):
+                        return {'value':receipt['structured_output'],'request_id':prior['request_id'],
+                                'receipt':{k:v for k,v in receipt.items() if k!='structured_output'}}
+                raise CandidateError('Legacy snapshot model receipt could not be verified')
+            if event['state']!='model_proposal': continue
+            link=event['payload']
+            if link.get('condition_sha256')!=job['condition_sha256']: continue
+            found=self.client.calls.lookup(link['request_id'])
+            receipt=(found or {}).get('receipt') or {}
+            value=receipt.get('structured_output')
+            if (receipt.get('state')!='completed' or not isinstance(value,dict)
+                    or receipt.get('output_sha256')!=link.get('proposal_sha256')
+                    or sha256(canonical(value))!=link['proposal_sha256']):
+                raise CandidateError('Saved proposal receipt failed integrity verification')
+            if value.get('workflow') is None: return None
+            return {'value':value,'request_id':link['request_id'],
+                    'receipt':{k:v for k,v in receipt.items() if k!='structured_output'}}
+        return None
+
     def run(self, identifier):
         job = self.history.get(identifier)
         with self.history.lease(job['id']) as acquired:
@@ -226,6 +265,10 @@ class CandidateService:
             def stage(state):
                 with self.tasks.transaction() as db:
                     self.history._event(db, job['id'], state)
+            def proposal_saved(link):
+                with self.tasks.transaction() as db:
+                    self.history._event(db, job['id'], 'model_proposal',
+                        {**link, 'condition_sha256':job['condition_sha256']})
             answers = None
             with self.tasks.transaction() as db:
                 row = db.execute("SELECT payload FROM candidate_events WHERE job_id=? AND state='clarification_answered' "
@@ -240,7 +283,8 @@ class CandidateService:
                     raise CandidateError('Frozen research conditions changed; preserve the original preparation identity')
                 result = generate_research_candidate(self.client, self.tasks, identifier, revision, self.adapter,
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
-                            output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan)
+                            output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan,
+                            previous_proposal=self.previous_proposal(identifier), on_proposal=proposal_saved)
                 if self.tasks.get(identifier)['revision']!=revision:
                     raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
                 if result['status'] == 'clarification_required':

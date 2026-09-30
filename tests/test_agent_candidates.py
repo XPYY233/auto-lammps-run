@@ -141,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 10)
+        self.assertEqual(record['input']['generator_version'], 11)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -217,6 +217,27 @@ class AgentCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(CandidateError, 'ONE expression'):
             validate_body('variable energy equal v_a - v_b'+tail, ['final.data'])
         validate_body('variable energy equal "v_a - v_b"'+tail, ['final.data'])
+
+    def test_pressure_and_variable_issues_are_reported_together(self):
+        body='thermo_style custom step press\nminimize 0 1e-6 10 100\ncompute p all pressure NULL virial\nvariable saved equal $(c_p)\nprint "${step} ${saved}" file /output/final.data'
+        with self.assertRaises(CandidateError) as caught:
+            validate_body(body,['final.data'])
+        self.assertIn('Pressure computes',str(caught.exception))
+        self.assertIn('Undefined LAMMPS',str(caught.exception))
+        validate_body(('compute p all pressure NULL virial\n'+body.replace('compute p all pressure NULL virial\n','')).replace('${step}','$(step)'),['final.data'])
+
+    def test_immediate_formula_is_not_quoted_or_changed(self):
+        body='run 0\nvariable e equal $(pe - 2)\nprint "${e}" file /output/final.data'
+        validate_body(body,['final.data'])
+        with self.assertRaisesRegex(CandidateError,'prevents'):
+            validate_body(body.replace('$(pe - 2)','"$(pe - 2)"'),['final.data'])
+
+    def test_thermo_keyword_is_not_a_named_variable(self):
+        body='run 0\nprint "${step} 1" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError,'Undefined LAMMPS'):
+            validate_body(body,['final.data'])
+        validate_body(body.replace('${step}','$(step)'),['final.data'])
+        validate_body('variable step equal step\n'+body,['final.data'])
 
     def test_index_variable_survives_structure_switch(self):
         body='variable n index 1\nload_structure second\nvariable n index 2\nrun 0\nprint "x" file /output/final.data'

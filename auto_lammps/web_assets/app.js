@@ -479,6 +479,7 @@ const candidateStatuses = {
   queued:{label:'排队中 · 等待准备',tone:'pending'},
   running:{label:'进行中 · 核对准备条件',tone:'pending'},
   model_requested:{label:'进行中 · 已请求模型',tone:'pending'},
+  reusing_plan:{label:'进行中 · 沿用上一版方案',tone:'pending'},
   checking_plan:{label:'进行中 · 核对需求与方案',tone:'pending'},
   repairing_plan:{label:'进行中 · 自动修正方案',tone:'pending'},
   preparing_files:{label:'进行中 · 准备结构与输入文件',tone:'pending'},
@@ -897,7 +898,7 @@ $('#prepare-candidate').onclick=()=>action(async()=>{
 });
 setInterval(async()=>{
   if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
-     !['queued','running','model_requested','checking_plan','repairing_plan','preparing_files',null].includes(candidateState)) return;
+     !['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files',null].includes(candidateState)) return;
   candidatePolling=true;
   try {await refreshCandidate();await renderHistory();await refreshModelStatus();if(candidateState==='prepared') await refreshPlanReview();}
   catch(error) {notice('暂时无法读取准备进度；不会重新发起模型请求。',true);}
@@ -1759,7 +1760,7 @@ function taskState(t){
   if(prep==='prepared') return 'prepared';
   if(prep==='clarification') return 'clarification';
   if(prep==='failed') return 'preparation_failed';
-  if(['queued','running','model_requested','checking_plan','repairing_plan','preparing_files'].includes(prep)) return 'preparing';
+  if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(prep)) return 'preparing';
   return t.status==='conditions_frozen'?'frozen':'draft';
 }
 function taskStateLabel(t){return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败'})[taskState(t)]||'状态待核对';}

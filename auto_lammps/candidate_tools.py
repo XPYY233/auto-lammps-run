@@ -12,7 +12,8 @@ column, with no labels or units. Choose expressions from the physical calculatio
 never put expected answers into the row. The adapter never computes physics locally.
 capture <variable_name> <equal-style-expression> freezes a scalar evaluated at that
 stage, before another minimization/deletion changes it. It compiles to variable name
-equal $(expression). Formula whitespace is preserved and quoted deterministically;
+equal $(expression). Formula whitespace is preserved; ordinary equal formulas are quoted, while immediate
+$(...) expressions stay unquoted so substitution occurs;
 the adapter never changes variable names, operators, values or stages. Refer to saved variables as v_name inside formulas and $(...),
 or ${name} in output. Bare variable names inside $(...) are not valid thermo keywords.
 Use fnorm/fmax thermo keywords for force diagnostics, not max(all,fx).
@@ -40,6 +41,25 @@ These rules are tool knowledge, not reference answers or proof of scientific suc
 '''
 
 
+def workflow_tokens(line):
+    """Account for immediate evaluation BEFORE LAMMPS splits into arguments.
+
+    No expression evaluation here. Preserve the original formula and reject trailing
+    tokens; quoting an immediate expression would prevent LAMMPS substitution.
+    """
+    matched=re.fullmatch(r'(variable\s+[A-Za-z][A-Za-z0-9_]*\s+equal)\s+(\$\(.+\))\s*(?:#.*)?',line.strip())
+    if matched:
+        expression=matched[2]
+        depth=0
+        for i,char in enumerate(expression[1:]):
+            if char=='(':depth+=1
+            elif char==')':depth-=1
+            if depth==0 and i!=len(expression)-2:break
+        else:
+            if depth==0:return shlex.split(matched[1])+[expression]
+    return shlex.split(line,comments=True,posix=True)
+
+
 def expand_tools(body, plan, prefix):
     tables = {t['file']: t for t in (plan or {}).get('tables', [])}
     initialized, result = set(), []
@@ -56,12 +76,10 @@ def expand_tools(body, plan, prefix):
                     or not re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=: \-]+', expression)):
                 raise ValueError('capture requires a safe name and scalar expression')
             immediate = f'$({expression})'
-            if ' ' in expression:
-                immediate = '"' + immediate + '"'
             result.append(f'variable {words[1]} equal {immediate}')
         elif (words[0] == 'variable' and len(words) > 4 and words[2] == 'equal'
                 and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', words[1])
-                and re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=:$ {}\-]+', ' '.join(words[3:]))):
+                and re.fullmatch(r'[A-Za-z0-9_+*/().,\[\]<>!=: \-]+', ' '.join(words[3:]))):
             # Lexical compilation only: preserve every operand/operator and its order.
             # Raw proposal + rendered script are both retained in the snapshot.
             result.append(f'variable {words[1]} equal "{" ".join(words[3:])}"')

@@ -81,12 +81,12 @@ class ResearchWorkflow:
             self.candidates.rebaseline(identifier)
             job = self.candidates.history.get(identifier)
             if job is not None and (changed or job['state'] in ('failed', 'interrupted', 'configuration_changed')):
-                # 部署/配置已更新：旧方案不能沿用到新部署，显式重启时按当前部署重新组织一次。
+                # 部署/配置已更新：保留同一条件下的原始模型方案，按新部署重新校验，仅修复剩余问题。
                 # 每轮必须有不同的请求 id，否则会被账本按幂等拒绝；轮次取自已有事件。
                 rounds = sum(1 for event in (job.get('events') or [])
                              if event['state'] in ('clarification_answered', 'config_rebased'))
                 self.candidates.enqueue(identifier, revision,
-                                        answers=f'部署或配置已更新，请按当前部署重新组织方案（第 {rounds + 1} 轮）。')
+                                        answers=f'部署或配置已更新，请沿用上一版方案，按当前适配器检查并只修复剩余问题，不重建已经满足的科研步骤（第 {rounds + 1} 轮）。')
             with self.tasks.transaction() as db:
                 self._event(db, row['id'], 'rebased', 'identity:' + self.identity)
                 self._event(db, row['id'], 'queued')
@@ -143,7 +143,7 @@ class ResearchWorkflow:
                             state, reason = 'handed_off', ''
                         else:
                             state, reason = 'awaiting_approval', ''
-                    elif candidate['state'] in {'queued', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}:
+                    elif candidate['state'] in {'queued', 'running', 'model_requested', 'reusing_plan', 'checking_plan', 'repairing_plan', 'preparing_files'}:
                         state, reason = 'preparing', ''
                     else:
                         state, reason = 'attention', 'candidate_'+candidate['state']
