@@ -98,6 +98,30 @@ class AdapterPlanningTests(unittest.TestCase):
         with self.assertRaises(CandidateError):
             validate_body(unsafe+'\nrun 0\nwrite_data final.data',['final.data'],output_prefix='')
 
+    def test_review_issue_shape_conversion_preserves_meaning(self):
+        from auto_lammps.agent_candidates import normalized_review_issues
+        self.assertEqual(normalized_review_issues([{'error':'Exact error'},'Other error']),['Exact error','Other error'])
+        self.assertEqual(normalized_review_issues([{'unrecognized':'x'}]),[{'unrecognized':'x'}])
+
+    def test_malformed_review_never_regenerates_scientific_proposal(self):
+        import json
+        from auto_lammps.agent_candidates import generate_candidate_draft, ReviewContractError
+        from auto_lammps.deepseek import DeepSeekClient, ModelCalls
+        from test_deepseek import response
+        value=deepcopy(self.value)
+        value['workflow']='run 0\nemit_table final.data "0 $(pe)"'
+        calls=ModelCalls(self.root/'bad-review.sqlite',self.calls.config,max_requests=4)
+        seen=[]
+        def transport(body,*args):
+            messages=json.loads(body)['messages'];seen.append(messages)
+            answer={'issues':'invalid','coverage':[],'summary':'invalid'} if len(seen)>1 else value
+            return 200,response(answer)
+        client=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
+        with self.assertRaises(ReviewContractError):
+            generate_candidate_draft(client,self.adapter,task_text='synthetic task',units='metal',
+                resources=self.resources,store=self.root/'bad-review',require_analysis_plan=True,review_plan=True)
+        self.assertEqual(len(seen),2)
+
     def test_accounted_reviewer_repairs_omission_before_freezing(self):
         import json
         from auto_lammps.agent_candidates import generate_candidate_draft

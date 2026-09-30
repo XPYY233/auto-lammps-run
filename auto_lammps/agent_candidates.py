@@ -19,7 +19,7 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 11
+GENERATOR_VERSION = 12
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -37,6 +37,16 @@ def _text(value, limit):
     if not isinstance(value, str) or not value.strip() or len(value) > limit or '\x00' in value:
         raise CandidateError('Missing or excessive candidate text')
     return value
+
+
+class ReviewContractError(CandidateError):
+    """A malformed reviewer report is not evidence that the scientific plan is wrong."""
+
+
+def normalized_review_issues(value):
+    if not isinstance(value,list): return value
+    return [item['error'] if isinstance(item,dict) and set(item)=={'error'}
+            and isinstance(item['error'],str) else item for item in value]
 
 
 def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
@@ -522,6 +532,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                 if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
                     raise ModelError('plan_review_not_completed')
                 receipts.append(receipt)
+                if isinstance(value,dict):
+                    value={**value,'issues':normalized_review_issues(value.get('issues'))}
                 if (not isinstance(value,dict) or set(value)!={'issues','coverage','summary'}
                         or not isinstance(value['issues'],list) or len(value['issues'])>12
                         or any(not isinstance(i,str) or not i.strip() for i in value['issues'])
@@ -529,12 +541,14 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                         or any(not isinstance(c,dict) or set(c)!={'requirement','evidence'}
                                or any(not isinstance(v,str) or not v.strip() for v in c.values()) for c in value['coverage'])
                         or not isinstance(value['summary'],str)):
-                    raise CandidateError('Static reviewer returned an invalid requirement-to-step report')
+                    raise ReviewContractError('Static reviewer returned an invalid requirement-to-step report; the existing calculation proposal is retained, not rewritten')
                 reviews.append({'proposal_sha256':sha256(canonical(proposal)),'receipt':receipt,**value})
                 if value['issues']:
                     raise CandidateError('Requirement-to-workflow review: '+'; '.join(value['issues']))
             last_error = None
             break
+        except ReviewContractError:
+            raise
         except CandidateError as error:
             last_error = error
             if attempt == 3:
