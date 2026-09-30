@@ -760,9 +760,9 @@ async function refreshPlanReview(){
     approve.disabled=true;
     if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
     current=await api(`/api/tasks/${current.id}`);
-    const automatic=schema.automatic_workflow?.configured;
+    const endpoint=job.state==='attention'?'execution/recheck':'execution';
     try {
-      await api(`/api/tasks/${current.id}/${automatic?'workflow':'execution'}`,{revision:current.revision});
+      await api(`/api/tasks/${current.id}/${endpoint}`,{revision:current.revision});
       await afterChange('已提交申请；应用会提交 HPC 并自动跟进状态。');
     } catch(error) {
       // 失败必须说清原因，并保留可重试状态（按钮不会永久变灰）。
