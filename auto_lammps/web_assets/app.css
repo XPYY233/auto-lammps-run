@@ -179,6 +179,25 @@ footer{display:flex;justify-content:space-between;color:#8795ac;font-size:10px;p
 .candidate{padding:12px;margin:8px 0;border-radius:7px;border:1px solid var(--line);font-size:12px}
 .candidate.selected{background:#f7faff}
 .candidate p{margin-bottom:5px}
+/* 候选方案澄清：问题、答复与重新准备入口 */
+.badge.attention{background:#fff4db;color:#92681f}
+.badge.ok{background:#e6f6ee;color:#288767}
+#candidate-stage{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+#candidate-authorization:empty,#candidate-outcome:empty{display:none}
+.candidate-outcome{margin:10px 0;font-size:13px;color:#26565a;background:#eef9f6;border-left:3px solid #087f8c;border-radius:6px;padding:10px 12px}
+.candidate-attention{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0;font-size:13px;color:#7a4d14;background:#fff8e8;border:1px solid #f0dcae;border-left:4px solid #d99314;border-radius:8px;padding:11px 14px}
+.candidate-attention[hidden]{display:none}
+.candidate-attention strong{font-size:13px}
+#candidate-clarification{display:grid;gap:12px;margin:12px 0}
+#candidate-clarification h3{font-size:14px;margin:0}
+.clarification-form{display:grid;gap:12px;margin:4px 0}
+.clarification-question{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:#fbfdff}
+.clarification-question h4{font-size:12px;color:#8491a6;margin:0 0 6px}
+.clarification-text{font-size:13px;color:#172b4d;margin:0 0 10px;line-height:1.6}
+.clarification-cell{display:grid;gap:5px;font-size:12px;color:#677f9f;margin-bottom:9px}
+.clarification-cell textarea,.clarification-cell input,.clarification-cell select{font-size:13px;width:100%;box-sizing:border-box}
+.clarification-answer{resize:vertical;min-height:64px}
+.clarification-error{color:#ad5a4e}
 .missing-text,.resolution{font-size:11px;color:#8b98ac}
 .freeze-panel{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:17px;background:#f4f8ff;border-radius:8px;margin:17px 0}
 .freeze-panel h2{font-size:13px;margin:0 0 6px}
