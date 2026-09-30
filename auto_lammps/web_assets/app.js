@@ -596,7 +596,7 @@ async function saveClarificationAnswers() {
 // 服务端一个任务只保留一条准备记录且入队幂等：重新触发后必须按响应如实回报，不假定发生新调用。
 function retriggerOutcome(before,after) {
   if(!after) return '请求已交给自动流程；正在等待后台的准备记录。';
-  const name=`作业 ${String(after.id).slice(0,8)} · revision ${after.revision}`;
+  const name=`方案记录 ${String(after.id).slice(0,8)} · 登记版本 ${after.revision}`;
   if(!before||before.id!==after.id) return `已登记新的准备记录（${name}），后台会读取该记录。`;
   if((after.events||[]).length>(before.events||[]).length || after.state!==before.state)
     return `准备记录已更新（${name}）：${candidateStatus(after).label}。调用情况以活动记录为准。`;
@@ -1570,14 +1570,19 @@ function renderExecutionControls(){
   box.replaceChildren(node('h2','任务执行流程'),node('p',job.label,'flow-note'));
   $('#task-status').textContent=job.label;
   $('#task-information').replaceChildren();addInfo('执行状态',job.label);addInfo('提交次数',`${job.dispatch_count} / ${job.max_attempts}`);
-  if(job.job_id)addInfo('作业号',job.job_id);
+  addInfo('HPC 作业号',job.job_id||(job.dispatch_count?'提交结果待核对':'尚未提交'));
+  if(job.job_id)addInfo('调度状态',requestStates[job.scheduler_state]||'待核对');
   addInfo('资源核算',job.accounted?'已核算':'待核算');addInfo('科学结论','尚未核验');
   if(!executionState.worker_alive&&['queued','running','waiting'].includes(job.state))box.append(node('p','后台当前未运行；恢复服务后继续已有请求，不会重复提交。','form-note'));
   if(job.state==='attention')box.append(node('p',job.reason==='deployment_file_missing'?'执行所需的部署文件尚未就绪，记录已保留。':job.reason==='deployment_changed'?'执行配置发生变化，需要核对后恢复。':'执行检查未通过，记录已保留；不会自动重提计算。','form-note'));
   const details=node('details');details.append(node('summary','执行历史'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
  }else{
+  $('#task-information').replaceChildren();
+  addInfo('HPC 作业号',executionState.submissions?.count?'已有提交，回执待核对':'尚未提交');
+  if(executionState.submissions)addInfo('提交次数',`${executionState.submissions.count} / ${executionState.submissions.maximum}`);
   const flow=executionState.automatic_workflow,step=flow?.workflow;
   if(step){box.replaceChildren(node('h2','任务执行流程'),node('p',step.label,'flow-note'));$('#task-status').textContent=step.label;
+   addInfo('当前阶段',step.label);
    if(step.state==='attention')box.append(node('p','请查看准备记录中的问题；已有调用和提交历史保留，未自动重试。','form-note'));
    else if(!flow.worker_alive)box.append(node('p','后台当前未运行；服务恢复后继续已有流程。','form-note'));
    return;

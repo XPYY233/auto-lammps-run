@@ -27,3 +27,26 @@ function resources(paper){const c=vm.createContext({paper});const code=source.sl
 const potentialPaper={title:'Synthetic paper',doi:'synthetic',potential_acquisition:{commit:'fixed',files:[{path:'library.meam',sha256:'a',source_url:'https://example.org/library'},{path:'alloy.meam',sha256:'b',source_url:'https://example.org/parameters'}],bindings:[{elements:['Ni','Cr'],pair_style:'meam',files:{library:'library.meam',parameters:'alloy.meam'},static_status:'checked'}]}};
 test('paired potential files become one model without losing file provenance',()=>{const rows=resources(potentialPaper);assert.equal(rows.length,1);assert.equal(rows[0].name,'Ni–Cr · MEAM');assert.equal(rows[0].files.length,2);assert.deepEqual(rows[0].files.map(f=>f.hash),['a','b']);assert.match(rows[0].note,/不代表/);});
 test('missing model parameters are shown as missing, not ready',()=>{const paper=JSON.parse(JSON.stringify(potentialPaper));paper.potential_acquisition.files.pop();const rows=resources(paper);assert.match(rows[0].state,/缺少 alloy.meam/);assert.equal(rows[0].files.length,1);});
+
+function executionPanel(state){
+ const info=[],elements=new Map();
+ const element=()=>({append(){},replaceChildren(){},textContent:''});
+ const c=vm.createContext({workspaceReport:null,executionState:state,
+  requestStates:{queued:'排队中',running:'计算中'},node:()=>element(),
+  $:s=>{if(!elements.has(s))elements.set(s,element());return elements.get(s);},
+  addInfo:(key,value)=>info.push([key,value])});
+ vm.runInContext(source.slice(source.indexOf('function renderExecutionControls(){'),source.indexOf('let hpcState=')),c);
+ c.renderExecutionControls();return info;
+}
+test('preparation shows no HPC submission using the existing counted evaluation',()=>{
+ const info=executionPanel({job:null,submissions:{count:0,maximum:2},automatic_workflow:{worker_alive:true,workflow:{state:'preparing',label:'正在准备'}}});
+ assert.ok(info.some(([k,v])=>k==='HPC 作业号'&&v==='尚未提交'));
+ assert.ok(info.some(([k,v])=>k==='提交次数'&&v==='0 / 2'));
+});
+test('scheduler receipt is shown separately from preparation and unknown dispatch',()=>{
+ const state={worker_alive:true,job:{state:'waiting',label:'跟进中',dispatch_count:1,max_attempts:2,job_id:'123456',scheduler_state:'queued',events:[]}};
+ let info=executionPanel(state);assert.ok(info.some(([k,v])=>k==='HPC 作业号'&&v==='123456'));
+ assert.ok(info.some(([k,v])=>k==='调度状态'&&v==='排队中'));
+ state.job.job_id=null;info=executionPanel(state);
+ assert.ok(info.some(([k,v])=>k==='HPC 作业号'&&v==='提交结果待核对'));
+});
