@@ -18,13 +18,14 @@ ACTIVE={'queued','running','waiting'}
 PENDING_APPROVAL={'awaiting_approval'}
 WORKABLE=ACTIVE|PENDING_APPROVAL
 # 记账类事件不参与状态判定（否则会把已完成/待处理的作业顶成未知状态）。
-BOOKKEEPING={'config_rebased','request_replaced','recheck_failed'}
+BOOKKEEPING={'config_rebased','request_replaced','recheck_failed','retry_authorized'}
 LABELS={'queued':'等待执行','running':'核验许可并推进计算','waiting':'自动跟进计算',
         'analyzed':'数值分析完成','analysis_failed':'分析未完成','diagnostics_saved':'计算未成功，诊断已保存',
         'attention':'执行需要核对','rejected':'提交被拒绝','config_rebased':'已按当前部署重新基线',
         'awaiting_approval':'等待你批准方案',
         'request_replaced':'已按当前方案重新预留请求','recheck_failed':'重新核对未通过',
-        'stale_intent_cancelled':'旧意图已作废，按当前方案重新预留'}
+        'stale_intent_cancelled':'旧意图已作废，按当前方案重新预留',
+        'retry_authorized':'用户确认使用下一次提交机会'}
 
 
 class ExecutionJobs:
@@ -97,6 +98,8 @@ class ExecutionJobs:
             current_request=self.current_request_id(identifier)
             row=self.ledger.get(current_request)
             return dict(configured=True,worker_alive=live,can_start=False,job=dict(
+                can_retry=(row['state']=='failed' and bool(row['accounted']) and
+                           evaluation['dispatch_claims']<evaluation['max_attempts'] and self.approved_plan(identifier)),
                 state=job['state'],label=LABELS.get(job['state'],job['state']),request_id=current_request,job_id=row['job_id'],
                 scheduler_state=row['state'],accounted=bool(row['accounted']),
                 dispatch_count=evaluation['dispatch_claims'],max_attempts=evaluation['max_attempts'],
@@ -132,6 +135,33 @@ class ExecutionJobs:
             return None
         digest = (job.get('result') or {}).get('snapshot_sha256')
         return 'plan:' + digest if isinstance(digest, str) and digest else None
+
+    def retry_parent(self, identifier):
+        events=self.get(identifier)['events']
+        return next((e['reason'] for e in reversed(events) if e['state']=='retry_authorized'),None)
+
+    def retry(self, identifier, revision):
+        """Explicit next attempt; never reinterpret monitoring as resubmission."""
+        doc=self.tasks.get(identifier)
+        if doc['revision']!=revision:raise StaleTask('任务已变化，请刷新。')
+        job=self.get(identifier)
+        if job is None:raise TaskError('没有可重试的提交记录。')
+        with self.history.lease(job['id']) as acquired:
+            if not acquired:return self.status(identifier)
+            job=self.get(identifier)
+            if job['state'] in WORKABLE:return self.status(identifier)
+            if not self.status(identifier)['job']['can_retry']:
+                raise TaskError('仅已核算失败且仍有提交机会的已批准方案可以再次提交。')
+            parent=self.current_request_id(identifier)
+            plan=self.controller.prepare(identifier,job['evaluation'],retry_after=parent)
+            with self.tasks.transaction() as db:
+                if self.tasks._read(db,identifier)['revision']!=revision:raise StaleTask('任务已变化，请刷新。')
+                self._event(db,job['id'],'retry_authorized',parent)
+                self._event(db,job['id'],'request_replaced',plan['row']['id'])
+                self._event(db,job['id'],'config_rebased',self.config_sha256)
+                self._event(db,job['id'],'queued','user_retry')
+        self.wake.set()
+        return self.status(identifier)
 
     def approved_plan(self, identifier):
         scope = self.plan_scope(identifier)
@@ -180,7 +210,7 @@ class ExecutionJobs:
             if not row['dispatch_claimed']:
                 # Retain this exact evaluation's history and storage reservation.
                 self.controller.cancel_stale_intent(current_id)
-                plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
+                plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True,retry_after=self.retry_parent(identifier))
                 new_id=plan['row']['id']
             else:
                 new_id=current_id
@@ -221,11 +251,12 @@ class ExecutionJobs:
                     result=self.controller.following.advance(current_id)
                 else:
                     allow=self.request_replaced(identifier)
-                    plan=(self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
+                    parent=self.retry_parent(identifier)
+                    plan=(self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True,retry_after=parent)
                           if allow else self.controller.prepare(identifier,job['evaluation']))
                     if plan['row']['id']!=current_id:
                         raise ValueError('Execution identity changed before dispatch')
-                    result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True)
+                    result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True,retry_after=parent)
                             if allow else self.controller.advance(identifier,job['evaluation']))
                 if result.get('request_id')!=current_id:raise ValueError('Execution identity changed')
                 state=result['state']
@@ -309,7 +340,7 @@ def load_execution_jobs(tasks, ledger, path):
         if (profile['partition']!=value['environment']['partition'] or
                 (profile['account'] or None)!=value['environment']['account']):
             raise ValueError('Deployment partition/account differs from saved HPC settings')
-    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'],transport=transport)),
+    following=FollowingService(ledger,ReconciliationService(ledger,SlurmReader(collect.host_alias,audit/'queries',max_bytes=value['query_max_bytes'],retain_queue_identity=True,transport=transport)),
         VersionedAnalysisService(OutputCollector(ledger,collect,value['collections_directory'],transport=transport),value['reports_directory']),
         value['snapshots_directory'],max_polls=value['max_polls'],interval_seconds=value['interval_seconds'])
     mode=value.get('authorization_mode','existing')

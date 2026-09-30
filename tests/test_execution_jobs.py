@@ -56,6 +56,41 @@ class ExecutionJobTests(unittest.TestCase):
             self.assertEqual((self.f.upload.call_count,self.f.dispatch.call_count,self.f.download.call_count),(1,1,1))
         self.assertFalse(self.jobs.thread.is_alive())
 
+    def fail_first(self):
+        self.enqueue()
+        ledger=self.f.ledger;rid=self.f.request_id
+        ledger.begin_dispatch(rid);ledger.accepted(rid,'123',{})
+        ledger.observe(rid,'123','failed',{})
+        ledger.account(rid,core_seconds=0,evidence_sha256='a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+
+    def test_explicit_retry_preserves_plan_identity_and_survives_restart(self):
+        self.fail_first()
+        self.assertTrue(self.jobs.status(self.task)['job']['can_retry'])
+        first=self.jobs.retry(self.task,self.revision)
+        second=self.jobs.retry(self.task,self.revision)
+        rid=first['job']['request_id'];self.assertEqual(rid,second['job']['request_id'])
+        self.assertNotEqual(rid,self.f.request_id)
+        self.assertEqual(first['job']['dispatch_count'],1)
+        reopened=self.service()
+        plan=self.f.controller.prepare(self.task,self.f.evaluation,retry_after=reopened.retry_parent(self.task))
+        self.assertEqual(plan['row']['id'],rid)
+        self.assertEqual(plan['snapshot'].digest,self.f.plan['snapshot'].digest)
+        self.f.ledger.begin_dispatch(rid);self.f.ledger.accepted(rid,'124',{})
+        self.f.ledger.observe(rid,'124','failed',{});self.f.ledger.account(rid,core_seconds=0,evidence_sha256='a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+
+    def test_retry_rejects_unknown_or_unaccounted_and_stale_actions(self):
+        self.enqueue()
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_unknown')
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        with self.assertRaises(StaleTask):self.jobs.retry(self.task,self.revision-1)
+
     def test_restart_resumes_existing_queued_intent(self):
         self.f.authorize_fixture();self.enqueue();reopened=self.service()
         with self.f.transports():

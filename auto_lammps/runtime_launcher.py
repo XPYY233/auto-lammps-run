@@ -150,6 +150,19 @@ def duration(value):
     return (int(match[1] or 0)*24 + int(match[2]))*3600 + int(match[3])*60 + int(match[4])
 
 
+def same_compute_host(node, host):
+    if node == host:
+        return True
+    # Accept a short/FQDN alias only when the cluster resolver confirms it.
+    # Never accept different nodes, host lists, or two different domains.
+    valid = r'[A-Za-z0-9][A-Za-z0-9.-]*'
+    if not isinstance(node, str) or not re.fullmatch(valid, node) or not re.fullmatch(valid, host):
+        return False
+    if node.split('.')[0] != host.split('.')[0] or ('.' in node and '.' in host):
+        return False
+    return socket.getfqdn(node) == socket.getfqdn(host) and '.' in socket.getfqdn(host)
+
+
 def parse_allocation(text, *, request_id, manifest_sha256, job_id, uid, host, resources):
     # scontrol -o is one record, not one whitespace token per field: SubmitLine
     # and other descriptive values can contain spaces. Split at key boundaries;
@@ -168,9 +181,11 @@ def parse_allocation(text, *, request_id, manifest_sha256, job_id, uid, host, re
         fields[key]=value
     expected = {'JobId':job_id,'JobName':'al-'+request_id,'Comment':f'al:{manifest_sha256}:{request_id}',
                 'JobState':'RUNNING','NumNodes':'1','NumCPUs':str(resources['cores']),
-                'NodeList':host,'BatchHost':host,'Restarts':'0'}
-    if any(fields.get(key) != value for key,value in expected.items()):
-        raise ExecutionDenied('Scheduler allocation does not match the authorized request')
+                'Restarts':'0'}
+    mismatches = [key for key,value in expected.items() if fields.get(key) != value]
+    mismatches += [key for key in ('NodeList','BatchHost') if not same_compute_host(fields.get(key),host)]
+    if mismatches:
+        raise ExecutionDenied('Scheduler allocation mismatch: '+', '.join(mismatches))
     owner = re.fullmatch(r'[^\s()]+\(([0-9]+)\)',fields.get('UserId',''))
     if owner is None or int(owner[1]) != uid:
         raise ExecutionDenied('Wrong allocation owner')

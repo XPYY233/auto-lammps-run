@@ -853,6 +853,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
         return execution_jobs.recheck(identifier,data.revision)
 
+    @app.post('/api/tasks/{identifier}/execution/retry',status_code=202)
+    @serialized_task_action
+    def execution_retry(identifier: str,data: Revision):
+        require_open_task(identifier)
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        return execution_jobs.retry(identifier,data.revision)
+
     @app.post('/api/tasks/{identifier}/workflow',status_code=202)
     @serialized_task_action
     def workflow_start(identifier: str,data: Revision):
