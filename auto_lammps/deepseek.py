@@ -15,6 +15,7 @@ import sqlite3
 import stat
 
 from .manifest import canonical, private_directory, sha256
+from .tls_context import ssl_context
 
 APP_ID = 0x414C4D43
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -55,7 +56,7 @@ class DeepSeekConfig:
                 raise ModelError('invalid_model_limits')
 
 
-def request_body(config, messages):
+def request_body(config, messages, model=None):
     if not isinstance(messages, list) or not messages or len(messages) > 32:
         raise ModelError('invalid_messages')
     for message in messages:
@@ -65,7 +66,7 @@ def request_body(config, messages):
             raise ModelError('invalid_messages')
     if not any('json' in item['content'].lower() for item in messages):
         raise ModelError('json_instruction_required')
-    body = canonical(dict(model=config.model, messages=messages, stream=False,
+    body = canonical(dict(model=model or config.model, messages=messages, stream=False,
                           thinking={'type': 'disabled'}, max_tokens=config.max_output_tokens,
                           response_format={'type': 'json_object'}))
     if len(body) > config.max_input_bytes:
@@ -75,7 +76,11 @@ def request_body(config, messages):
 
 def https_transport(body, key, timeout):
     """Fixed official host; no redirects, proxy discovery or automatic retries."""
-    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout)
+    try:
+        context = ssl_context()
+    except OSError:
+        raise ModelError('model_tls_trust_unavailable') from None
+    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout, context=context)
     try:
         connection.request('POST', '/chat/completions', body=body,
                            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
@@ -247,14 +252,19 @@ def usage_from_response(content):
 
 
 class DeepSeekClient:
-    def __init__(self, calls, *, transport=https_transport, key_reader=None):
+    def __init__(self, calls, *, transport=https_transport, key_reader=None, model=None):
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,100}', model)):
+            raise ModelError('invalid_model')
         self.calls, self.transport = calls, transport
         self.key_reader = key_reader or (lambda: os.environ.get('DEEPSEEK_API_KEY'))
+        # The runtime route may name a model chosen in the product settings; the
+        # receipt always records the model actually requested.
+        self.model = model or calls.config.model
 
     def complete_json(self, identifier, messages):
-        body = request_body(self.calls.config, messages)
+        body = request_body(self.calls.config, messages, model=self.model)
         self.calls.reserve(identifier, body)
-        receipt = dict(provider='deepseek', requested_model=self.calls.config.model,
+        receipt = dict(provider='deepseek', requested_model=self.model,
                        request_sha256=sha256(body), state='not_sent', usage=None,
                        http_status=None, response_sha256=None, output_sha256=None)
         try:
@@ -279,7 +289,7 @@ class DeepSeekClient:
             safe = str(exc) if type(exc) is ModelError and str(exc) in {
                 'model_key_missing_or_invalid', 'invalid_transport_response', 'provider_request_failed',
                 'invalid_json', 'invalid_response', 'incomplete_generation', 'empty_or_unexpected_output',
-                'json_object_required', 'response_too_large'} else 'model_transport_unknown'
+                'json_object_required', 'response_too_large', 'model_tls_trust_unavailable'} else 'model_transport_unknown'
             receipt['error'] = safe
             self.calls.record(identifier, receipt)
             raise ModelError(safe) from None

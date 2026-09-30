@@ -313,6 +313,15 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def connection_models(data: ProviderInput):
         return connections.list_models(data.provider)
 
+    @app.post('/api/model-connections/check')
+    def check_connection(data: ProviderInput):
+        if model_client is None:
+            return JSONResponse({'detail':'尚未配置模型账本，无法进行真实调用自检。'},status_code=409)
+        try:
+            return connections.check(data.provider, calls=model_client.calls)
+        except (TaskError, ModelError) as error:
+            return JSONResponse({'detail':str(error)},status_code=409)
+
     @app.get('/api/hpc-connection')
     def hpc_status():
         return hpc.status()
@@ -702,6 +711,14 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
+    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
+    if model_client is not None:
+        # Wire the saved connection before any service is built from it: the candidate
+        # service and the runtime route must hold the same client object, and the
+        # environment key stays the fallback while no connection is configured.
+        saved=connections.status().get('connections',{}).get('deepseek-official',{})
+        if saved.get('configured'):
+            model_client=connections.client('deepseek-official', calls=model_client.calls)
     reference_model_client = (DeepSeekClient(ModelCalls.open_existing(args.reference_model_ledger),
         key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
@@ -740,7 +757,7 @@ def main():
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          model_connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory),
+                          model_connections=connections,
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
