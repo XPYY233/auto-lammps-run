@@ -94,6 +94,7 @@ footer{display:flex;justify-content:space-between;color:#8795ac;font-size:10px;p
 .task-top h1{font-size:23px;overflow-wrap:anywhere}
 .badge{border-radius:6px;background:#fff4db;color:#92681f;font-size:11px;padding:4px 8px;display:inline-block;white-space:nowrap;align-self:start}
 .badge.confirmed,.badge.completed{background:#e6f6ee;color:#288767}
+.badge.accepted{background:#e6f6ee;color:#288767}
 .badge.pending{background:#eef4ff;color:#456da8}
 .badge.failed,.badge.conflict,.badge.missing{background:#fff0ee;color:#ad5a4e}
 .request{font-size:13px;color:#5e7190;margin:10px 0}
@@ -661,3 +662,5 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .connection-card{border:1px solid #dce4ef;border-radius:10px;background:#f8faff;padding:14px;margin:10px 0}
 .connection-card strong{color:#172b4d}.connection-badge{display:inline-block;margin-left:12px;font-size:12px;color:#185adb;background:#e9f0ff;border-radius:5px;padding:2px 7px}
 .connection-detail{overflow-wrap:anywhere;margin:8px 0 4px}.connection-card .form-note{margin:5px 0 10px}.connection-card .actions{flex-wrap:wrap}.connection-remove{color:#9d2941}
+
+.target-readiness{margin:16px 0;padding:18px 22px;background:#f3f6fd;border:1px solid #d3def4;border-radius:12px}.target-readiness h3{margin-top:0}.target-readiness li{margin:7px 0;color:#7c3f19}.target-group{border-left:3px solid #3566bd;padding-left:12px}
