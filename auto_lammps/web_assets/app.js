@@ -588,11 +588,13 @@ async function saveClarificationAnswers() {
 }
 // 服务端一个任务只保留一条准备记录且入队幂等：重新触发后必须按响应如实回报，不假定发生新调用。
 function retriggerOutcome(before,after) {
-  if(!after) return '服务端没有返回准备记录；未发起新的模型调用。';
+  if(!after) return '请求已交给自动流程；正在等待后台的准备记录。';
   const name=`作业 ${String(after.id).slice(0,8)} · revision ${after.revision}`;
   if(!before||before.id!==after.id) return `已登记新的准备记录（${name}），后台会读取该记录。`;
+  if((after.events||[]).length>(before.events||[]).length || after.state!==before.state)
+    return `准备记录已更新（${name}）：${candidateStatus(after).label}。调用情况以活动记录为准。`;
   if(before.created_at===after.created_at&&before.revision===after.revision)
-    return `服务端返回同一条准备记录（${name}）：一个任务只保留一条准备记录，本次未再次调用模型。开始新一轮准备需要控制端先开放，原记录与澄清问题不会被覆盖。`;
+    return `服务端返回同一条准备记录（${name}）：一个任务只保留一条准备记录，尚未读到新的准备事件；调用情况以活动记录为准，原历史保留。`;
   return `准备记录已更新（${name}）：${candidateStatus(after).label}。`;
 }
 

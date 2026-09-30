@@ -13,6 +13,10 @@ from .runtime_launcher import hash_value
 from .tasks import TaskError, StaleTask
 
 
+# Stable v1 enrollment protocol; implementation fixes must not create new evaluations.
+ENROLLMENT_PROTOCOL_SHA256 = '93a0a63b88a8703116b40fa2a9aaf978adf3efc39182417c52bbb635b29846a8'
+
+
 class ResearchEnrollment:
     def __init__(self,tasks,ledger,*,campaign,system_sha256,policy_sha256):
         if not isinstance(campaign,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',campaign):
@@ -20,7 +24,7 @@ class ResearchEnrollment:
         hash_value(system_sha256);hash_value(policy_sha256)
         self.tasks,self.ledger=tasks,ledger
         self.identity=dict(campaign=campaign,system_sha256=system_sha256,policy_sha256=policy_sha256,
-                           role='agent',repetition=0,max_attempts=2,source_sha256=sha256(Path(__file__).read_bytes()))
+                           role='agent',repetition=0,max_attempts=2,source_sha256=ENROLLMENT_PROTOCOL_SHA256)
         self.digest=sha256(canonical(self.identity));self.history=CandidateHistory(tasks)
         self._check_policy()
         with tasks.transaction() as db:
@@ -56,7 +60,7 @@ class ResearchEnrollment:
             if task['revision']!=revision:raise StaleTask('任务已变化，请刷新后再生成。')
             row=db.execute('SELECT * FROM research_execution_bindings WHERE task_id=?',(identifier,)).fetchone()
             if row:
-                if (row['scope_sha256']!=self.digest or row['revision']!=revision or
+                if (row['scope_sha256']!=self.digest or
                         row['condition_sha256']!=inputs['condition_record_sha256']):
                     raise TaskError('任务与原计算登记不一致，不能重置提交次数。')
                 return row['evaluation']

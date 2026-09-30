@@ -41,6 +41,14 @@ class EnrollmentTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM research_execution_bindings').fetchone()[0],1)
         self.assertEqual(self.f.f.transport.call_count,1)  # Existing fixture only.
 
+    def test_guidance_keeps_the_same_evaluation_and_attempt_limit(self):
+        original=self.register()
+        self.f.tasks.add_guidance(self.doc['id'],self.doc['revision'],'Preserve complete research scope')
+        revision=self.f.tasks.get(self.doc['id'])['revision']
+        self.assertEqual(self.enrollment.register(self.doc['id'],revision),original)
+        self.assertEqual(self.f.ledger.evaluation_snapshot(original)['max_attempts'],2)
+        self.assertEqual(self.enrollment.get(self.doc['id'])['revision'],self.doc['revision'])
+
     def test_concurrent_registration_has_one_binding_and_evaluation(self):
         results=[];errors=[]
         def run():

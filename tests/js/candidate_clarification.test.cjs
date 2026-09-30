@@ -143,12 +143,13 @@ test('重新触发按幂等响应如实回报：同一条记录不等于新调�
   const outcome=(before,after)=>vm.runInContext(`retriggerOutcome(${JSON.stringify(before)},${JSON.stringify(after)})`,context);
   const same=outcome(clarificationJob,{...clarificationJob});
   assert.match(same,/同一条准备记录/);
-  assert.match(same,/未再次调用模型/);
-  assert.match(same,/控制端先开放/);
+  assert.match(same,/尚未读到新的准备事件/);
+  assert.doesNotMatch(same,/未再次调用模型|控制端先开放/);
+  assert.match(outcome(clarificationJob,{...clarificationJob,state:'model_requested'}),/准备记录已更新/);
   assert.doesNotMatch(same,/已登记新的准备记录|已开始/);
   const fresh=outcome(clarificationJob,{...clarificationJob,id:'b'.repeat(32),created_at:'later'});
   assert.match(fresh,/已登记新的准备记录/);
-  assert.match(outcome(clarificationJob,null),/没有返回准备记录/);
+  assert.match(outcome(clarificationJob,null),/等待后台的准备记录/);
   const moved=outcome(clarificationJob,{...clarificationJob,revision:22});
   assert.match(moved,/准备记录已更新/);
 });

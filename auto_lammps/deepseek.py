@@ -125,7 +125,8 @@ class ModelCalls:
             db.execute('CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL, at TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY REFERENCES calls(id), document TEXT NOT NULL)')
-            for table in ('policy', 'calls', 'receipts'):
+            db.execute('CREATE TABLE IF NOT EXISTS policy_revisions (seq INTEGER PRIMARY KEY, document TEXT NOT NULL, previous_sha256 TEXT NOT NULL, reason_sha256 TEXT NOT NULL, at TEXT NOT NULL)')
+            for table in ('policy', 'policy_revisions', 'calls', 'receipts'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable model accounting'); END")
@@ -136,6 +137,28 @@ class ModelCalls:
                 raise ModelError('model_policy_mismatch')
             db.execute(f'PRAGMA application_id={APP_ID}')
             db.execute('PRAGMA user_version=1')
+            latest=db.execute('SELECT document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
+            if latest:
+                self.config=DeepSeekConfig(**json.loads(latest[0])['config'])
+
+    def amend_limits(self, config, *, reason_sha256):
+        """Administrator-approved append-only per-call limits; no allowance reset."""
+        if not isinstance(config,DeepSeekConfig) or config.model!=self.config.model:
+            raise ModelError('limits_amendment_cannot_change_model')
+        if not isinstance(reason_sha256,str) or not re.fullmatch('[a-f0-9]{64}',reason_sha256):
+            raise ModelError('limits_amendment_requires_evidence')
+        with self.transaction() as db:
+            row=db.execute('SELECT seq,document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
+            previous=row[1] if row else db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0]
+            policy=json.loads(previous)
+            if policy['config']!=asdict(self.config):
+                raise ModelError('model_policy_changed_reload_before_amendment')
+            policy['config']=asdict(config)
+            document=canonical(policy).decode()
+            if document!=previous:
+                db.execute('INSERT INTO policy_revisions VALUES (?,?,?,?,?)',
+                    ((row[0]+1) if row else 1,document,sha256(previous.encode()),reason_sha256,datetime.now(timezone.utc).isoformat()))
+        self.config=config
 
     @contextmanager
     def transaction(self):

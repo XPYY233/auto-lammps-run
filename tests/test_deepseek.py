@@ -25,6 +25,22 @@ def response(value=None, **changes):
 
 
 class DeepSeekTests(unittest.TestCase):
+    def test_limit_amendment_is_append_only_and_keeps_costs(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'model.sqlite'
+            calls=ModelCalls(path,DeepSeekConfig('synthetic-model'),max_requests=2)
+            calls.reserve('a'*32,b'first request')
+            calls.amend_limits(replace(calls.config,max_output_tokens=16384),reason_sha256='b'*64)
+            reopened=ModelCalls.open_existing(path)
+            self.assertEqual(reopened.config.max_output_tokens,16384)
+            self.assertEqual(reopened.status()['remaining_requests'],1)
+            with reopened.transaction() as db:
+                base=json.loads(db.execute('SELECT document FROM policy').fetchone()[0])
+                self.assertEqual(base['config']['max_output_tokens'],4096)
+                self.assertEqual(db.execute('SELECT count(*) FROM calls').fetchone()[0],1)
+                with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM policy_revisions')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
