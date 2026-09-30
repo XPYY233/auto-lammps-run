@@ -155,6 +155,8 @@ function render() {
   $('#conflict-count').textContent = all.filter(f=>conditionStatus(f)==='conflict').length;
   $('#generate-conditions').hidden = frozen;
   $('#generate-conditions').disabled = !schema.model_calls_enabled;
+  $('#confirm-all-conditions').hidden = frozen;
+  $('#confirm-all-conditions').disabled = !all.some(f=>!f.confirmed) || all.some(f=>!f.selected);
   $('#complete-conditions').hidden = frozen;
   $('#refine-conditions').hidden = frozen;
   $('#refine-conditions').disabled = !schema.model_calls_enabled;
@@ -362,6 +364,17 @@ $('#refresh-reference').onclick=()=>action(async()=>{
   const id=current.id;current=await api('/api/tasks/'+id);
   await refreshModelStatus();await afterChange('文献记录已刷新。');
 });
+async function confirmAllConditions() {
+  const id=current.id;
+  const relevant=Object.entries(current.fields).filter(([key])=>key!=='reference'||current.mode==='reproduction');
+  if(relevant.some(([,f])=>!f.selected)){notice('请先补齐缺项并解决矛盾。',true);return;}
+  const fields=relevant.filter(([,f])=>!f.confirmed).map(([key])=>key);
+  if(!fields.length)return;
+  const updated=await api(`/api/tasks/${id}/confirm`,{revision:current.revision,fields});
+  if(current?.id!==id)return;
+  current=updated;await afterChange('已确认当前选择的全部研究条件；尚未提交计算。');
+}
+$('#confirm-all-conditions').onclick=()=>action(confirmAllConditions);
 async function completeConditions(refine=false) {
   const id=current.id, revision=current.revision;
   $('#complete-conditions').disabled=true;
@@ -607,7 +620,11 @@ async function refreshGuidance() {
 async function sendGuidance() {
   const note=$('#guidance-note').value.trim();
   if(!note){ notice('请先写下引导内容。', true); return; }
-  await api(`/api/tasks/${current.id}/guidance`,{revision:current.revision,note});
+  const id=current.id;
+  await api(`/api/tasks/${id}/guidance`,{revision:current.revision,note});
+  const updated=await api(`/api/tasks/${id}`);
+  if(current?.id!==id)return;
+  current=updated;
   $('#guidance-note').value='';
   await afterChange('引导已记录；应用内 AI 的后续判断会遵守它。');
   await refreshGuidance();
@@ -615,7 +632,11 @@ async function sendGuidance() {
 
 async function togglePause() {
   const paused=($('#task-pause').textContent||'').includes('暂停');
-  const result=await api(`/api/tasks/${current.id}/pause`,{revision:current.revision,paused});
+  const id=current.id;
+  const result=await api(`/api/tasks/${id}/pause`,{revision:current.revision,paused});
+  const updated=await api(`/api/tasks/${id}`);
+  if(current?.id!==id)return;
+  current=updated;
   await afterChange(result.paused?'任务已暂停：新的准备与派发会等待你的继续。':'任务已继续。');
   await refreshGuidance();
 }
