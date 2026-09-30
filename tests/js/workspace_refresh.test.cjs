@@ -9,7 +9,7 @@ function setup(){
  const elements=new Map();
  const element=()=>({children:[],hidden:false,textContent:'',className:'',append(...xs){this.children.push(...xs)},replaceChildren(...xs){this.children=xs},setAttribute(){},getAttribute(){}});
  const requests=[];
- const context=vm.createContext({Map,Date,Promise,current:{id:'one',status:'draft',updated_at:Date.now(),fields:{}},workspaceGeneration:0,workspaceState:{task:'one',phase:'ready',updated:new Date(0)},workspaceReport:{old:true},rawResult:{task:'one',files:[]},normalResult:{evaluations:[]},executionState:{old:true},resultTab:'overview',renders:[],targetRenders:[],requests,
+ const context=vm.createContext({Map,Date,Promise,schema:{model_calls_enabled:true},current:{id:'one',status:'draft',updated_at:Date.now(),fields:{}},workspaceGeneration:0,workspaceState:{task:'one',phase:'ready',updated:new Date(0)},workspaceReport:{old:true},rawResult:{task:'one',files:[]},normalResult:{evaluations:[]},executionState:{old:true},resultTab:'overview',renders:[],targetRenders:[],requests,
  $:selector=>{if(!elements.has(selector))elements.set(selector,element());return elements.get(selector)},node:()=>element(),
  api:path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject})),
  renderWorkspaceResults(){context.renders.push({phase:context.workspaceState.phase,report:context.workspaceReport})},renderTargetPlanning(){context.targetRenders.push(context.workspaceReport)},renderRefreshStatus(){},renderFlow(){},addInfo(){},renderRawFiles(){},currentRawFiles(){return []},renderExecutionControls(){},refreshDiscussion:async()=>{},document:{createTextNode:x=>x}});

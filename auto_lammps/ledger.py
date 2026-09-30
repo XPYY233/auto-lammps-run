@@ -522,29 +522,27 @@ class Ledger:
                 raise Conflict("Reconcile unknown dispatch before cancellation")
             return self._request(db, request_id)
 
-    def cancel_undispatched(self, evaluation: str) -> int:
-        """作废该评估下所有"已预留但从未派发"的请求（核时与存储都按 0 结算）。
+    def cancel_prepared(self, request_id: str) -> bool:
+        """Atomically cancel only an undispatched reservation; retain storage evidence.
 
-        账本规定同一评估下只能有一条活动请求，因此重新提交之前必须清理这些残留，
-        否则新的预留会被"已有请求未结束"拒绝——这正是应用端反复卡在
-        request_not_prepared 的原因。
+        A prepared row can already have uploaded inputs, or an unknown upload.
+        Only a separate verified inventory may settle retained storage.
         """
-        count = 0
         with self._transaction() as db:
-            rows = [r['id'] for r in db.execute(
+            row = self._request(db, request_id)
+            if row['dispatch_claimed'] or row['job_id'] or row['state'] != 'prepared':
+                return False
+            db.execute("UPDATE requests SET state='cancelled_before_dispatch',charge_core_seconds=0 WHERE id=?", (request_id,))
+            self._event(db, request_id, 'cancelled_before_dispatch', {'storage_reservation_retained': True})
+            return True
+
+    def cancel_undispatched(self, evaluation: str) -> int:
+        """Cancel unclaimed reservations without inventing storage cleanup."""
+        with self._transaction() as db:
+            ids = [r['id'] for r in db.execute(
                 "SELECT id FROM requests WHERE evaluation=? AND state='prepared' "
                 "AND dispatch_claimed=0 AND job_id IS NULL", (evaluation,))]
-        for request_id in rows:
-            try:
-                self.cancel_intent(request_id)
-                evidence = hashlib.sha256(_json({'request_id': request_id, 'staged': False,
-                                                 'reason': 'superseded_before_dispatch'}).encode()).hexdigest()
-                self.settle_cancelled_preparation_storage(request_id, retained_bytes=0,
-                                                          evidence_sha256=evidence)
-                count += 1
-            except (Conflict, LimitExceeded, LedgerError):
-                continue
-        return count
+        return sum(self.cancel_prepared(identifier) for identifier in ids)
 
     def observe(self, request_id: str, job_id: str, state: str, evidence: dict):
         if state not in {"queued", "running", *JOB_TERMINAL}:

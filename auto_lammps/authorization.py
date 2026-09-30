@@ -14,7 +14,7 @@ import time
 import uuid
 
 from . import runtime_launcher as runtime
-from .agent_candidates import validate_proposal, RESERVED_OUTPUTS
+from .agent_candidates import validate_proposal, RESERVED_OUTPUTS, render_candidate_script
 from .analysis_v2 import plan_adapter
 from .execution import ExistingAuthorization
 from .hpc_transport import bind_request, transport_identity
@@ -34,7 +34,7 @@ def candidate_check(snapshot, *, max_atoms):
         generation=json.loads(load('generation.json'));context=generation['input']
         analysis_raw=load('analysis.json');analysis=json.loads(analysis_raw)
         proposal=generation['proposal'];layout=context.get('output_layout','isolated')
-        screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout)
+        screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout,require_analysis_plan=True)
         if screen is None or screen!=generation['script_screen']:
             raise Conflict('Frozen candidate does not pass the current static screen')
         if (sha256(canonical(context))!=manifest['provenance']['task_sha256'] or
@@ -47,10 +47,7 @@ def candidate_check(snapshot, *, max_atoms):
                 or context['resources']!=manifest['resources']
                 or generation['request_id']!=sha256(canonical(context))[:32]):
             raise Conflict('Frozen analysis, model identity or resources changed')
-        header=[f"units {generation['potential_receipt']['units']}", 'atom_style atomic',
-                'boundary '+' '.join(proposal['structure']['boundary']), 'read_data structure.data',
-                *generation['potential_receipt']['commands']]
-        expected=('\n'.join(header)+'\n'+proposal['workflow']+'\n').encode('ascii')
+        expected=render_candidate_script(proposal,generation['potential_receipt']['units'],generation['potential_receipt']['commands'])
         if load(manifest['entrypoint'])!=expected:
             raise Conflict('Input differs from the frozen adapter and model workflow')
     return dict(schema_version=1,manifest_sha256=snapshot.digest,condition_sha256=context['condition_record_sha256'],

@@ -152,6 +152,7 @@ class TargetSelection(Revision):
 
 
 class ConditionInput(Revision):
+    refine: bool = False
     attempt: int = Field(default=0, ge=0, le=20)
 
 
@@ -931,10 +932,10 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             except (ValueError, KeyError, TypeError, OSError):
                 resources = None
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
-                                           operation='complete-conditions-v1',
+                                           operation='complete-conditions-v2', refine=data.refine,
                                            attempt=getattr(data, 'attempt', 0))))[:32]
         guidance = [item['note'] for item in store.guidance(identifier)]
-        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources, guidance)
+        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources, guidance, refine=data.refine)
 
     @app.post('/api/tasks/{identifier}/conditions/{field}')
     def add(identifier: str, field: str, data: AddCondition):

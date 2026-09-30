@@ -38,18 +38,9 @@
 
 审计与证据：`docs/AUDIT.md`（我的条目）、`docs/CANDIDATE_CONTRACT_AUDIT.md`、Issue **#153**。
 
-## 2. 当前真实运行状态（可复现）
+## 2. 运行状态与私有配置
 
-- 运行时：`~/.local/share/auto-lammps-private/portable-runtime-113`；端口 **8787**；
-- 私有配置：`~/Auto-LAMMPS-研究资料/产品部署/本地启动器/current.json`；
-- 桌面入口：`~/Desktop/Auto-LAMMPS.app`（由 `scripts/build_desktop_app.sh` 生成，现强制原生 arm64）；
-- 候选配置：`…/candidate-config-draft-xai-mpea.json`（`output_layout: working_directory`；
-  `software_sha256` 已对齐部署批准值 `1d8ab3d7…`）；
-- 私有势函数库 pin：W（Lee–Bakes 2001 MEAM）`2c00ee39…`、XAI MPEA `60b65c8c…`；
-- **活动政策修订（需你审计）**：`week2-endtoend-20260928` 的
-  `total_core_seconds` 460800 → 38707200、`total_storage_bytes` 4 GiB → 16 GiB，
-  各自附**私有审批记录**（`产品部署/政策修订-额度解除-20260928.md`、`政策修订-存储额度-20260928.md`），
-  依据是你我共同的记录：用户 2026-09-27 明确"资源额度限制取消"，保留 7 天/32 核/8 GiB/并发 1。
+运行环境、桌面入口、模型和 HPC 配置保存在本机私有交接记录。公开仓库不包含其路径、密钥或资源标识。政策变更保留历史依据；任务仍受提交次数、集群硬限制与完整记账要求约束。
 
 ## 3. 端到端到底走到哪（诚实口径）
 
@@ -83,7 +74,7 @@
   `auto_lammps/web_assets/*`、`scripts/{build_desktop_app.sh,desktop_supervisor.py,launch_local.py,stop_local.py}`、
   `tests/*`、`docs/{AUDIT.md,CANDIDATE_CONTRACT_AUDIT.md,本文件}`。
   若要改这些文件，请先在 Issue 说明，避免互相覆盖。
-- 我**不做**：自行合并 PR、切换共享检出（`/Users/fanjunran/Auto-LAMMPS`）的分支、
+- 我**不做**：自行合并 PR、切换共享检出的分支、
   改动运行中的 HPC 作业、把私密证据或凭据写入公共树。
 
 ## 6. 我打算做的下一步（等你点头）

@@ -109,7 +109,7 @@ class CandidateService:
         self.snapshots = private_directory(snapshots)
         self.history = CandidateHistory(tasks)
         config = {'resources': asdict(resources), 'max_atoms': max_atoms, 'model': asdict(client.calls.config),
-                  'model_ledger': str(client.calls.path.resolve()), 'catalog': str(adapter.catalog.directory),
+                  'requested_model': getattr(client,'model',client.calls.config.model), 'model_ledger': str(client.calls.path.resolve()), 'catalog': str(adapter.catalog.directory),
                   'pins': sorted(adapter.allowed_pins), 'software': adapter.software_sha256,
                   'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),

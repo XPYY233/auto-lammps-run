@@ -90,6 +90,20 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(frozen['status'], 'conditions_frozen')
         self.assertEqual(self.store.get(self.doc['id'])['issues'], [])
 
+    def test_refine_preserves_old_suggestions_and_confirmed_inputs(self):
+        self.complete()
+        doc=self.store.get(self.doc['id'])
+        self.store.confirm(doc['id'],doc['revision'],['units'])
+        payload=dict(proposals=[dict(field='structure',value='improved geometry',unit='',basis='reviewed proposal')])
+        self.transport.return_value=(200,response(payload))
+        result=complete_condition_draft(self.client,self.store,self.doc['id'],self.store.get(self.doc['id'])['revision'],'e'*32,refine=True)
+        doc=self.store.get(self.doc['id']);field=doc['fields']['structure']
+        self.assertEqual(len(field['candidates']),2)
+        self.assertEqual(field['selected'],field['candidates'][-1]['id'])
+        self.assertFalse(field['confirmed'])
+        self.assertTrue(doc['fields']['units']['confirmed'])
+        self.assertEqual(result['proposed_fields'],['structure'])
+
     def test_invalid_shapes_are_refused(self):
         for payload in (dict(), dict(proposals=[dict(field='units', value='metal')]),
                         dict(proposals=[dict(field='unknown', value='x', unit='', basis='b')]),
@@ -118,7 +132,8 @@ class CompletionTests(unittest.TestCase):
         user=__import__('json').loads(messages[1]['content'])
         self.assertEqual(user['user_request'], '研究铜在 300 K 下的弹性常数')
         self.assertEqual(sorted(user['essential_fields']), ['resources','scope'])
-        self.assertIn('政策默认', messages[0]['content'])
+        self.assertIn('项目已批准', messages[0]['content'])
+        self.assertIn('必须覆盖用户完整需求', messages[0]['content'])
 
     def test_message_contract_forbids_claiming_the_source(self):
         messages=completion_messages(ALL_FIELDS, [], 'research')

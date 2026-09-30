@@ -90,7 +90,7 @@ async function openTask(id) {
   const task = await api('/api/tasks/'+id);
   if(pendingRoute!==null)return;
   current=task;
-  $('#advanced-task').open=false;
+  $('#advanced-task').open=task.status!=='conditions_frozen';
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
   for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
@@ -156,6 +156,8 @@ function render() {
   $('#generate-conditions').hidden = frozen;
   $('#generate-conditions').disabled = !schema.model_calls_enabled;
   $('#complete-conditions').hidden = frozen;
+  $('#refine-conditions').hidden = frozen;
+  $('#refine-conditions').disabled = !schema.model_calls_enabled;
   $('#complete-conditions').disabled = !schema.model_calls_enabled;
   $('#generation-note').textContent = frozen ? '条件已冻结。' : schema.model_calls_enabled ? '根据原始需求整理条件，保留引用和缺项，不自动确认。' : '模型整理尚未启用或额度已用完。需求和已有条件已保存。';
   $('#generation-questions').replaceChildren();
@@ -360,12 +362,15 @@ $('#refresh-reference').onclick=()=>action(async()=>{
   const id=current.id;current=await api('/api/tasks/'+id);
   await refreshModelStatus();await afterChange('文献记录已刷新。');
 });
-async function completeConditions() {
+async function completeConditions(refine=false) {
   const id=current.id, revision=current.revision;
   $('#complete-conditions').disabled=true;
   notice('正在为缺失条件提出可执行的默认建议；建议需你逐项确认，不会自动确认。');
   try {
-    current=await api(`/api/tasks/${id}/complete-conditions`,{revision});
+    await api(`/api/tasks/${id}/complete-conditions`,{revision,refine});
+    const updated=await api(`/api/tasks/${id}`);
+    if(current?.id!==id)return;
+    current=updated;
     await afterChange('已补充待确认的条件建议。请核对来源标注为“模型建议”的条目。');
   } finally {
     await refreshModelStatus();
@@ -385,7 +390,8 @@ async function generateConditions() {
   }
 }
 $('#generate-conditions').onclick=()=>action(generateConditions);
-$('#complete-conditions').onclick=()=>action(completeConditions);
+$('#complete-conditions').onclick=()=>action(()=>completeConditions(false));
+$('#refine-conditions').onclick=()=>action(()=>completeConditions(true));
 const resultMetrics={mean:'均值',sample_std:'样本标准差',min:'最小值',max:'最大值',value:'末行值',x:'末行横坐标',slope:'斜率',intercept:'截距',rmse:'残差均方根',r_squared:'R²'};
 const analysisMethods={summary:'区间统计',last:'区间末行',linear_fit:'线性拟合'};
 function resultReport(report,taskId) {
@@ -1610,7 +1616,7 @@ async function refreshWorkspace(){
  if(r){addInfo('A 运行时长',duration(r.runtime.elapsed_seconds));addInfo('A 使用核数',String(r.runtime.cores));addInfo('A 提交次数',`${r.evaluation.dispatch_claims} 次（含失败）`);addInfo('B 提交次数',bCount(r));addInfo('A 本次核时',number(r.runtime.core_hours,3));addInfo('B 资源额度','用户未设上限');addInfo('A 作业号',r.job_id);reportDownloads(r,$('#task-files'));const a=node('a','论文与 DOI ↗','resource-link');a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';a.append(node('small',r.title));$('#task-resources').append(a);}
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
- $('#task-model').textContent=r?(r.evaluation?.attempt_scope==='week_one_reference_development'?'作者参考 A · 第一周人工辅助验证记录':'作者参考 A · 来源见任务信息'):'应用模型尚未启用';
+ $('#task-model').textContent=r?(r.evaluation?.attempt_scope==='week_one_reference_development'?'作者参考 A · 第一周人工辅助验证记录':'作者参考 A · 来源见任务信息'):(schema?.model_calls_enabled?'应用模型已连接 · 生成与用量见活动记录':'模型状态见设置');
  const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
  renderRawFiles(raw);
  if(current?.id!==id)return;

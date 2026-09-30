@@ -47,6 +47,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.value = {'summary': 'Synthetic packaging test only', 'questions': [], 'structure': deepcopy(SPEC),
                       'potential_pin': self.pin, 'workflow': 'thermo 1\nrun 0\nwrite_data /output/final.data',
                       'analysis': {'quantity': 'synthetic structure', 'method': 'geometry inventory only', 'files': ['final.data']}}
+        self.value['analysis']['plan']={'tables':[{'file':'final.data','columns':[{'name':'x','unit':'1'},{'name':'y','unit':'eV'}]}], 'operations':[{'id':'value','method':'last','file':'final.data','x':'x','y':'y','window':[0,1]}]}
         self.calls = ModelCalls(self.root / 'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=1)
         self.transport = Mock(side_effect=lambda *args: (200, response(self.value)))
         self.client = DeepSeekClient(self.calls, transport=self.transport, key_reader=lambda: 'synthetic-key')
@@ -140,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 4)
+        self.assertEqual(record['input']['generator_version'], 5)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -278,21 +279,12 @@ class PromptContractConformanceTests(unittest.TestCase):
         self.assertIn(str(analysis.MAX_COLUMNS), text)
 
 class LammpsAppendIdiomTests(unittest.TestCase):
-    """LAMMPS 的 print ... file X append 是合法写法，不能被当作缺少输出文件名。"""
-
-    def test_trailing_append_is_a_flag_not_a_target(self):
-        from auto_lammps.agent_candidates import validate_body
-        body = ('print "# columns: step energy" file /output/a0.dat\n'
-                'print "# units: step eV" file /output/a0.dat\n'
-                'print "0 -1.0" file /output/a0.dat append\n'
-                'run 0\n')
-        result = validate_body(body, ['a0.dat'])
-        self.assertEqual(result['declared_outputs'], ['a0.dat'])
-
-    def test_append_with_yes_no_is_also_accepted(self):
-        from auto_lammps.agent_candidates import validate_body
-        body = 'print "0 -1.0" file /output/a0.dat append yes\nrun 0\n'
-        self.assertEqual(validate_body(body, ['a0.dat'])['declared_outputs'], ['a0.dat'])
+    """LAMMPS print append takes a filename, not a boolean flag."""
+    def test_append_requires_declared_filename(self):
+        body='run 0\nprint "# columns: x y" file /output/table.dat\nprint "# units: 1 eV" append /output/table.dat\nprint "0 -1" append /output/table.dat'
+        self.assertEqual(validate_body(body,['table.dat'])['declared_outputs'],['table.dat'])
+        for suffix in ('append','append yes','append /outside.dat'):
+            with self.assertRaises(CandidateError):validate_body('run 0\nprint "0 -1" file /output/table.dat '+suffix,['table.dat'])
 
 class AnalysisFileNormalizationTests(unittest.TestCase):
     """模型常把 /output/ 前缀写进 analysis.files；归一为扁平基名，但仍拒绝重复与保留名。"""
@@ -323,11 +315,11 @@ class EmptyAnalysisPlanTests(unittest.TestCase):
                 'structure': deepcopy(SPEC), 'workflow': 'run 0\nwrite_data /output/final.data',
                 'analysis': {'quantity': 'q', 'method': 'm', 'files': ['final.data'], 'plan': plan}}
 
-    def test_empty_plan_is_dropped(self):
+    def test_empty_plan_is_rejected(self):
         from auto_lammps.agent_candidates import validate_proposal
         value = self.proposal({'tables': [], 'operations': []})
-        validate_proposal(value, max_atoms=100000)
-        self.assertNotIn('plan', value['analysis'])
+        with self.assertRaises(CandidateError):validate_proposal(value, max_atoms=100000)
+        self.assertIn('plan', value['analysis'])
 
     def test_malformed_nonempty_plan_is_still_rejected(self):
         from auto_lammps.agent_candidates import CandidateError, validate_proposal

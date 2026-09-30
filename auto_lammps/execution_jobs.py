@@ -94,9 +94,10 @@ class ExecutionJobs:
         live=bool(self.thread and self.thread.is_alive())
         if job:
             evaluation=self.ledger.evaluation_snapshot(job['evaluation'])
-            row=self.ledger.get(job['request_id'])
+            current_request=self.current_request_id(identifier)
+            row=self.ledger.get(current_request)
             return dict(configured=True,worker_alive=live,can_start=False,job=dict(
-                state=job['state'],label=LABELS.get(job['state'],job['state']),request_id=job['request_id'],job_id=row['job_id'],
+                state=job['state'],label=LABELS.get(job['state'],job['state']),request_id=current_request,job_id=row['job_id'],
                 scheduler_state=row['state'],accounted=bool(row['accounted']),
                 dispatch_count=evaluation['dispatch_claims'],max_attempts=evaluation['max_attempts'],
                 scientific_status='not_evaluated',reason=job['reason'],
@@ -169,32 +170,24 @@ class ExecutionJobs:
         if doc['revision']!=revision:raise StaleTask('任务已更新，请刷新后再试。')
         job=self.get(identifier)
         if job is None:raise TaskError('尚无执行记录，请先开始计算。')
-        significant=[e for e in job['events'] if e['state'] not in BOOKKEEPING]
-        state=significant[-1]['state'] if significant else job['state']
-        if state in WORKABLE:return self.status(identifier)
-        with self.tasks.transaction() as db:
-            if job['config_sha256']!=self.config_sha256:
-                self._event(db,job['id'],'config_rebased',self.config_sha256)
-            self._event(db,job['id'],'queued','user_recheck')
-        # 先清理该评估下"从未派发"的残留预留（零计费），否则账本会拒绝新的预留。
-        try:
-            self.ledger.cancel_undispatched(job['evaluation'])
-        except Exception:
-            pass
-        # 主动按当前方案重新预留一条请求，并把"权威请求"通过事件记录下来。
-        try:
-            plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
-            new_id=plan['row']['id']
-            if new_id != self.current_request_id(identifier):
-                with self.tasks.transaction() as db:
-                    self._event(db,job['id'],'request_replaced',str(new_id))
-        except Exception as error:
-            # 具体原因写日志（私有），事件里只放类别，避免把内部细节带进页面。
-            import sys as _sys, traceback as _tb
-            _tb.print_exc(file=_sys.stderr)
+        with self.history.lease(job['id']) as acquired:
+            if not acquired:return self.status(identifier)
+            job=self.get(identifier)
+            if job['state'] in WORKABLE:return self.status(identifier)
+            current_id=self.current_request_id(identifier)
+            row=self.ledger.get(current_id)
+            # Accepted/unknown submissions are followed as-is, never replaced.
+            if not row['dispatch_claimed']:
+                # Retain this exact evaluation's history and storage reservation.
+                self.controller.cancel_stale_intent(current_id)
+                plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
+                new_id=plan['row']['id']
+            else:
+                new_id=current_id
             with self.tasks.transaction() as db:
-                self._event(db,job['id'],'recheck_failed',type(error).__name__.lower()[:30])
-        self._reprepare.add(identifier)
+                if new_id!=current_id:self._event(db,job['id'],'request_replaced',new_id)
+                self._event(db,job['id'],'config_rebased',self.config_sha256)
+                self._event(db,job['id'],'queued','user_recheck')
         self.wake.set()
         return self.status(identifier)
 
@@ -220,12 +213,21 @@ class ExecutionJobs:
             if job['state']=='queued':
                 with self.tasks.transaction() as db:self._event(db,job['id'],'running')
             try:
-                allow = identifier in self._reprepare or self.request_replaced(identifier)
-                self._reprepare.discard(identifier)
-                # 只在"用户显式重新核对"这一条路径上传新参数，保持默认调用签名不变。
-                result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True)
-                        if allow else self.controller.advance(identifier,job['evaluation']))
-                if result.get('request_id')!=job['request_id']:raise ValueError('Execution identity changed')
+                current_id=self.current_request_id(identifier)
+                row=self.ledger.get(current_id)
+                if row['evaluation']!=job['evaluation']:
+                    raise ValueError('Execution evaluation changed')
+                if row['dispatch_claimed']:
+                    result=self.controller.following.advance(current_id)
+                else:
+                    allow=self.request_replaced(identifier)
+                    plan=(self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True)
+                          if allow else self.controller.prepare(identifier,job['evaluation']))
+                    if plan['row']['id']!=current_id:
+                        raise ValueError('Execution identity changed before dispatch')
+                    result=(self.controller.advance(identifier,job['evaluation'],allow_reprepare=True)
+                            if allow else self.controller.advance(identifier,job['evaluation']))
+                if result.get('request_id')!=current_id:raise ValueError('Execution identity changed')
                 state=result['state']
                 if state not in LABELS:raise ValueError('Unexpected execution state')
                 # Only known adapter codes, never exception messages or remote text.
@@ -239,21 +241,7 @@ class ExecutionJobs:
                 _tb.print_exc(file=_sys.stderr)
                 import re as _re
                 kind=_re.sub(r'[^a-z]','',type(exc).__name__.lower())[:24] or 'error'
-                cleared = 0
-                if type(exc).__name__ == 'Conflict':
-                    # 账本要求同一评估下只能有一条活动请求：把"从未派发"的残留预留全部
-                    # 零计费作废后重试（否则会永久卡在"已有请求未结束"）。
-                    if 'must finish or be reconciled first' in str(exc):
-                        try:
-                            cleared = self.ledger.cancel_undispatched(job['evaluation'])
-                        except Exception:
-                            cleared = 0
-                    if not cleared and self.controller.cancel_stale_intent(job['request_id']):
-                        cleared = 1
-                if cleared:
-                    state='queued';reason='stale_intent_cancelled'
-                else:
-                    state='attention';reason='execution_check_failed_'+kind
+                state='attention';reason='execution_check_failed_'+kind
                 # Class name only; private paths, grants and remote output stay private.
                 if isinstance(exc,FileNotFoundError):reason='deployment_file_missing'
             with self.tasks.transaction() as db:self._event(db,job['id'],state,reason)

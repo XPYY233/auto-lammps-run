@@ -175,7 +175,7 @@ class NativeCandidateTests(unittest.TestCase):
         with self.assertRaises(CandidateError):self.generate('auto')
         self.f.transport.assert_not_called()
     def test_frozen_input_cannot_be_overwritten_by_analysis_output(self):
-        f=self.f;f.value['workflow']='run 0\nwrite_data structure.data';f.value['analysis']['files']=['structure.data']
+        f=self.f;f.value['workflow']='run 0\nwrite_data structure.data';f.value['analysis']['files']=['structure.data'];f.value['analysis']['plan']['tables'][0]['file']='structure.data';f.value['analysis']['plan']['operations'][0]['file']='structure.data'
         with self.assertRaisesRegex(CandidateError,'collides'):self.generate('working_directory')
         self.assertFalse(list((f.root/'snapshots').glob('*/manifest.json')))
     def test_absolute_output_not_silently_rewritten_for_native_mode(self):
