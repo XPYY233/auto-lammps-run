@@ -6,6 +6,15 @@ from auto_lammps.manifest import canonical, sha256
 
 
 class DiagnosisTests(unittest.TestCase):
+    def test_real_client_json_contract_without_network(self):
+        import test_agent_candidates as candidates
+        f=candidates.AgentCandidateTests();f.setUp();self.addCleanup(f.doCleanups)
+        value=dict(summary='原因',evidence=['ERROR: failure'],cause='原因',repair='修订',proposed_lesson='待验证')
+        f.transport.side_effect=lambda *args:(200,candidates.response(value))
+        result=diagnose(f.client,dict(request_id='failed',logs=[dict(tail='ERROR: failure')]),{})
+        self.assertEqual(result['receipt']['state'],'completed')
+        self.assertEqual(f.transport.call_count,1)
+
     def test_diagnosis_is_accounted_proposed_and_evidence_grounded(self):
         evidence=dict(request_id='failed',logs=[dict(tail='ERROR: Compute used in variable between runs is not current')])
         value=dict(summary='未更新',evidence=['Compute used in variable between runs is not current'],
