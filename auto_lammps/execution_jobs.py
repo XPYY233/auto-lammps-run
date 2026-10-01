@@ -209,9 +209,13 @@ class ExecutionJobs:
             row=self.ledger.get(current_id)
             # Accepted/unknown submissions are followed as-is, never replaced.
             if not row['dispatch_claimed']:
-                # Retain this exact evaluation's history and storage reservation.
-                self.controller.cancel_stale_intent(current_id)
-                plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True,retry_after=self.retry_parent(identifier))
+                # A worker/deployment repair alone does not invalidate the exact
+                # prepared reservation. Keep its identity and storage charge.
+                if row['state']=='prepared' and self.plan_scope(identifier)=='plan:'+row['manifest_sha256']:
+                    plan=self.controller.prepare(identifier,job['evaluation'],retry_after=self.retry_parent(identifier))
+                else:
+                    self.controller.cancel_stale_intent(current_id)
+                    plan=self.controller.prepare(identifier,job['evaluation'],allow_reprepare=True,retry_after=self.retry_parent(identifier))
                 new_id=plan['row']['id']
             else:
                 new_id=current_id
@@ -295,9 +299,9 @@ class ExecutionJobs:
                     # 一个任务绑定失效会让所有任务都不再被跟进）。
                     import sys as _sys, traceback as _tb
                     _tb.print_exc(file=_sys.stderr)
-                    with self.tasks.transaction() as db:
-                        job=self.get(identifier)
-                        if job is not None:
+                    job=self.get(identifier)
+                    if job is not None:
+                        with self.tasks.transaction() as db:
                             self._event(db,job['id'],'attention',
                                         'worker_error_'+type(error).__name__.lower()[:24])
             self.wake.wait(5);self.wake.clear()

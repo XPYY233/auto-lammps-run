@@ -80,6 +80,13 @@ class EnrollmentTests(unittest.TestCase):
         self.f.ledger.amend_campaign_policy('synthetic',changed,expected_previous_sha256=self.scope['policy_sha256'])
         with self.assertRaises(TaskError):self.enrollment.get(self.doc['id'])
         with self.assertRaises(TaskError):self.register()
+        amended=self.open(policy_sha256=sha256(canonical(changed.__dict__)))
+        original=self.f.ledger.events(self.f.request_id)
+        self.assertEqual(amended.get(self.doc['id'])['evaluation'],
+                         amended.register(self.doc['id'],self.doc['revision']))
+        self.assertEqual(self.f.ledger.events(self.f.request_id),original)
+        with self.assertRaises(TaskError):
+            self.open(policy_sha256=sha256(canonical(changed.__dict__)),system_sha256='b'*64).get(self.doc['id'])
 
     def test_read_only_status_does_not_register_or_reserve(self):
         jobs=ExecutionJobs(self.f.controller,{},enrollment=self.enrollment);self.addCleanup(jobs.close)

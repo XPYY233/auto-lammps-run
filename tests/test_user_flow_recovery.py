@@ -60,6 +60,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
     enqueue=execution_tests.ExecutionJobTests.enqueue
     def test_replacement_is_current_before_dispatch_and_survives_restart(self):
         self.enqueue()
+        self.f.ledger.cancel_prepared(self.f.request_id)
         job=self.jobs.get(self.task)
         with self.f.tasks.transaction() as db:self.jobs._event(db,job['id'],'attention')
         # Above nested transaction is read-only for get, but use existing event path.

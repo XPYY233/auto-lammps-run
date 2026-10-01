@@ -156,6 +156,29 @@ class ExecutionJobTests(unittest.TestCase):
             result=reopened.advance(self.task);self.f.upload.assert_not_called();self.f.dispatch.assert_not_called()
         self.assertEqual(result['job']['reason'],'deployment_changed')
 
+    def test_recheck_worker_repair_keeps_unclaimed_request_and_charge(self):
+        self.enqueue();reopened=self.service();reopened.config_sha256='f'*64
+        before=self.f.ledger.get(self.f.request_id)
+        reopened.advance(self.task)
+        resumed=reopened.recheck(self.task,self.revision)
+        self.assertEqual(resumed['job']['request_id'],self.f.request_id)
+        after=self.f.ledger.get(self.f.request_id)
+        self.assertEqual(after,before)
+        self.assertEqual(resumed['job']['dispatch_count'],0)
+
+    def test_worker_exception_does_not_nest_transaction_or_stop_following(self):
+        self.enqueue();visited=[]
+        def broken_once(identifier):
+            visited.append(identifier)
+            if len(visited)==1:raise TaskError('synthetic binding failure')
+            self.jobs.stop.set();self.jobs.wake.set()
+        with patch.object(self.jobs,'advance',side_effect=broken_once),patch('traceback.print_exc'):
+            self.jobs.wake.set();self.jobs.start();self.jobs.thread.join(3)
+            self.assertFalse(self.jobs.thread.is_alive(),'Worker exception recovery blocked on its own transaction')
+            self.assertGreaterEqual(len(visited),2)
+        self.assertEqual(self.jobs.get(self.task)['reason'],'worker_error_taskerror')
+        self.assertEqual(self.f.ledger.evaluation_snapshot(self.f.evaluation)['dispatch_claims'],0)
+
     def test_concurrent_workers_have_one_dispatch(self):
         self.f.authorize_fixture();self.enqueue();other=self.service();entered=threading.Event();release=threading.Event()
         original=self.f.controller.advance
