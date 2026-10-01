@@ -45,8 +45,8 @@ class ReviewContractError(CandidateError):
 
 def normalized_review_issues(value):
     if not isinstance(value,list): return value
-    return [item['error'] if isinstance(item,dict) and set(item)=={'error'}
-            and isinstance(item['error'],str) else item for item in value]
+    return [next(iter(item.values())) if isinstance(item,dict) and set(item) in ({'error'},{'issue'})
+            and isinstance(next(iter(item.values())),str) else item for item in value]
 
 
 def validate_body(body, outputs, *, output_prefix='/output/', structures=None):

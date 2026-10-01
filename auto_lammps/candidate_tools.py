@@ -21,6 +21,14 @@ Conventional cubic cells contain bcc=2, fcc=4, diamond=8 atoms; count(all) gives
 minimize changes atoms only; box relaxation requires an active fix box/relax, and
 unfix before a later fixed-box stage. vmax if specified must be strictly positive. Do not use box/relax with vmax=0 for a fixed-box stage; omit the fix entirely. Check each requested condition separately.
 Thermo keywords and stored energies must be current for the stage being recorded.
+LAMMPS minimize etol ftol maxiter maxeval: etol is relative/dimensionless; ftol is
+force units. Its criteria are OR, not AND. Do not interpret older model-suggested
+unit/AND text as overriding a user's later explicit correction. Static review
+checks implemented numerical parameters and retained convergence diagnostics;
+actual convergence is judged from the completed outputs, never a pre-run claim.
+Do not block merely because outputs must later be checked for fmax/pressure.
+Potential literature metadata and original files are retained by the snapshot;
+do not require a redundant LAMMPS-generated citation file when these exist.
 Parser facts: $(pe) is evaluated IMMEDIATELY before the variable command executes.
 Thus capture E pe -> variable E equal $(pe) stores a numeric constant, NOT a dynamic
 reference to pe. It is different from variable E equal pe. Do not repair this correct

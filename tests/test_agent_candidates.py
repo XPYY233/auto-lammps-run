@@ -231,6 +231,13 @@ class AgentCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(CandidateError,'not current'):
             validate_body(valid.replace('step press','step press c_p').replace('variable saved','reset_timestep 0\nvariable saved'),['final.data'])
 
+    def test_review_issue_wrapper_preserves_blocking_content(self):
+        from auto_lammps.agent_candidates import normalized_review_issues
+        self.assertEqual(normalized_review_issues([{'issue':'actual failure'},{'error':'another failure'}]),
+            ['actual failure','another failure'])
+        self.assertEqual(normalized_review_issues([{'issue':'failure','extra':True}]),
+            [{'issue':'failure','extra':True}])
+
     def test_immediate_formula_is_not_quoted_or_changed(self):
         body='run 0\nvariable e equal $(pe - 2)\nprint "${e}" file /output/final.data'
         validate_body(body,['final.data'])
