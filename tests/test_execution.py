@@ -88,6 +88,30 @@ class ExecutionTests(unittest.TestCase):
         remote.private(self.submit_config,canonical(dict(runtime_path=str(self.helper),runtime_sha256=sha256(self.helper.read_bytes()),
             sbatch_path=str(self.scheduler_binary),sbatch_sha256=sha256(self.scheduler_binary.read_bytes()))))
 
+    def test_revised_retry_requires_new_plan_approval_and_preserves_parent(self):
+        from auto_lammps.deepseek import ModelCalls
+        rid=self.request_id
+        self.ledger.begin_dispatch(rid);self.ledger.accepted(rid,'123',{})
+        self.ledger.observe(rid,'123','failed',{});self.ledger.account(rid,0,'a'*64)
+        old=self.plan['snapshot'].digest
+        self.f.client.calls=ModelCalls(self.root/'revised-model.sqlite',self.f.calls.config,max_requests=3)
+        self.f.value['workflow']+='\n# revised synthetic proposal'
+        service=CandidateService(self.tasks,self.f.client,self.f.adapter,resources=self.resources,
+            snapshots=self.root/'snapshots',output_layout=getattr(self,'output_layout','isolated'))
+        with patch.object(service,'previous_proposal',return_value=None):
+            service.enqueue(self.doc['id'],self.doc['revision'],answers='Revise existing proposal')
+            service.close(wait=True)
+        digest=service.history.get(self.doc['id'])['result']['snapshot_sha256']
+        self.assertNotEqual(digest,old)
+        with self.assertRaisesRegex(Conflict,'exact snapshot'):
+            self.controller.prepare(self.doc['id'],self.evaluation,retry_after=rid)
+        current=self.tasks.get(self.doc['id'])
+        self.tasks.approve_plan(current['id'],current['revision'],scope='plan:'+digest)
+        revised=self.controller.prepare(current['id'],self.evaluation,retry_after=rid)
+        self.assertNotEqual(revised['row']['id'],rid)
+        self.assertEqual(revised['snapshot'].digest,digest)
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['dispatch_claims'],1)
+
     def authorize_fixture(self):
         self.remote.private(self.remote.control/(self.request_id+'.json'),canonical(runtime_fixtures.signed(self.payload)))
         self.remote.private(self.remote.control/(self.request_id+'.sh'),self.plan['batch'].script)

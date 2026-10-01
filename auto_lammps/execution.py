@@ -138,9 +138,10 @@ class CandidateExecution:
         if retry_after is not None:
             previous=self.ledger.get(retry_after)
             if (previous['evaluation']!=evaluation or previous['state']!='failed'
-                    or not previous['accounted'] or not previous['dispatch_claimed']
-                    or previous['manifest_sha256']!=digest):
-                raise Conflict('Retry requires an accounted failed submission of this exact plan')
+                    or not previous['accounted'] or not previous['dispatch_claimed']):
+                raise Conflict('Retry requires an accounted failed submission of this evaluation')
+            if previous['manifest_sha256']!=digest and not self.tasks.plan_approved(task_id,'plan:'+digest):
+                raise Conflict('A revised retry plan requires approval of its exact snapshot')
             base += '_retry_'+previous['id']
         key=base
         row=self.ledger.reserve(evaluation,key,digest,resources)

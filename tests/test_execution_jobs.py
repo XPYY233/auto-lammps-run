@@ -97,6 +97,18 @@ class ExecutionJobTests(unittest.TestCase):
         snap=self.f.ledger.evaluation_snapshot(self.f.evaluation)
         self.assertEqual(snap['original_max_attempts'],2)
         self.assertEqual(snap['attempt_scope'],'development_validation')
+        self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='f'*64)
+        self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='f'*64)
+        with self.assertRaises(execution.Conflict):
+            self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='a'*64)
+        fourth=self.jobs.retry(self.task,self.revision)
+        self.assertEqual(fourth['job']['max_attempts'],4)
+        rid4=fourth['job']['request_id'];self.assertNotEqual(rid3,rid4)
+        self.f.ledger.begin_dispatch(rid4);self.f.ledger.accepted(rid4,'126',{})
+        self.f.ledger.observe(rid4,'126','failed',{});self.f.ledger.account(rid4,0,'a'*64)
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
 
     def test_retry_rejects_unknown_or_unaccounted_and_stale_actions(self):
         self.enqueue()

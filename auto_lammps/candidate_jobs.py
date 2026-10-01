@@ -18,8 +18,9 @@ from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
 BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal'}
-ACTIVE = {'reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
+ACTIVE = {'diagnosing_failure','reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
 LABELS = {'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
+          'diagnosing_failure':'AI 正在读取失败日志并诊断原因',
           'checking_plan':'核对需求与方案', 'repairing_plan':'自动修正方案', 'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
           'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
@@ -105,6 +106,7 @@ class CandidateService:
         output_prefix(output_layout)
         self.output_layout = output_layout
         self.review_plan = review_plan
+        self.failure_context_provider = None
         self.tasks, self.client, self.adapter = tasks, client, adapter
         self.resources, self.max_atoms = resources, max_atoms
         self.snapshots = private_directory(snapshots)
@@ -115,7 +117,7 @@ class CandidateService:
                   'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
-                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'candidate_tools.py', 'analysis.py', 'structures.py', 'potentials.py')}}
+                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'candidate_tools.py', 'failure_recovery.py', 'analysis.py', 'structures.py', 'potentials.py')}}
         if output_layout != 'isolated': config['output_layout'] = output_layout
         self.config_sha256 = sha256(canonical(config))
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-preparation')
@@ -281,10 +283,12 @@ class CandidateService:
                 inputs=research_inputs(self.tasks,identifier,revision)
                 if inputs['condition_record_sha256']!=job['condition_sha256']:
                     raise CandidateError('Frozen research conditions changed; preserve the original preparation identity')
+                failure=(self.failure_context_provider(identifier) if self.failure_context_provider else None)
                 result = generate_research_candidate(self.client, self.tasks, identifier, revision, self.adapter,
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
                             output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan,
-                            previous_proposal=self.previous_proposal(identifier), on_proposal=proposal_saved)
+                            previous_proposal=self.previous_proposal(identifier), on_proposal=proposal_saved,
+                            failure_context=failure)
                 if self.tasks.get(identifier)['revision']!=revision:
                     raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
                 if result['status'] == 'clarification_required':
@@ -338,6 +342,9 @@ class CandidateService:
             review['files'].append(entry)
             if item['path']=='generation.json' and entry.get('content'):
                 checks=json.loads(entry['content']).get('plan_reviews',[])
+                recovery=json.loads(entry['content']).get('failure_recovery')
+                if recovery:review['failure_recovery']={k:recovery[k] for k in
+                    ('summary','evidence','cause','repair','proposed_lesson','validation_status')}
                 if checks:
                     review['automatic_check']={k:checks[-1][k] for k in ('issues','coverage','summary')}
         return review

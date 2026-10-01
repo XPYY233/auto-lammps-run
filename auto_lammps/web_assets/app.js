@@ -714,6 +714,14 @@ async function refreshPlanReview(){
   if(geometry.formula||geometry.atoms)summary.append(node('p',`结构：${geometry.formula||''} ${geometry.atoms?geometry.atoms+' 原子':''}`,'subtle'));
   const analysis=review.analysis||{};
   if(analysis.quantity)summary.append(node('p',`分析：${analysis.quantity}（文件 ${(analysis.files||[]).join('、')}）`,'subtle'));
+  if(review.failure_recovery){
+    const recovery=review.failure_recovery;
+    summary.append(node('p','AI 失败诊断：'+recovery.summary,'form-note'));
+    const details=node('details');details.append(node('summary','查看 AI 读到的错误、原因与本次修正'));
+    details.append(node('p','原因：'+recovery.cause),node('p','修改：'+recovery.repair));
+    for(const excerpt of recovery.evidence||[])details.append(node('pre',excerpt));
+    details.append(node('p','经验待运行验证：'+recovery.proposed_lesson));summary.append(details);
+  }
   if(review.automatic_check){
     const check=review.automatic_check;
     summary.append(node('p','应用已检查需求与步骤的一致性；实际运行后还会核对输出。','form-note'));
@@ -751,8 +759,10 @@ async function refreshPlanReview(){
   const job=execution.job||{};
   const dispatched=Boolean(job.job_id);
   const active=['queued','running','waiting','dispatching'].includes(job.state);
-  approve.disabled=dispatched||active;
-  approve.textContent=dispatched?'已提交，等待计算':(active?'提交中…':(review.approved?'提交计算':'批准并提交 HPC'));
+  const retryAvailable=job.scheduler_state==='failed'&&job.accounted&&job.dispatch_count<job.max_attempts;
+  approve.disabled=active||(dispatched&&!retryAvailable);
+  approve.textContent=retryAvailable?`${review.approved?'使用':'批准方案并使用'}第 ${job.dispatch_count+1} 次机会提交 HPC`:
+    (dispatched?'已有提交，查看执行结果':(active?'提交中…':(review.approved?'提交计算':'批准并提交 HPC')));
   const reason=job.reason?('　当前状态：'+(job.label||job.state||'')+'（'+job.reason+'）'):'';
   note.textContent=(dispatched?'已产生作业号 '+job.job_id+'。':(review.approved?'方案已批准，点“提交计算”即提交真实计算。':'批准后应用才会提交真实计算；方案一旦变化需要重新批准。'))
     +' 方案变化需要重新批准。'+reason;
@@ -760,7 +770,7 @@ async function refreshPlanReview(){
     approve.disabled=true;
     if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
     current=await api(`/api/tasks/${current.id}`);
-    const endpoint=job.state==='attention'?'execution/recheck':'execution';
+    const endpoint=retryAvailable?'execution/retry':(job.state==='attention'?'execution/recheck':'execution');
     try {
       await api(`/api/tasks/${current.id}/${endpoint}`,{revision:current.revision});
       await afterChange('已提交申请；应用会提交 HPC 并自动跟进状态。');

@@ -49,6 +49,7 @@ class ExecutionJobs:
         if enrollment is not None:config['enrollment']=enrollment.identity
         self.config_sha256=sha256(canonical(config))
         self.stop=threading.Event();self.wake=threading.Event();self.thread=None
+        self.on_failure=None
         self._reprepare=set()
         with self.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS execution_jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), '
@@ -276,6 +277,9 @@ class ExecutionJobs:
                 # Class name only; private paths, grants and remote output stay private.
                 if isinstance(exc,FileNotFoundError):reason='deployment_file_missing'
             with self.tasks.transaction() as db:self._event(db,job['id'],state,reason)
+            if state=='diagnostics_saved' and self.on_failure:
+                # Preparing a repair does not approve it or dispatch another job.
+                self.on_failure(identifier)
         return self.status(identifier)
 
     def _run(self):

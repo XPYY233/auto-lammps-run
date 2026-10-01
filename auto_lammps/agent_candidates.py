@@ -19,7 +19,7 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 12
+GENERATOR_VERSION = 13
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -73,6 +73,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
     variables = {}
     semantic_errors=[]
     pressure_computes,current_computes=set(),set()
+    thermo_computes=set()
     counts = structures or {}
     atom_count = counts.get("initial")
     for line in lines:
@@ -94,6 +95,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
                 raise CandidateError('load_structure must select each supplied additional structure exactly once')
             loaded.add(tokens[1]);atom_count=counts[tokens[1]];groups={};deleted=set()
             pressure_computes,current_computes=set(),set()
+            thermo_computes=set()
         if command == 'group' and len(tokens)>2:
             name=tokens[1]
             if len(tokens)==4 and tokens[2]=='id' and tokens[3].isdigit() and name not in groups:
@@ -106,6 +108,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
                     or not 1<=groups[tokens[2]]<=atom_count or groups[tokens[2]] in deleted):
                 raise CandidateError('Delete only a declared single static atom-ID group with compress no; retain its ID and coordinates')
             deleted.add(groups[tokens[2]])
+            current_computes.clear()
         if command == 'variable'  and not ((len(tokens)==3 and tokens[2]=='delete') or
                 (len(tokens)>=4 and tokens[2] in {'equal', 'index', 'string'})):
             raise CandidateError('Unsupported variable definition')
@@ -116,7 +119,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
         if command == 'variable':
             stale=(set(re.findall(r'\bc_([A-Za-z][A-Za-z0-9_]*)',line)) & pressure_computes)-current_computes
             if stale and '$(' in line:
-                semantic_errors.append('Pressure computes not initialized by a preceding calculation: '+', '.join(sorted(stale))+'; define computes before minimization or use an already initialized thermo keyword')
+                semantic_errors.append('Pressure computes not current: '+', '.join(sorted(stale))+'; define before calculation AND consume c_ID in thermo_style custom during its final step, or use an already initialized thermo pressure keyword. Definition alone does not invoke a compute.')
             name, style = tokens[1:3]
             if style=='delete':
                 variables.pop(name,None)
@@ -130,9 +133,15 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
             raise CandidateError('Unsupported compute style')
         if command=='compute' and tokens[3]=='pressure':
             pressure_computes.add(tokens[1]);current_computes.discard(tokens[1])
+        if command=='uncompute' and len(tokens)==2:
+            pressure_computes.discard(tokens[1]);current_computes.discard(tokens[1])
+        if command=='thermo_style':
+            thermo_computes=set(re.findall(r'\bc_([A-Za-z][A-Za-z0-9_]*)',line))
+        if command in {'reset_timestep','displace_atoms','change_box','set'}:
+            current_computes.clear()
         if command in {'run', 'minimize'}:
             evaluations += 1
-            current_computes=set(pressure_computes)
+            current_computes=pressure_computes & thermo_computes
         targets = []
         if command == 'dump':
             if len(tokens) < 6 or tokens[3] not in {'custom', 'atom', 'xyz'}:
@@ -408,7 +417,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
 
 def generate_candidate_draft(client, adapter, *, task_text, units, resources, store, max_atoms=100000,
                              condition_record_sha256=None, on_stage=None, previous_proposal=None, on_proposal=None, output_layout='isolated',
-                             answers=None, guidance=None, require_analysis_plan=False, review_plan=False):
+                             answers=None, guidance=None, require_analysis_plan=False, review_plan=False, failure_context=None):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -439,6 +448,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'condition_record_sha256': condition_record_sha256}
     if output_layout != 'isolated':
         context['output_layout'] = output_layout
+    recovery=None
+    if failure_context is not None:
+        if previous_proposal is None or failure_context['condition_sha256']!=condition_record_sha256:
+            raise CandidateError('Runtime failure recovery requires the linked proposal and same frozen conditions')
+        context['failure_evidence_sha256']=sha256(canonical(failure_context))
     if previous_proposal is not None:
         if (not isinstance(previous_proposal, dict) or set(previous_proposal)!={'value','request_id','receipt'}
                 or previous_proposal['receipt'].get('state')!='completed'
@@ -470,6 +484,21 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         raise ModelError('candidate_generation_not_completed')
     proposal = completion['value']
     receipts=[completion['receipt']]
+    if failure_context is not None:
+        from .failure_recovery import diagnose
+        recovery=diagnose(client,failure_context,proposal,on_stage=on_stage)
+        receipts.append(recovery['receipt'])
+        messages += [{'role':'assistant','content':canonical(proposal).decode()},
+            {'role':'user','content':'Revise this SAME proposal using your diagnosis of its verified failed execution. '
+             'Keep all frozen scientific conditions, sizes, potential and outputs. Make the minimal necessary '
+             'correction, check the complete subsequent stages too, and return the complete proposal JSON. '
+             'The diagnosis is a hypothesis pending actual validation. '+canonical(recovery).decode()}]
+        if on_stage:on_stage('repairing_plan')
+        repair_id=sha256(canonical(dict(base=request_id,kind='execution_failure_repair',diagnosis=recovery)))[:32]
+        completion=client.complete_json(repair_id,messages)
+        if completion['receipt']['state']!='completed' or completion['receipt']['output_sha256']!=sha256(canonical(completion['value'])):
+            raise ModelError('failure_repair_not_completed')
+        proposal=completion['value'];receipts.append(completion['receipt'])
     reviews=[]
     # 契约很长，模型一次难以全部满足。校验规则一条都不放宽，但把**具体错误**回喂给模型，
     # 最多自动修复 3 轮（每轮都是一次可记账调用），常见结果是从"少一个字段"逐轮收敛到合法方案。
@@ -602,6 +631,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                   'potential_receipt': binding.receipt, 'script_screen': screen,
                   'scientific_conditions_verified': False, 'runtime_isolation_verified': False,
                   'execution_authorized': False}
+    if recovery:generation['failure_recovery']=recovery
     files = {**binding.files, 'structure.data': geometry.data, 'in.lammps': script,
              'analysis.json': canonical(analysis), 'generation.json': canonical(generation)}
     for item in proposal.get('additional_structures',[]):
@@ -651,7 +681,7 @@ def research_inputs(tasks, identifier, revision):
             'condition_record_sha256': sha256(frozen)}
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, previous_proposal=None, on_proposal=None, output_layout='isolated', answers=None, guidance=None, review_plan=False):
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, previous_proposal=None, on_proposal=None, output_layout='isolated', answers=None, guidance=None, review_plan=False, failure_context=None):
     """Research bridge; reference tasks still need the separate release/isolation gate."""
     inputs = research_inputs(tasks, identifier, revision)
     # Only selected confirmed values; no task title, free prompt, discarded
@@ -659,4 +689,4 @@ def generate_research_candidate(client, tasks, identifier, revision, adapter, *,
     return generate_candidate_draft(client, adapter, **inputs, resources=resources,
                                     store=store, max_atoms=max_atoms, on_stage=on_stage, output_layout=output_layout,
                                     answers=answers, guidance=guidance, require_analysis_plan=True, review_plan=review_plan,
-                                    previous_proposal=previous_proposal,on_proposal=on_proposal)
+                                    previous_proposal=previous_proposal,on_proposal=on_proposal,failure_context=failure_context)

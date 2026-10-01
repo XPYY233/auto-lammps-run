@@ -141,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 12)
+        self.assertEqual(record['input']['generator_version'], 13)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -224,7 +224,12 @@ class AgentCandidateTests(unittest.TestCase):
             validate_body(body,['final.data'])
         self.assertIn('Pressure computes',str(caught.exception))
         self.assertIn('Undefined LAMMPS',str(caught.exception))
-        validate_body(('compute p all pressure NULL virial\n'+body.replace('compute p all pressure NULL virial\n','')).replace('${step}','$(step)'),['final.data'])
+        valid=('compute p all pressure NULL virial\n'+body.replace('compute p all pressure NULL virial\n','')).replace('${step}','$(step)')
+        with self.assertRaisesRegex(CandidateError,'not current'):
+            validate_body(valid,['final.data'])
+        validate_body(valid.replace('step press','step press c_p'),['final.data'])
+        with self.assertRaisesRegex(CandidateError,'not current'):
+            validate_body(valid.replace('step press','step press c_p').replace('variable saved','reset_timestep 0\nvariable saved'),['final.data'])
 
     def test_immediate_formula_is_not_quoted_or_changed(self):
         body='run 0\nvariable e equal $(pe - 2)\nprint "${e}" file /output/final.data'

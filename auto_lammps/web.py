@@ -241,6 +241,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             raise ValueError('Execution and results must share the ledger and artifact directories')
         if candidate_service and candidate_service.snapshots!=controller.snapshots:
             raise ValueError('Candidate and execution services must share snapshots')
+        if candidate_service:
+            from .failure_recovery import failure_context
+            candidate_service.failure_context_provider=lambda identifier:failure_context(execution_jobs,identifier)
+            execution_jobs.on_failure=lambda identifier:candidate_service.enqueue(identifier,store.get(identifier)['revision'],
+                answers='应用自动恢复：读取本任务最新已核验失败日志，诊断并最小修改现有方案；保留全部需求。修订待批准，不自动再次提交。')
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)

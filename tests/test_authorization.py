@@ -84,6 +84,14 @@ class AuthorizationTests(unittest.TestCase):
         f.request_id=f.plan['row']['id']
         with self.patches():self.assertTrue(self.ensure())
         self.assertEqual(f.ledger.evaluation_snapshot(f.evaluation)['dispatch_claims'],2)
+        f.ledger.begin_dispatch(f.request_id);f.ledger.accepted(f.request_id,'125',{})
+        f.ledger.observe(f.request_id,'125','failed',{});f.ledger.account(f.request_id,0,'a'*64)
+        f.ledger.approve_development_fourth_attempt(f.evaluation,approval_sha256='f'*64)
+        f.plan=f.controller.prepare(f.doc['id'],f.evaluation,retry_after=f.request_id)
+        f.request_id=f.plan['row']['id']
+        with self.patches():self.assertTrue(self.ensure())
+        snap=f.ledger.evaluation_snapshot(f.evaluation)
+        self.assertEqual((snap['dispatch_claims'],snap['original_max_attempts'],snap['max_attempts']),(3,2,4))
 
     def test_lost_receipt_retries_identical_installation_before_any_submission(self):
         f=self.f;first=True

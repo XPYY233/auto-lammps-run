@@ -30,13 +30,14 @@ variables cannot be reassigned by redefining them; use distinct names or delete 
 Use numeric literal IDs for static group/delete operations. Quote the entire equal
 expression when it contains spaces. A conventional cubic lattice constant is lx/nx,
 not the full supercell length lx. Retain both the pre-defect and post-defect initial
-structures when requested. Define computes before minimization so they are initialized.
-A custom pressure compute defined BEFORE minimize is initialized by that calculation
-and may be evaluated on demand afterward when the pressure/virial tallies are current
-(e.g. thermo_style includes press). It does NOT have to appear itself in thermo output.
-Do not create a NEW compute after minimization and read it without initialization.
-Thermo pressure keywords from the same unchanged state may also be used. Never reject
-an initialized pressure compute solely because c_ID is absent from thermo_style.
+structures when requested. Defining a compute before minimization does NOT invoke it.
+LAMMPS 28Mar2023 requires invoked_scalar == current timestep for c_ID reads between
+runs. For custom pressure, define it before the calculation AND explicitly consume
+c_ID in thermo_style custom at the final step before capturing $(c_ID). Merely
+outputting press updates the default thermo pressure compute, not every custom one.
+Alternatively capture the already evaluated thermo press from the unchanged state.
+After atom/box edits or timestep resets, recalculate before recording diagnostics.
+Preserve consistent virial/kinetic semantics; 0 K pressure requires zero kinetic energy.
 Sources: https://docs.lammps.org/variable.html , https://docs.lammps.org/print.html ,
 https://docs.lammps.org/fix_box_relax.html , https://docs.lammps.org/thermo_style.html .
 https://docs.lammps.org/Commands_parse.html , https://docs.lammps.org/clear.html .

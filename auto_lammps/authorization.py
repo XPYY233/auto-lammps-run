@@ -94,7 +94,7 @@ class AutomaticAuthorization:
         evaluation=self.ledger.evaluation_snapshot(row['evaluation'])
         report=candidate_check(snapshot,max_atoms=self.max_atoms)
         allowed_attempts=(evaluation['max_attempts']==2 or
-            (evaluation['max_attempts']==3 and evaluation['original_max_attempts']==2
+            (evaluation['max_attempts'] in {3,4} and evaluation['original_max_attempts']==2
              and evaluation['attempt_scope']=='development_validation'))
         if (evaluation['identity']['role']!='agent' or not allowed_attempts
                 or evaluation['identity']['task']!=report['condition_sha256']):

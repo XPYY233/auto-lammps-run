@@ -126,6 +126,15 @@ CREATE TRIGGER IF NOT EXISTS immutable_development_update BEFORE UPDATE ON devel
  BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_development_delete BEFORE DELETE ON development_allowances
  BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
+CREATE TABLE IF NOT EXISTS development_fourth_allowances (
+ evaluation TEXT PRIMARY KEY REFERENCES development_allowances(evaluation),
+ max_attempts INTEGER NOT NULL CHECK(max_attempts=4),
+ previous_approval_sha256 TEXT NOT NULL, approval_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_development_fourth_update BEFORE UPDATE ON development_fourth_allowances
+ BEGIN SELECT RAISE(ABORT, 'fourth development allowance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_development_fourth_delete BEFORE DELETE ON development_fourth_allowances
+ BEGIN SELECT RAISE(ABORT, 'fourth development allowance is immutable'); END;
 CREATE TABLE IF NOT EXISTS reference_continuations (
  evaluation TEXT PRIMARY KEY REFERENCES evaluations(id), approval_sha256 TEXT NOT NULL
 );
@@ -339,6 +348,8 @@ class Ledger:
 
     @staticmethod
     def _attempt_allowance(db, evaluation):
+        fourth=db.execute('SELECT * FROM development_fourth_allowances WHERE evaluation=?',(evaluation['id'],)).fetchone()
+        if fourth:return fourth['max_attempts'],'development_validation'
         development=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation['id'],)).fetchone()
         if development:return development['max_attempts'],'development_validation'
         continuation = db.execute('SELECT 1 FROM reference_continuations WHERE evaluation=?',
@@ -412,6 +423,29 @@ class Ledger:
             db.execute('INSERT INTO development_allowances VALUES (?,?,?)',(evaluation,3,approval_sha256))
             self._event(db,None,'development_third_attempt_approved',dict(evaluation=evaluation,
                 approval_sha256=approval_sha256,max_attempts=3,product_max_attempts=2))
+
+    def approve_development_fourth_attempt(self, evaluation: str, *, approval_sha256: str):
+        """Controller-only fourth exception; retain the immutable third approval."""
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            old=db.execute('SELECT * FROM development_fourth_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256']!=approval_sha256:raise Conflict('Cannot replace fourth development approval')
+                return
+            previous=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            ev=db.execute('SELECT * FROM evaluations WHERE id=?',(evaluation,)).fetchone()
+            rows=db.execute('SELECT * FROM requests WHERE evaluation=?',(evaluation,)).fetchall()
+            submitted=[r for r in rows if r['dispatch_claimed']]
+            if (previous is None or ev is None or ev['max_attempts']!=2
+                    or json.loads(ev['identity'])['role']!='agent' or len(submitted)!=3
+                    or any(r['state']!='failed' or not r['accounted'] for r in submitted)
+                    or any(r['state'] in ACTIVE for r in rows)):
+                raise Conflict('Requires the third approval and three accounted failures')
+            db.execute('INSERT INTO development_fourth_allowances VALUES (?,?,?,?)',
+                (evaluation,4,previous['approval_sha256'],approval_sha256))
+            self._event(db,None,'development_fourth_attempt_approved',dict(evaluation=evaluation,
+                approval_sha256=approval_sha256,previous_approval_sha256=previous['approval_sha256'],
+                max_attempts=4,product_max_attempts=2))
 
     def settle_cancelled_preparation_storage(self, request_id: str, *, retained_bytes: int, evidence_sha256: str):
         """Settle never-dispatched preparation from a verified retained-file inventory.
