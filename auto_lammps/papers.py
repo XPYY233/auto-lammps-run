@@ -254,10 +254,14 @@ class PaperStore:
             self._write(db, doc, event)
         return self.get(identifier)
 
-    def list(self):
+    def list(self, transform=None):
+        """The caller may adjust each document (for example with a user-accepted scope);
+        the tab counts are computed from the adjusted documents."""
         with self.tasks.transaction() as db:
             ids=[r[0] for r in db.execute('SELECT id FROM papers ORDER BY rowid DESC')]
         papers=[self.get(i) for i in ids]
+        if transform is not None:
+            papers=[transform(document) for document in papers]
         return dict(papers=papers,counts={status:sum(p['selection']=='selected' and p['status']==status for p in papers)
                                          for status in STATUSES},candidate_count=sum(p['selection']=='candidate' for p in papers),
                     statuses=STATUSES,score_publication_available=False)

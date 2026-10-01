@@ -149,6 +149,15 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(runtime.ExecutionDenied):
                 runtime.parse_allocation(text,**args)
 
+    def test_short_node_name_requires_verified_fqdn_alias(self):
+        args=dict(request_id=REQUEST,manifest_sha256=self.digest,job_id='123',uid=os.getuid(),host='compute-fixture.cluster.test',resources=asdict(RESOURCES))
+        with patch.object(runtime.socket,'getfqdn',return_value='compute-fixture.cluster.test'):
+            self.assertEqual(runtime.parse_allocation(self.allocation(),**args),1)
+            for change in [dict(NodeList='other'),dict(BatchHost='compute-fixture.other.test'),dict(NodeList='compute-fixture[1-2]'),dict(NumCPUs='2')]:
+                with self.assertRaises(runtime.ExecutionDenied):runtime.parse_allocation(self.allocation(**change),**args)
+        with patch.object(runtime.socket,'getfqdn',side_effect=lambda value:value):
+            with self.assertRaises(runtime.ExecutionDenied):runtime.parse_allocation(self.allocation(),**args)
+
     def test_cgroup_hierarchical_minimum_and_unbounded_denial(self):
         mount=self.root/'cgroup'
         (mount/'parent/child').mkdir(parents=True)

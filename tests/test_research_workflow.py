@@ -69,17 +69,32 @@ class WorkflowTests(unittest.TestCase):
         stack.enter_context(patch.object(outputs,'transfer',side_effect=download))
         return stack
 
+    def approve_plan(self):
+        job=self.candidates.history.get(self.doc['id'])
+        self.f.tasks.approve_plan(self.doc['id'],self.doc['revision'],
+                                  scope='plan:'+job['result']['snapshot_sha256'])
+
     def test_single_http_start_reaches_analysis_and_download_without_second_click(self):
         app=create_app(self.f.tasks,model_client=self.client,candidate_service=self.candidates,execution_jobs=self.jobs)
         with self.transports(),TestClient(app,base_url=ORIGIN) as web:
             self.assertTrue(web.get('/api/schema').json()['automatic_workflow']['configured'])
             self.assertIsNone(web.get(self.url+'/execution').json()['automatic_workflow']['workflow'])
             self.assertIsNone(self.enrollment.get(self.doc['id']))
+            # 第一道人工关卡：未批准方案时不允许提交（这里先准备方案，再断言被拒）。
+            reply=web.post(self.url+'/workflow',headers=HEADERS,json={'revision':self.doc['revision']})
+            self.assertEqual(reply.status_code,202,reply.text)
+            self.wait_for(lambda:self.candidates.history.get(self.doc['id']),lambda x:bool(x) and x.get('state')=='prepared')
+            refused=web.post(self.url+'/execution',headers=HEADERS,json={'revision':self.doc['revision']})
+            self.assertEqual(refused.status_code,409,refused.text)
+            waiting=self.wait_for(lambda:web.get(self.url+'/execution').json(),lambda x:(x.get('automatic_workflow',{}).get('workflow') or {}).get('state')=='awaiting_approval')
+            before=self.candidates.history.get(self.doc['id'])['result']['snapshot_sha256']
+            self.approve_plan()
             reply=web.post(self.url+'/workflow',headers=HEADERS,json={'revision':self.doc['revision']})
             self.assertEqual(reply.status_code,202,reply.text)
             for _ in range(3):
                 self.assertEqual(web.post(self.url+'/workflow',headers=HEADERS,json={'revision':self.doc['revision']}).status_code,202)
             result=self.wait_for(lambda:web.get(self.url+'/execution').json(),lambda x:(x.get('job') or {}).get('state')=='analyzed')
+            self.assertEqual(self.candidates.history.get(self.doc['id'])['result']['snapshot_sha256'],before)
             self.assertEqual(result['job']['dispatch_count'],1)
             self.assertEqual(result['job']['max_attempts'],2)
             self.assertEqual(result['job']['scientific_status'],'not_evaluated')
@@ -97,6 +112,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(self.candidates.history.get(self.doc['id']))
         with self.transports():
             self.candidates.start();self.jobs.start();restarted.start()
+            # 方案准备完成后由用户批准（新的产品契约），随后才允许派发。
+            self.wait_for(lambda:self.candidates.history.get(self.doc['id']),lambda x:bool(x) and x.get('state')=='prepared')
+            self.approve_plan()
             result=self.wait_for(lambda:self.jobs.status(self.doc['id']),lambda x:(x.get('job') or {}).get('state')=='analyzed')
         self.assertEqual(result['job']['dispatch_count'],1)
         self.assertEqual(self.fixture.install_calls,1)
@@ -104,7 +122,7 @@ class WorkflowTests(unittest.TestCase):
     def test_read_only_restart_never_runs_unstarted_prepared_task(self):
         self.enrollment.register(self.doc['id'],self.doc['revision'])
         self.candidates.enqueue(self.doc['id'],self.doc['revision'])
-        self.wait_for(lambda:self.candidates.history.get(self.doc['id']),lambda x:x['state']=='prepared')
+        self.wait_for(lambda:self.candidates.history.get(self.doc['id']),lambda x:bool(x) and x.get('state')=='prepared')
         with self.transports():
             self.flow.start();time.sleep(.05);self.flow.close()
             self.assertIsNone(self.flow.status(self.doc['id'])['workflow'])

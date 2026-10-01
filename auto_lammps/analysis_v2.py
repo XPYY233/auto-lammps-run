@@ -14,6 +14,7 @@ from .slurm_read import _write_new
 
 AnalysisError = legacy.AnalysisError
 MAX_TABLE_BYTES = legacy.MAX_TABLE_BYTES
+MAX_TABLES = legacy.MAX_TABLES
 VERSION = 2
 
 
@@ -25,7 +26,7 @@ def adapter_identity():
 def validate_plan(plan, files):
     if not isinstance(plan,dict) or set(plan) != {'tables','operations'}:
         raise AnalysisError('Explicit analysis tables and operations are required')
-    if not isinstance(plan['tables'],list) or not 1 <= len(plan['tables']) <= 16:
+    if not isinstance(plan['tables'],list) or not 1 <= len(plan['tables']) <= MAX_TABLES:
         raise AnalysisError('Declare one to sixteen analysis tables')
     tables=[]
     for table in plan['tables']:

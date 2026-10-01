@@ -118,9 +118,34 @@ CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
  policy TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
  PRIMARY KEY(campaign, revision)
 );
+CREATE TABLE IF NOT EXISTS development_allowances (
+ evaluation TEXT PRIMARY KEY REFERENCES evaluations(id),
+ max_attempts INTEGER NOT NULL CHECK(max_attempts=3), approval_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_development_update BEFORE UPDATE ON development_allowances
+ BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_development_delete BEFORE DELETE ON development_allowances
+ BEGIN SELECT RAISE(ABORT, 'development allowance is immutable'); END;
+CREATE TABLE IF NOT EXISTS development_fourth_allowances (
+ evaluation TEXT PRIMARY KEY REFERENCES development_allowances(evaluation),
+ max_attempts INTEGER NOT NULL CHECK(max_attempts=4),
+ previous_approval_sha256 TEXT NOT NULL, approval_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_development_fourth_update BEFORE UPDATE ON development_fourth_allowances
+ BEGIN SELECT RAISE(ABORT, 'fourth development allowance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_development_fourth_delete BEFORE DELETE ON development_fourth_allowances
+ BEGIN SELECT RAISE(ABORT, 'fourth development allowance is immutable'); END;
 CREATE TABLE IF NOT EXISTS reference_continuations (
  evaluation TEXT PRIMARY KEY REFERENCES evaluations(id), approval_sha256 TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_resource_limits (
+ campaign TEXT PRIMARY KEY REFERENCES campaigns(id), core_seconds INTEGER NOT NULL,
+ approval_sha256 TEXT NOT NULL, gpu_allowed INTEGER NOT NULL CHECK(gpu_allowed=0)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_task_limits_update BEFORE UPDATE ON task_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_task_limits_delete BEFORE DELETE ON task_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_update BEFORE UPDATE ON reference_continuations
  BEGIN SELECT RAISE(ABORT, 'reference continuation is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_delete BEFORE DELETE ON reference_continuations
@@ -287,8 +312,46 @@ class Ledger:
             self._event(db,None,'campaign_policy_amended',{'campaign':campaign,'revision':revision,
                 'previous_sha256':expected_previous_sha256,'policy':asdict(policy)})
 
+    def approve_task_resource_limit(self, campaign, core_seconds, *, approval_sha256):
+        """Append a CPU-only per-task cap without rewriting the campaign or identity.
+
+        Existing costs, including overrun, are retained. This gates future
+        reservations and dispatches; it never cancels a running calculation.
+        """
+        _positive(core_seconds); _digest(approval_sha256)
+        with self._transaction() as db:
+            self._policy(db, campaign)
+            old = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (campaign,)).fetchone()
+            if old:
+                if old['core_seconds'] != core_seconds or old['approval_sha256'] != approval_sha256:
+                    raise Conflict('Task resource policy already recorded; explicit amendment required')
+                return
+            db.execute('INSERT INTO task_resource_limits VALUES (?,?,?,0)',
+                       (campaign, core_seconds, approval_sha256))
+            self._event(db, None, 'task_resource_limit_approved', dict(campaign=campaign,
+                core_seconds=core_seconds, approval_sha256=approval_sha256, gpu_allowed=False))
+
+    @staticmethod
+    def _task_resource_status(db, evaluation):
+        ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+        limit = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (ev['campaign'],)).fetchone()
+        if limit is None:
+            return None
+        task = json.loads(ev['identity'])['task']
+        # Repetitions, roles or system versions cannot reset one task's budget.
+        rows = db.execute('SELECT e.identity,r.charge_core_seconds FROM requests r '
+                          'JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?', (ev['campaign'],))
+        charged = sum(r['charge_core_seconds'] for r in rows if json.loads(r['identity'])['task'] == task)
+        return dict(limit_core_seconds=limit['core_seconds'], charged_or_reserved_core_seconds=charged,
+                    remaining_core_seconds=max(0, limit['core_seconds']-charged), gpu_allowed=False,
+                    approval_sha256=limit['approval_sha256'])
+
     @staticmethod
     def _attempt_allowance(db, evaluation):
+        fourth=db.execute('SELECT * FROM development_fourth_allowances WHERE evaluation=?',(evaluation['id'],)).fetchone()
+        if fourth:return fourth['max_attempts'],'development_validation'
+        development=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation['id'],)).fetchone()
+        if development:return development['max_attempts'],'development_validation'
         continuation = db.execute('SELECT 1 FROM reference_continuations WHERE evaluation=?',
                                   (evaluation['id'],)).fetchone()
         if continuation and json.loads(evaluation['identity'])['role'] == 'reference':
@@ -342,6 +405,48 @@ class Ledger:
                         {'evaluation': evaluation, 'max_attempts': 3, 'product_max_attempts': 2,
                          'approval_sha256': approval_sha256})
 
+    def approve_development_third_attempt(self, evaluation: str, *, approval_sha256: str):
+        """Controller-only explicit one-attempt exception; preserve the product limit."""
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            old=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256']!=approval_sha256:raise Conflict('Cannot replace development approval')
+                return
+            ev=db.execute('SELECT * FROM evaluations WHERE id=?',(evaluation,)).fetchone()
+            rows=db.execute('SELECT * FROM requests WHERE evaluation=?',(evaluation,)).fetchall()
+            submitted=[r for r in rows if r['dispatch_claimed']]
+            if (ev is None or ev['max_attempts']!=2 or json.loads(ev['identity'])['role']!='agent'
+                    or len(submitted)!=2 or any(r['state']!='failed' or not r['accounted'] for r in submitted)
+                    or any(r['state'] in ACTIVE for r in rows)):
+                raise Conflict('Requires two accounted failures and explicit development authorization')
+            db.execute('INSERT INTO development_allowances VALUES (?,?,?)',(evaluation,3,approval_sha256))
+            self._event(db,None,'development_third_attempt_approved',dict(evaluation=evaluation,
+                approval_sha256=approval_sha256,max_attempts=3,product_max_attempts=2))
+
+    def approve_development_fourth_attempt(self, evaluation: str, *, approval_sha256: str):
+        """Controller-only fourth exception; retain the immutable third approval."""
+        _digest(approval_sha256)
+        with self._transaction() as db:
+            old=db.execute('SELECT * FROM development_fourth_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            if old:
+                if old['approval_sha256']!=approval_sha256:raise Conflict('Cannot replace fourth development approval')
+                return
+            previous=db.execute('SELECT * FROM development_allowances WHERE evaluation=?',(evaluation,)).fetchone()
+            ev=db.execute('SELECT * FROM evaluations WHERE id=?',(evaluation,)).fetchone()
+            rows=db.execute('SELECT * FROM requests WHERE evaluation=?',(evaluation,)).fetchall()
+            submitted=[r for r in rows if r['dispatch_claimed']]
+            if (previous is None or ev is None or ev['max_attempts']!=2
+                    or json.loads(ev['identity'])['role']!='agent' or len(submitted)!=3
+                    or any(r['state']!='failed' or not r['accounted'] for r in submitted)
+                    or any(r['state'] in ACTIVE for r in rows)):
+                raise Conflict('Requires the third approval and three accounted failures')
+            db.execute('INSERT INTO development_fourth_allowances VALUES (?,?,?,?)',
+                (evaluation,4,previous['approval_sha256'],approval_sha256))
+            self._event(db,None,'development_fourth_attempt_approved',dict(evaluation=evaluation,
+                approval_sha256=approval_sha256,previous_approval_sha256=previous['approval_sha256'],
+                max_attempts=4,product_max_attempts=2))
+
     def settle_cancelled_preparation_storage(self, request_id: str, *, retained_bytes: int, evidence_sha256: str):
         """Settle never-dispatched preparation from a verified retained-file inventory.
 
@@ -381,6 +486,10 @@ class Ledger:
             if not ev:
                 raise LedgerError("Unregistered evaluation")
             policy = self._policy(db, ev["campaign"])
+            task_limit = self._task_resource_status(db, evaluation)
+            if task_limit and (task_limit['charged_or_reserved_core_seconds'] + resources.core_seconds
+                               > task_limit['limit_core_seconds']):
+                raise LimitExceeded('Task cumulative CPU budget exhausted (including failed runs and reservations)')
             if (resources.cores > policy["max_cores"] or resources.wall_seconds > policy["max_wall_seconds"]
                     or resources.memory_bytes > policy["max_memory_bytes"]):
                 raise LimitExceeded("Per-job resources exceed approved limits")
@@ -418,6 +527,9 @@ class Ledger:
             # shared budget since reservation. Never dispatch a stale reservation.
             campaign = db.execute("SELECT campaign FROM evaluations WHERE id=?", (row["evaluation"],)).fetchone()[0]
             policy = self._policy(db, campaign)
+            task_limit = self._task_resource_status(db, row['evaluation'])
+            if task_limit and task_limit['charged_or_reserved_core_seconds'] > task_limit['limit_core_seconds']:
+                raise LimitExceeded('Task cumulative CPU budget exhausted; dispatch blocked')
             rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
                               (campaign,)).fetchall()
             if any(r["state"] == "reconcile_required" for r in rows):
@@ -521,6 +633,28 @@ class Ledger:
             else:
                 raise Conflict("Reconcile unknown dispatch before cancellation")
             return self._request(db, request_id)
+
+    def cancel_prepared(self, request_id: str) -> bool:
+        """Atomically cancel only an undispatched reservation; retain storage evidence.
+
+        A prepared row can already have uploaded inputs, or an unknown upload.
+        Only a separate verified inventory may settle retained storage.
+        """
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if row['dispatch_claimed'] or row['job_id'] or row['state'] != 'prepared':
+                return False
+            db.execute("UPDATE requests SET state='cancelled_before_dispatch',charge_core_seconds=0 WHERE id=?", (request_id,))
+            self._event(db, request_id, 'cancelled_before_dispatch', {'storage_reservation_retained': True})
+            return True
+
+    def cancel_undispatched(self, evaluation: str) -> int:
+        """Cancel unclaimed reservations without inventing storage cleanup."""
+        with self._transaction() as db:
+            ids = [r['id'] for r in db.execute(
+                "SELECT id FROM requests WHERE evaluation=? AND state='prepared' "
+                "AND dispatch_claimed=0 AND job_id IS NULL", (evaluation,))]
+        return sum(self.cancel_prepared(identifier) for identifier in ids)
 
     def observe(self, request_id: str, job_id: str, state: str, evidence: dict):
         if state not in {"queued", "running", *JOB_TERMINAL}:
@@ -716,6 +850,7 @@ class Ledger:
             maximum, scope = self._attempt_allowance(db, row)
             used = sum(r['dispatch_claimed'] or r['state']=='prepared' for r in requests)
             return dict(id=evaluation, identity=json.loads(row['identity']), max_attempts=maximum,
+                        task_resource_limit=self._task_resource_status(db, evaluation),
                         original_max_attempts=row['max_attempts'], attempt_scope=scope,
                         reserved_attempts=len(requests), dispatch_claims=sum(r['dispatch_claimed'] for r in requests),
                         remaining_attempts=None if maximum is None else max(0,maximum-used), requests=requests)

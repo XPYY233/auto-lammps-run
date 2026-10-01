@@ -4,9 +4,11 @@ The browser can save operator model connections, and versioned HPC settings. Exi
 """
 import argparse
 from contextlib import asynccontextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -17,7 +19,7 @@ from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
 from .papers import PaperStore
 from .deepseek import DeepSeekClient, ModelCalls, ModelError
-from .condition_generation import generate_condition_draft
+from .condition_generation import complete_condition_draft, generate_condition_draft
 from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
@@ -28,6 +30,7 @@ from .model_connections import ModelConnections
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
+from .session_activity import SessionActivity
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -148,6 +151,31 @@ class TargetSelection(Revision):
     exclusion_reason: str = Field(max_length=2000)
 
 
+class ConditionInput(Revision):
+    refine: bool = False
+    attempt: int = Field(default=0, ge=0, le=20)
+
+
+class ApprovalInput(Revision):
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ReviseInput(Revision):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class CandidateInput(Revision):
+    answers: str | None = Field(default=None, max_length=4000)
+
+
+class GuidanceInput(Revision):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class PauseInput(Revision):
+    paused: bool
+
+
 class TargetPreview(Revision):
     selected_ids: list[str] = Field(max_length=256)
     exclusion_reason: str = Field(max_length=2000)
@@ -201,7 +229,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -213,6 +241,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             raise ValueError('Execution and results must share the ledger and artifact directories')
         if candidate_service and candidate_service.snapshots!=controller.snapshots:
             raise ValueError('Candidate and execution services must share snapshots')
+        if candidate_service:
+            from .failure_recovery import failure_context
+            candidate_service.failure_context_provider=lambda identifier:failure_context(execution_jobs,identifier)
+            execution_jobs.on_failure=lambda identifier:candidate_service.enqueue(identifier,store.get(identifier)['revision'],
+                answers='应用自动恢复：读取本任务最新已核验失败日志，诊断并最小修改现有方案；保留全部需求。修订待批准，不自动再次提交。')
     papers = PaperStore(store) if papers is None else papers
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
@@ -254,8 +287,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return JSONResponse({'detail': str(exc)}, status_code=409 if isinstance(exc, (StaleTask, FrozenTask)) else 422)
 
     @app.exception_handler(KeyError)
-    async def not_found(request: Request, exc: KeyError):
-        return JSONResponse({'detail': '任务不存在'}, status_code=404)
+    async def internal_key_missing(request: Request, exc: KeyError):
+        # 之前把所有 KeyError 都报成"任务不存在"，会误导排查（例如事件缺少标签）。
+        # 真正的"任务不存在"由 store 显式抛 TaskError；这里如实说明缺少哪个键。
+        missing = exc.args[0] if exc.args else 'unknown'
+        return JSONResponse({'detail': '内部状态缺少条目：' + str(missing)[:80]}, status_code=404)
 
     @app.exception_handler(ModelError)
     async def model_error(request: Request, exc: ModelError):
@@ -283,9 +319,34 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/assets/{name}')
     def asset(name: str):
-        if name not in {'app.js', 'app.css'}:
+        if name not in {'app.js', 'app.css', 'session.js'}:
             return JSONResponse({'detail': '文件不存在'}, status_code=404)
         return FileResponse(ASSETS/name)
+
+    # Local-entry page activity. Enabled only by --session-activity-file (desktop entry);
+    # an ordinary launch keeps these routes inert and records nothing.
+    @app.api_route('/api/session/activity', methods=['GET'])
+    def session_state():
+        if session_activity is None:
+            return {'enabled': False, 'updated_at': None, 'sessions': {}}
+        return {'enabled': True, **session_activity.snapshot()}
+
+    def record_session(action):
+        if session_activity is None:
+            return JSONResponse({'detail': '本服务未启用页面活动记录'}, status_code=409)
+        return {'enabled': True, **action}
+
+    @app.api_route('/api/session/heartbeat', methods=['GET', 'POST'])
+    def session_heartbeat(session: str = '', hidden: int = 0):
+        if session_activity is None:
+            return record_session(None)
+        return record_session(session_activity.heartbeat(session, hidden=bool(hidden)))
+
+    @app.api_route('/api/session/close', methods=['GET', 'POST'])
+    def session_close(session: str = ''):
+        if session_activity is None:
+            return record_session(None)
+        return record_session(session_activity.close(session))
 
     @app.get('/api/model-preference')
     def model_preference():
@@ -313,9 +374,20 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def connection_models(data: ProviderInput):
         return connections.list_models(data.provider)
 
+    @app.post('/api/model-connections/check')
+    def check_connection(data: ProviderInput):
+        if model_client is None:
+            return JSONResponse({'detail':'尚未配置模型账本，无法进行真实调用自检。'},status_code=409)
+        try:
+            return connections.check(data.provider, calls=model_client.calls)
+        except (TaskError, ModelError) as error:
+            return JSONResponse({'detail':str(error)},status_code=409)
+
     @app.get('/api/hpc-connection')
     def hpc_status():
-        return hpc.status()
+        # The execution service is wired from the private deployment; report the real state
+        # instead of a hardcoded False that made the page and the AI believe it was absent.
+        return hpc.status(execution_enabled=execution_jobs is not None)
 
     @app.post('/api/hpc-connection')
     def save_hpc(data: HPCInput):
@@ -401,16 +473,51 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def schema():
         status = model_client.calls.status() if model_client else None
         reference_status = reference_model_client.calls.status() if reference_model_client else None
-        return {'fields': FIELDS, 'model_calls_enabled': bool(status and status['remaining_requests']),
-                'model_status': status, 'execution_enabled': False,
+        from .resource_limits import POLICY_RECORD, description
+        return {'fields': FIELDS, 'task_resource_policy': POLICY_RECORD | {'description': description()},
+                'model_calls_enabled': bool(status and status['remaining_requests']),
+                'model_status': status, 'execution_enabled': execution_jobs is not None,
+                # Which copy of the application is really serving this port; the desktop launcher
+                # refuses to run when it differs from the environment its configuration names.
+                'installation': {'package': str(Path(__file__).resolve().parent), 'python': sys.executable},
+                # 前端资产指纹：页面据此判断自己是否为旧版本并自动刷新。
+                'assets': {name: (hashlib.sha256((ASSETS/name).read_bytes()).hexdigest()
+                                  if (ASSETS/name).is_file() else None)
+                           for name in ('app.js', 'app.css')},
                 'automatic_workflow': workflow.availability() if workflow else {'configured':False,'enabled':False},
                 'reference_generation': {'configured': reference_model_client is not None, 'model_status': reference_status},
                 'candidate_preparation': candidate_service.availability() if candidate_service else
                     {'enabled': False, 'reason': '方案准备服务尚未配置。'}}
 
+    def reproduction_status(document):
+        """A user-accepted scope is a real reproduction result; science stays gated.
+
+        Previously this version never emitted 'reproduced' at all, so a paper the user
+        had accepted kept showing 复现中 and the in-app AI described it as unfinished.
+        The accepted scope comes from the same closeout the task page shows.
+        """
+        if not closeouts or document.get('status') == 'pending':
+            return document
+        accepted = []
+        for task in document.get('tasks') or []:
+            try:
+                acceptance = (closeouts.get(task['id']) or {}).get('acceptance') or {}
+            except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+                continue
+            if acceptance.get('status') == 'accepted_by_user':
+                accepted.append({'task': task['id'], 'scope': acceptance.get('scope'),
+                                 'date': acceptance.get('date')})
+        if not accepted:
+            return document
+        scopes = '；'.join((item['scope'] or '').rstrip('。；') for item in accepted if item.get('scope'))
+        return document | {'status': 'reproduced',
+                           'stage': ('用户已验收的复现范围：' + (scopes or '（范围未记录）')
+                                     + '。该范围是基准工况；论文其余工况、独立科学核验与评分发布尚未完成。'),
+                           'reproduction_accepted': accepted}
+
     @app.get('/api/papers')
     def paper_list():
-        return papers.list()
+        return papers.list(transform=reproduction_status)
 
     @app.get('/api/resource-discoveries')
     def resource_discoveries():
@@ -421,7 +528,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/papers/{identifier}')
     def paper_get(identifier: str):
-        return papers.get(identifier)
+        return reproduction_status(papers.get(identifier))
 
     @app.post('/api/papers/{identifier}/select')
     def paper_select(identifier: str, data: Revision):
@@ -466,6 +573,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                         row['execution_state']=runs[-1]['state']
                         row['job_id']=runs[-1]['job_id']
                         row['submission_count']=sum(e['dispatch_claims'] for e in agents)
+        if preparations:
+            # 任务列表必须反映"方案准备"的真实进展，否则冻结后无论准备成功、失败还是
+            # 需要补充条件，都会一律显示为"待准备"。
+            for row in rows:
+                try:
+                    job = preparations.get(row['id'])
+                except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+                    job = None
+                if job is not None:
+                    row['preparation_state'] = job.get('state')
+                    row['preparation_label'] = job.get('label')
         if closeouts:
             for row in rows:
                 try:
@@ -482,7 +600,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if workflow and (workflow.status(identifier).get('workflow') or {}).get('state') in {'queued','preparing'}:
             raise TaskError('任务仍在自动准备，不能删除或确认结束。')
         preparation=preparations.get(identifier)
-        if preparation and preparation['state'] in {'queued','running','model_requested','preparing_files','interrupted'}:
+        if preparation and preparation['state'] in {'queued','running','model_requested','checking_plan','repairing_plan','preparing_files','interrupted'}:
             raise TaskError('方案仍在准备或状态待核对，不能删除或确认结束。')
         if execution_jobs:
             job=execution_jobs.status(identifier).get('job')
@@ -565,6 +683,143 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def get(identifier: str):
         return store.get(identifier)
 
+    @app.get('/api/tasks/{identifier}/guidance')
+    def task_guidance(identifier: str):
+        return {'task_id': identifier, 'guidance': store.guidance(identifier),
+                'paused': store.paused(identifier)}
+
+    @app.post('/api/tasks/{identifier}/guidance')
+    @serialized_task_action
+    def task_guidance_add(identifier: str, data: GuidanceInput):
+        return {'task_id': identifier, 'guidance': store.add_guidance(identifier, data.revision, data.note),
+                'paused': store.paused(identifier)}
+
+    @app.post('/api/tasks/{identifier}/pause')
+    @serialized_task_action
+    def task_pause(identifier: str, data: PauseInput):
+        return store.set_paused(identifier, data.revision, data.paused)
+
+    @app.get('/api/tasks/{identifier}/ai-activity')
+    def ai_activity(identifier: str):
+        """面向用户的进度播报：每一步都是一句看得懂的中文，并标明"现在进行到哪"。
+
+        内部事件名、字段名、账本术语都不直接暴露给用户；需要的技术细节
+        （模型、用量、失败原因）放在 detail 里，作为补充而不是主体。
+        """
+        document = store.get(identifier)
+        steps = []
+
+        def add(at, title, detail='', kind='ai', state='ok'):
+            if not at:
+                return
+            steps.append(dict(at=at, title=title, detail=detail, kind=kind,
+                              state=state, done=state == 'ok'))
+
+        # ① 需求 → 条件阶段（来自任务历史）
+        field_labels = FIELDS if isinstance(FIELDS, dict) else {}
+        phrasing = {
+            'created': ('已收到你的需求，开始理解研究目标', 'user'),
+            'guidance_added': ('记录了你的引导意见', 'user'),
+            'conditions_generated': ('已从需求中整理出计算条件', 'ai'),
+            'confirmed': ('你确认了当前条件', 'user'),
+            'conditions_frozen': ('条件已冻结，可以开始准备计算方案', 'ai'),
+            'plan_approved': ('你批准了计算方案，可以提交计算', 'user'),
+        }
+        for event in store.history(identifier):
+            name = event['event']
+            if name in phrasing:
+                title, kind = phrasing[name]
+                detail = ''
+                if name == 'conditions_frozen':
+                    detail = '条件版本 ' + str(event['revision'])
+                add(event['at'], title, detail, kind)
+            elif name.startswith('candidate_added:'):
+                field = name.split(':', 1)[1]
+                add(event['at'], '补充了条件：' + field_labels.get(field, field), '', 'ai')
+            elif name.startswith('literature_imported:'):
+                field = name.split(':', 1)[1]
+                add(event['at'], '从文献中导入条件：' + field_labels.get(field, field), '', 'ai')
+
+        # ② 应用内 AI 的模型调用（整理条件 / 生成方案）
+        def add_model(request_id, purpose):
+            if model_client is None or not request_id:
+                return
+            try:
+                found = model_client.calls.lookup(request_id)
+            except (ValueError, KeyError, ModelError):
+                return
+            receipt = (found or {}).get('receipt') or {}
+            usage = receipt.get('usage') or {}
+            tokens = usage.get('total_tokens')
+            state = receipt.get('state') or 'unknown'
+            detail = '模型 ' + str(receipt.get('requested_model') or '')
+            if tokens:
+                detail += ' · ' + str(tokens) + ' tokens'
+            if state != 'completed':
+                detail += ' · 未完成（' + str(receipt.get('error') or state) + '）'
+            add(receipt.get('at'), '应用内 AI ' + purpose, detail,
+                'ai', 'ok' if state == 'completed' else 'attention')
+
+        for request_id in (document.get('generated_batches') or {}):
+            add_model(request_id, '整理了你的计算条件')
+
+        # ③ 方案准备阶段
+        job = preparations.get(identifier) if preparations else None
+        candidate_steps = {
+            'queued': '正在排队准备计算方案',
+            'running': '正在核对准备条件',
+            'model_requested': '正在让应用内 AI 生成计算方案',
+            'checking_plan':'正在核对需求、计算步骤与结果', 'repairing_plan':'正在自动修正方案',
+            'preparing_files': '正在生成待提交的脚本与结构文件',
+            'clarification_answered': '已把你补充的信息交给应用内 AI',
+            'config_rebased': '已按当前部署重新核对方案基线',
+            'prepared': '方案已准备完成，等待你审核批准',
+            'clarification': '需要你补充信息才能继续准备方案',
+            'failed': '方案准备未通过，需要处理',
+            'rejected': '方案被拒绝',
+        }
+        for event in (job or {}).get('events') or []:
+            state = event.get('state')
+            if state not in candidate_steps:
+                continue
+            payload = event.get('payload') or {}
+            detail = str(payload.get('detail') or payload.get('message') or '')[:200]
+            if payload.get('questions'):
+                detail = ('需要确认：' + str(payload['questions'][0]))[:200]
+            add(event.get('at'), candidate_steps[state], detail, 'ai',
+                'attention' if state in ('failed', 'clarification', 'rejected') else 'ok')
+        if job and (job.get('result') or {}).get('request_id'):
+            add_model(job['result']['request_id'], '生成了计算方案')
+
+        # ④ 计算阶段（提交 → 运行 → 回收 → 分析）
+        execution = (execution_jobs.get(identifier) if execution_jobs is not None else None) or {}
+        execution_steps = {
+            'queued': '正在提交计算到 HPC',
+            'running': '正在核验许可并推进计算',
+            'awaiting_approval': '等待你批准方案后提交',
+            'waiting': '计算已在 HPC 运行，正在跟进状态',
+            'analyzed': '计算完成，结果与分析已就绪',
+            'analysis_failed': '计算完成，但自动分析未完成',
+            'diagnostics_saved': '计算未成功，已保存诊断信息',
+            'attention': '计算需要你处理后继续',
+            'rejected': '提交被拒绝',
+        }
+        for event in execution.get('events') or []:
+            state = event.get('state')
+            if state in execution_steps:
+                add(event.get('at'), execution_steps[state], '', 'compute',
+                    'attention' if state in ('attention', 'rejected', 'diagnostics_saved', 'analysis_failed') else 'ok')
+        job_id = execution.get('job_id')
+        if job_id:
+            add(execution.get('updated_at'), '已提交到 HPC，作业号 ' + str(job_id),
+                '你可以在结果页签查看实时状态', 'compute')
+
+        steps.sort(key=lambda item: str(item['at']))
+        latest = steps[-1] if steps else None
+        return {'task_id': identifier, 'steps': steps,
+                'now': (latest or {}).get('title') or '',
+                'note': '这是应用内 AI 的实时进度。技术细节（模型、用量、具体失败原因）在每一步的补充说明里。'}
+
     @app.get('/api/tasks/{identifier}/history')
     def history(identifier: str):
         preparation = preparations.reconcile(identifier)
@@ -587,8 +842,29 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
         from .ledger import LedgerError
         try:return execution_jobs.enqueue(identifier,data.revision)
-        except (ValueError,OSError,LedgerError,runtime_denied):
-            return JSONResponse({'detail':'方案或计算部署未通过核验，未发起新的计算。'},status_code=409)
+        except (ValueError,OSError,LedgerError,runtime_denied) as error:
+            # 笼统的"未通过核验"无法定位；给出异常类型与简短原因（不含密钥或路径细节）。
+            detail = '方案或计算部署未通过核验，未发起新的计算。原因：' + type(error).__name__
+            extra = str(error)[:200]
+            if extra and extra != type(error).__name__:
+                detail += '：' + extra
+            return JSONResponse({'detail':detail},status_code=409)
+
+    @app.post('/api/tasks/{identifier}/execution/recheck',status_code=202)
+    @serialized_task_action
+    def execution_recheck(identifier: str,data: Revision):
+        require_open_task(identifier)
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        return execution_jobs.recheck(identifier,data.revision)
+
+    @app.post('/api/tasks/{identifier}/execution/retry',status_code=202)
+    @serialized_task_action
+    def execution_retry(identifier: str,data: Revision):
+        require_open_task(identifier)
+        if execution_jobs is None:
+            return JSONResponse({'detail':'自动执行服务尚未接入。'},status_code=422)
+        return execution_jobs.retry(identifier,data.revision)
 
     @app.post('/api/tasks/{identifier}/workflow',status_code=202)
     @serialized_task_action
@@ -604,12 +880,50 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.post('/api/tasks/{identifier}/candidate', status_code=202)
     @serialized_task_action
-    def candidate_start(identifier: str, data: Revision):
+    def candidate_start(identifier: str, data: CandidateInput):
         require_open_task(identifier)
+        if store.paused(identifier):
+            raise TaskError('任务已暂停：请先继续，再启动准备。已提交的作业不受影响。')
         if candidate_service is None:
             return JSONResponse({'detail': '方案准备服务尚未配置。条件和历史已保存。'}, status_code=422)
         if execution_jobs is not None:execution_jobs.register_for_generation(identifier,data.revision)
-        return {'candidate': candidate_service.enqueue(identifier, data.revision)}
+        return {'candidate': candidate_service.enqueue(identifier, data.revision, data.answers)}
+
+    @app.get('/api/tasks/{identifier}/plan')
+    def plan_review(identifier: str):
+        """第一道人工关卡：把已准备的方案（脚本/结构/分析）交给用户审阅。"""
+        if candidate_service is None:
+            return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        review = candidate_service.plan_review(identifier)
+        scope = None
+        job = preparations.get(identifier) if preparations else None
+        digest = (job or {}).get('result', {}).get('snapshot_sha256') if job else None
+        if isinstance(digest, str) and digest:
+            scope = 'plan:' + digest
+        review['approved'] = bool(scope) and store.plan_approved(identifier, scope)
+        review['approvals'] = store.approvals(identifier)
+        return review
+
+    @app.post('/api/tasks/{identifier}/plan/approve')
+    @serialized_task_action
+    def plan_approve(identifier: str, data: ApprovalInput):
+        job = preparations.get(identifier) if preparations else None
+        digest = (job or {}).get('result', {}).get('snapshot_sha256') if job else None
+        if not isinstance(digest, str) or not digest or (job or {}).get('state') != 'prepared':
+            raise TaskError('当前没有可批准的方案；请先在"计算方案"里准备方案。')
+        approvals = store.approve_plan(identifier, data.revision, scope='plan:' + digest, note=data.note or '')
+        return {'approved': True, 'scope': 'plan:' + digest, 'approvals': approvals}
+
+    @app.post('/api/tasks/{identifier}/plan/revise', status_code=202)
+    @serialized_task_action
+    def plan_revise(identifier: str, data: ReviseInput):
+        """用户对方案有意见：写入引导并立刻按意见重新组织一次方案。"""
+        if candidate_service is None:
+            return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        store.add_guidance(identifier, data.revision, data.note)
+        current = store.get(identifier)
+        return {'candidate': candidate_service.enqueue(identifier, current['revision'],
+                                                       answers='用户对当前方案的意见（必须据此修改方案）：' + data.note)}
 
     @app.get('/api/tasks/{identifier}/candidate/files/{name}')
     def candidate_file(identifier: str, name: str):
@@ -617,6 +931,27 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail': '方案资料服务尚未配置。'}, status_code=422)
         return Response(candidate_service.file(identifier, name), media_type='application/octet-stream',
                         headers={'Content-Disposition': f'attachment; filename="{name}"'})
+
+    @app.post('/api/tasks/{identifier}/complete-conditions')
+    def complete_conditions(identifier: str, data: ConditionInput):
+        if model_client is None:
+            return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
+        # The completion must know which potentials are actually installed, otherwise it
+        # invents a format the cluster cannot run (for example EAM for a W task while the
+        # only available W resource is MEAM) and the later preparation has to refuse it.
+        resources = None
+        if candidate_service is not None:
+            try:
+                resources = [{'elements': model['elements'], 'format': model['format'],
+                              'units': model['units'], 'applicability': model.get('applicability')}
+                             for model in candidate_service.adapter.compatible_models()]
+            except (ValueError, KeyError, TypeError, OSError):
+                resources = None
+        request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
+                                           operation='complete-conditions-v2', refine=data.refine,
+                                           attempt=getattr(data, 'attempt', 0))))[:32]
+        guidance = [item['note'] for item in store.guidance(identifier)]
+        return complete_condition_draft(model_client, store, identifier, data.revision, request_id, resources, guidance, refine=data.refine)
 
     @app.post('/api/tasks/{identifier}/conditions/{field}')
     def add(identifier: str, field: str, data: AddCondition):
@@ -648,7 +983,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return store.freeze(identifier, data.revision)
 
     @app.post('/api/tasks/{identifier}/generate-conditions')
-    def generate(identifier: str, data: Revision):
+    def generate(identifier: str, data: ConditionInput):
         if model_client is None:
             return JSONResponse({'detail': '尚未启用运行模型。任务已保存，可以稍后整理。'}, status_code=422)
         doc = store.get(identifier)
@@ -691,6 +1026,7 @@ def main():
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
     parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
+    parser.add_argument('--session-activity-file', help='Desktop entry only: record page heartbeat/close activity in this file; otherwise no page activity is recorded')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error('Use an unprivileged TCP port')
@@ -702,6 +1038,14 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
+    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
+    if model_client is not None:
+        # Wire the saved connection before any service is built from it: the candidate
+        # service and the runtime route must hold the same client object, and the
+        # environment key stays the fallback while no connection is configured.
+        saved=connections.status().get('connections',{}).get('deepseek-official',{})
+        if saved.get('configured'):
+            model_client=connections.client('deepseek-official', calls=model_client.calls)
     reference_model_client = (DeepSeekClient(ModelCalls.open_existing(args.reference_model_ledger),
         key_reader=lambda: os.environ.get('DEEPSEEK_REFERENCE_API_KEY')) if args.reference_model_ledger else None)
     candidate_service = None
@@ -726,7 +1070,7 @@ def main():
                     software_sha256=config['software_sha256'], packages=config['packages'],
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
-                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'))
+                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'), review_plan=True)
     execution_jobs=None
     if args.execution_config:
         if ledger is None:parser.error('Execution requires an existing ledger')
@@ -740,9 +1084,10 @@ def main():
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
-                          model_connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory),
+                          model_connections=connections,
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
-                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews)), host='127.0.0.1', port=args.port,
+                          discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
+                          session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)
 
 

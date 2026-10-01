@@ -97,7 +97,7 @@ class CandidateExecution:
                 following.snapshots!=self.snapshots):
             raise ValueError('Batch, snapshots and result collection must use the same deployment')
 
-    def prepare(self, task_id, evaluation):
+    def prepare(self, task_id, evaluation, *, allow_reprepare=False, retry_after=None):
         """Reserve once and render a reviewable plan; no model/network/physics call."""
         task=self.tasks.get(task_id)
         inputs=research_inputs(self.tasks,task_id,task['revision'])
@@ -132,15 +132,33 @@ class CandidateExecution:
         if context.get('output_layout','isolated')!=expected_layout:
             raise Conflict('Candidate output layout differs from the frozen execution deployment')
         # The key is owned by the controller; callers cannot rename an attempt.
-        key='candidate_'+job['id']
+        # 幂等键必须绑定"这次准备出来的方案"：同一方案重复提交仍然幂等，
+        # 但部署/代码变化后重新准备出的新方案应另立一条可记账请求，而不是撞旧键。
+        base='candidate_'+job['id']+'_'+digest[:12]
+        if retry_after is not None:
+            previous=self.ledger.get(retry_after)
+            if (previous['evaluation']!=evaluation or previous['state']!='failed'
+                    or not previous['accounted'] or not previous['dispatch_claimed']):
+                raise Conflict('Retry requires an accounted failed submission of this evaluation')
+            if previous['manifest_sha256']!=digest and not self.tasks.plan_approved(task_id,'plan:'+digest):
+                raise Conflict('A revised retry plan requires approval of its exact snapshot')
+            base += '_retry_'+previous['id']
+        key=base
         row=self.ledger.reserve(evaluation,key,digest,resources)
+        while allow_reprepare and row['state']=='cancelled_before_dispatch':
+            key=base+'_r'+row['id']
+            row=self.ledger.reserve(evaluation,key,digest,resources)
         from .hpc_transport import bind_request
         bind_request(self.ledger,row['id'],self.staging.client)
         request=Submission(row['id'],digest,resources)
         return dict(row=row,key=key,snapshot=snapshot,submission=request,batch=render_batch(request,self.environment))
 
-    def advance(self, task_id, evaluation):
-        plan=self.prepare(task_id,evaluation);row=plan['row'];request_id=row['id']
+    def cancel_stale_intent(self, request_id):
+        """Cancel only a verified unclaimed reservation, retaining storage charges."""
+        return self.ledger.cancel_prepared(request_id)
+
+    def advance(self, task_id, evaluation, *, allow_reprepare=False, retry_after=None):
+        plan=self.prepare(task_id,evaluation,allow_reprepare=allow_reprepare,retry_after=retry_after);row=plan['row'];request_id=row['id']
         if row['dispatch_claimed']:
             if row['state']=='rejected':return dict(request_id=request_id,state='rejected',scientific_status='not_evaluated')
             # An expired grant cannot authorize a new dispatch, but must not

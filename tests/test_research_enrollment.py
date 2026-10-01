@@ -41,6 +41,14 @@ class EnrollmentTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM research_execution_bindings').fetchone()[0],1)
         self.assertEqual(self.f.f.transport.call_count,1)  # Existing fixture only.
 
+    def test_guidance_keeps_the_same_evaluation_and_attempt_limit(self):
+        original=self.register()
+        self.f.tasks.add_guidance(self.doc['id'],self.doc['revision'],'Preserve complete research scope')
+        revision=self.f.tasks.get(self.doc['id'])['revision']
+        self.assertEqual(self.enrollment.register(self.doc['id'],revision),original)
+        self.assertEqual(self.f.ledger.evaluation_snapshot(original)['max_attempts'],2)
+        self.assertEqual(self.enrollment.get(self.doc['id'])['revision'],self.doc['revision'])
+
     def test_concurrent_registration_has_one_binding_and_evaluation(self):
         results=[];errors=[]
         def run():
@@ -94,6 +102,7 @@ class EnrollmentTests(unittest.TestCase):
         url='/api/tasks/'+self.doc['id']
         with ExitStack() as stack,TestClient(create_app(self.f.tasks,model_client=client,candidate_service=candidates,execution_jobs=jobs),base_url=ORIGIN) as web:
             before=web.get(url+'/execution').json();self.assertFalse(before['can_start'])
+            # 方案准备好之后仍不允许直接开工：必须先由用户批准。
             bad=web.post(url+'/candidate',headers=HEADERS,json={'revision':self.doc['revision'],'repetition':1})
             self.assertEqual(bad.status_code,422);self.assertIsNone(self.enrollment.get(self.doc['id']))
             reply=web.post(url+'/candidate',headers=HEADERS,json={'revision':self.doc['revision']})
@@ -105,6 +114,11 @@ class EnrollmentTests(unittest.TestCase):
                 time.sleep(.01)
             self.assertEqual(candidate['state'],'prepared',candidate)
             self.assertTrue(web.get(url+'/execution').json()['can_start'])
+            # 第一道人工关卡：未批准不能开工；批准后按原流程继续。
+            self.assertEqual(web.post(url+'/execution',headers=HEADERS,
+                                      json={'revision':self.doc['revision']}).status_code,409)
+            self.assertEqual(web.post(url+'/plan/approve',headers=HEADERS,
+                                      json={'revision':self.doc['revision']}).status_code,200)
             self.assertEqual(jobs.bindings,{})
             self.f.evaluation=jobs.evaluation_for(self.doc['id'])
             self.f.plan=self.f.controller.prepare(self.doc['id'],self.f.evaluation);self.f.request_id=self.f.plan['row']['id']

@@ -47,6 +47,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.value = {'summary': 'Synthetic packaging test only', 'questions': [], 'structure': deepcopy(SPEC),
                       'potential_pin': self.pin, 'workflow': 'thermo 1\nrun 0\nwrite_data /output/final.data',
                       'analysis': {'quantity': 'synthetic structure', 'method': 'geometry inventory only', 'files': ['final.data']}}
+        self.value['analysis']['plan']={'tables':[{'file':'final.data','columns':[{'name':'x','unit':'1'},{'name':'y','unit':'eV'}]}], 'operations':[{'id':'value','method':'last','file':'final.data','x':'x','y':'y','window':[0,1]}]}
         self.calls = ModelCalls(self.root / 'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=1)
         self.transport = Mock(side_effect=lambda *args: (200, response(self.value)))
         self.client = DeepSeekClient(self.calls, transport=self.transport, key_reader=lambda: 'synthetic-key')
@@ -140,7 +141,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 4)
+        self.assertEqual(record['input']['generator_version'], 13)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
@@ -211,6 +212,45 @@ class AgentCandidateTests(unittest.TestCase):
                 validate_body(body, ['final.data'])
         self.assertEqual(validate_body('run 0\nprint "value" file /output/final.data', ['final.data'])['calculation_commands'], 1)
 
+    def test_equal_expression_must_be_one_lammps_argument(self):
+        tail='\nrun 0\nprint "value" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError, 'ONE expression'):
+            validate_body('variable energy equal v_a - v_b'+tail, ['final.data'])
+        validate_body('variable energy equal "v_a - v_b"'+tail, ['final.data'])
+
+    def test_pressure_and_variable_issues_are_reported_together(self):
+        body='thermo_style custom step press\nminimize 0 1e-6 10 100\ncompute p all pressure NULL virial\nvariable saved equal $(c_p)\nprint "${step} ${saved}" file /output/final.data'
+        with self.assertRaises(CandidateError) as caught:
+            validate_body(body,['final.data'])
+        self.assertIn('Pressure computes',str(caught.exception))
+        self.assertIn('Undefined LAMMPS',str(caught.exception))
+        valid=('compute p all pressure NULL virial\n'+body.replace('compute p all pressure NULL virial\n','')).replace('${step}','$(step)')
+        with self.assertRaisesRegex(CandidateError,'not current'):
+            validate_body(valid,['final.data'])
+        validate_body(valid.replace('step press','step press c_p'),['final.data'])
+        with self.assertRaisesRegex(CandidateError,'not current'):
+            validate_body(valid.replace('step press','step press c_p').replace('variable saved','reset_timestep 0\nvariable saved'),['final.data'])
+
+    def test_immediate_formula_is_not_quoted_or_changed(self):
+        body='run 0\nvariable e equal $(pe - 2)\nprint "${e}" file /output/final.data'
+        validate_body(body,['final.data'])
+        with self.assertRaisesRegex(CandidateError,'prevents'):
+            validate_body(body.replace('$(pe - 2)','"$(pe - 2)"'),['final.data'])
+
+    def test_thermo_keyword_is_not_a_named_variable(self):
+        body='run 0\nprint "${step} 1" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError,'Undefined LAMMPS'):
+            validate_body(body,['final.data'])
+        validate_body(body.replace('${step}','$(step)'),['final.data'])
+        validate_body('variable step equal step\n'+body,['final.data'])
+
+    def test_index_variable_survives_structure_switch(self):
+        body='variable n index 1\nload_structure second\nvariable n index 2\nrun 0\nprint "x" file /output/final.data'
+        with self.assertRaisesRegex(CandidateError,'survives'):
+            validate_body(body,['final.data'],structures={'initial':2,'second':4})
+        validate_body(body.replace('variable n index 2','variable n delete\nvariable n index 2'),
+                      ['final.data'],structures={'initial':2,'second':4})
+
     def test_existing_research_task_uses_selected_conditions_without_free_prompt(self):
         tasks = TaskStore(self.root / 'tasks.sqlite')
         doc = tasks.create('unused title', 'UNSELECTED_PROMPT_SENTINEL', 'research')
@@ -245,3 +285,86 @@ class AgentCandidateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class PromptContractConformanceTests(unittest.TestCase):
+    """提示词必须覆盖校验器可枚举的规则，否则规则会再次漂移（见 docs/CANDIDATE_CONTRACT_AUDIT.md）。"""
+
+    def prompt(self):
+        from auto_lammps.agent_candidates import candidate_messages
+        messages = candidate_messages('Synthetic permitted task', units='metal',
+                                      resource_summaries=[], max_atoms=100)
+        return ' '.join(item['content'] for item in messages)
+
+    def test_every_enumerable_validator_rule_is_stated(self):
+        from auto_lammps.analysis import UNITS, METHODS, MAX_TABLES, MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS
+        from auto_lammps.agent_candidates import COMMANDS, FIX_STYLES, COMPUTE_STYLES
+        text = self.prompt()
+        for unit in UNITS:
+            self.assertIn(unit, text, '单位未在提示词中列出: ' + unit)
+        for method in METHODS:
+            self.assertIn(method, text, '分析方法未在提示词中列出: ' + method)
+        for name in COMMANDS | FIX_STYLES | COMPUTE_STYLES:
+            self.assertIn(name, text, '允许的 LAMMPS 命令/样式未在提示词中列出: ' + name)
+        for limit in (MAX_TABLES, MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS):
+            self.assertIn(str(limit), text, '数量上限未在提示词中给出: ' + str(limit))
+        for phrase in ('columns', 'analysis.files', 'verbatim', 'cubic_axes', '# columns:', '# units:'):
+            self.assertIn(phrase, text, '结构性规则未在提示词中说明: ' + phrase)
+
+    def test_limits_come_from_the_validator_not_a_copy(self):
+        from auto_lammps import analysis, analysis_v2, agent_candidates
+        self.assertEqual(analysis_v2.MAX_TABLES, analysis.MAX_TABLES)
+        text = self.prompt()
+        self.assertIn(str(analysis.MIN_COLUMNS), text)
+        self.assertIn(str(analysis.MAX_COLUMNS), text)
+
+class LammpsAppendIdiomTests(unittest.TestCase):
+    """LAMMPS print append takes a filename, not a boolean flag."""
+    def test_append_requires_declared_filename(self):
+        body='run 0\nprint "# columns: x y" file /output/table.dat\nprint "# units: 1 eV" append /output/table.dat\nprint "0 -1" append /output/table.dat'
+        self.assertEqual(validate_body(body,['table.dat'])['declared_outputs'],['table.dat'])
+        for suffix in ('append','append yes','append /outside.dat'):
+            with self.assertRaises(CandidateError):validate_body('run 0\nprint "0 -1" file /output/table.dat '+suffix,['table.dat'])
+
+class AnalysisFileNormalizationTests(unittest.TestCase):
+    """模型常把 /output/ 前缀写进 analysis.files；归一为扁平基名，但仍拒绝重复与保留名。"""
+
+    def proposal(self, files):
+        return {'summary': 'synthetic', 'questions': [], 'potential_pin': 'a' * 64,
+                'structure': deepcopy(SPEC), 'workflow': 'run 0\nwrite_data /output/final.data',
+                'analysis': {'quantity': 'q', 'method': 'm', 'files': files}}
+
+    def test_prefixed_names_are_normalized_to_basenames(self):
+        from auto_lammps.agent_candidates import validate_proposal
+        value = self.proposal(['/output/final.data'])
+        validate_proposal(value, max_atoms=100000)
+        self.assertEqual(value['analysis']['files'], ['final.data'])
+
+    def test_duplicates_and_reserved_names_are_still_rejected(self):
+        from auto_lammps.agent_candidates import CandidateError, validate_proposal
+        with self.assertRaisesRegex(CandidateError, 'distinct flat filenames'):
+            validate_proposal(self.proposal(['a.dat', '/output/a.dat']), max_atoms=100000)
+        with self.assertRaisesRegex(CandidateError, 'distinct flat filenames'):
+            validate_proposal(self.proposal(['stdout.txt']), max_atoms=100000)
+
+class EmptyAnalysisPlanTests(unittest.TestCase):
+    """空计划不含信息，按未提供处理；非空但不合法的计划仍被拒绝。"""
+
+    def proposal(self, plan):
+        return {'summary': 'synthetic', 'questions': [], 'potential_pin': 'a' * 64,
+                'structure': deepcopy(SPEC), 'workflow': 'run 0\nwrite_data /output/final.data',
+                'analysis': {'quantity': 'q', 'method': 'm', 'files': ['final.data'], 'plan': plan}}
+
+    def test_empty_plan_is_rejected(self):
+        from auto_lammps.agent_candidates import validate_proposal
+        value = self.proposal({'tables': [], 'operations': []})
+        with self.assertRaises(CandidateError):validate_proposal(value, max_atoms=100000)
+        self.assertIn('plan', value['analysis'])
+
+    def test_malformed_nonempty_plan_is_still_rejected(self):
+        from auto_lammps.agent_candidates import CandidateError, validate_proposal
+        # 有表也有操作，但表只有一列（契约要求 x 与 y 两列）→ 必须拒绝，不能被"空计划"规则放过。
+        value = self.proposal({'tables': [{'file': 'final.data', 'columns': [{'name': 'x', 'unit': 'eV'}]}],
+                               'operations': [{'id': 'last', 'method': 'last', 'file': 'final.data',
+                                               'x': 'x', 'y': 'x', 'window': [0, 1]}]})
+        with self.assertRaises(CandidateError):
+            validate_proposal(value, max_atoms=100000)

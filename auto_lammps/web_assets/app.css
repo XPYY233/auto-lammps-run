@@ -179,6 +179,25 @@ footer{display:flex;justify-content:space-between;color:#8795ac;font-size:10px;p
 .candidate{padding:12px;margin:8px 0;border-radius:7px;border:1px solid var(--line);font-size:12px}
 .candidate.selected{background:#f7faff}
 .candidate p{margin-bottom:5px}
+/* 候选方案澄清：问题、答复与重新准备入口 */
+.badge.attention{background:#fff4db;color:#92681f}
+.badge.ok{background:#e6f6ee;color:#288767}
+#candidate-stage{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+#candidate-authorization:empty,#candidate-outcome:empty{display:none}
+.candidate-outcome{margin:10px 0;font-size:13px;color:#26565a;background:#eef9f6;border-left:3px solid #087f8c;border-radius:6px;padding:10px 12px}
+.candidate-attention{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0;font-size:13px;color:#7a4d14;background:#fff8e8;border:1px solid #f0dcae;border-left:4px solid #d99314;border-radius:8px;padding:11px 14px}
+.candidate-attention[hidden]{display:none}
+.candidate-attention strong{font-size:13px}
+#candidate-clarification{display:grid;gap:12px;margin:12px 0}
+#candidate-clarification h3{font-size:14px;margin:0}
+.clarification-form{display:grid;gap:12px;margin:4px 0}
+.clarification-question{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:#fbfdff}
+.clarification-question h4{font-size:12px;color:#8491a6;margin:0 0 6px}
+.clarification-text{font-size:13px;color:#172b4d;margin:0 0 10px;line-height:1.6}
+.clarification-cell{display:grid;gap:5px;font-size:12px;color:#677f9f;margin-bottom:9px}
+.clarification-cell textarea,.clarification-cell input,.clarification-cell select{font-size:13px;width:100%;box-sizing:border-box}
+.clarification-answer{resize:vertical;min-height:64px}
+.clarification-error{color:#ad5a4e}
 .missing-text,.resolution{font-size:11px;color:#8b98ac}
 .freeze-panel{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:17px;background:#f4f8ff;border-radius:8px;margin:17px 0}
 .freeze-panel h2{font-size:13px;margin:0 0 6px}
@@ -664,3 +683,58 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .connection-detail{overflow-wrap:anywhere;margin:8px 0 4px}.connection-card .form-note{margin:5px 0 10px}.connection-card .actions{flex-wrap:wrap}.connection-remove{color:#9d2941}
 
 .target-readiness{margin:16px 0;padding:18px 22px;background:#f3f6fd;border:1px solid #d3def4;border-radius:12px}.target-readiness h3{margin-top:0}.target-readiness li{margin:7px 0;color:#7c3f19}.target-group{border-left:3px solid #3566bd;padding-left:12px}
+.resource-tab-count{margin-left:6px;padding:1px 7px;border-radius:9px;background:var(--blue-soft);color:var(--blue);font-size:11px;font-weight:600}
+#resource-tabs button.selected .resource-tab-count{background:white}
+.resource-tab-notice{margin:14px 0 8px;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:8px;background:white}
+.resource-tab-notice strong{display:block;margin-bottom:4px}
+.resource-tab-notice p{margin:0;color:var(--muted);font-size:13px}
+
+.request-open{display:block;padding:10px 12px;margin:8px 0;background:#f7fafd;border:1px solid #e3ecf5;border-radius:8px}.request-open .request-label{display:block;font-size:12px;color:#5a7893;margin-bottom:4px}.request-open #task-prompt{margin:0;white-space:pre-wrap;line-height:1.65;color:#22384d;font-size:13px}
+
+.clarify-form{display:flex;flex-direction:column;gap:10px;margin:8px 0}
+.clarify-item{background:#fff;border:1px solid #e3ecf5;border-radius:8px;padding:8px 10px}
+.clarify-question{margin:0 0 4px;font-weight:600;color:#22384d;font-size:13px}
+.clarify-item textarea{width:100%;box-sizing:border-box;margin-top:6px;font-size:13px}
+
+.plan-file{margin:8px 0;border:1px solid #e3ecf5;border-radius:8px;padding:6px 10px;background:#fbfdff}
+.plan-file summary{cursor:pointer;font-size:12px;color:#3e5c89}
+.plan-code{max-height:320px;overflow:auto;background:#0f1b2a;color:#d6e3f3;padding:10px;border-radius:6px;font-size:12px}
+.plan-edit{width:100%;box-sizing:border-box;margin-top:6px;font-size:12px}
+
+/* 布局健壮性：中间栏是 grid，其子项默认 min-width:auto，长内容（脚本/JSON 预览）
+   会把中间栏撑宽并压到右栏下面。这里显式允许收缩，并让长文本换行而不是扩张。 */
+.research-main>*{min-width:0}
+.panel{min-width:0}
+.task-rail{min-width:0}
+.task-rail .panel p,.task-rail .panel div{overflow-wrap:anywhere}
+.plan-file{min-width:0}
+.plan-code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;max-height:320px;overflow:auto}
+.plan-edit{max-width:100%}
+#plan-summary,#plan-files{min-width:0;overflow-wrap:anywhere}
+
+/* AI 活动列表：此前样式未写入，导致标题与时间挤在一起。 */
+details#ai-activity-panel>summary{cursor:pointer;display:flex;align-items:center;gap:10px;margin:0}
+details#ai-activity-panel>summary h2{margin:0;font-size:15px}
+details#ai-activity-panel>summary::-webkit-details-marker{display:none}
+details#ai-activity-panel>summary .subtle{flex:1;font-size:11px}
+details#ai-activity-panel[open]>summary{margin-bottom:12px}
+.ai-activity-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.ai-activity-list li{border-left:2px solid #e3ecf5;padding:2px 0 2px 10px}
+.ai-activity-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.ai-activity-head strong{font-size:12px;color:#22384d}
+.ai-activity-head small{font-size:10px;color:#94a0b2}
+.ai-activity-list p{margin:4px 0 0;overflow-wrap:anywhere}
+.attention-detail{margin:4px 0 0;font-size:12px;color:#ad5a4e;background:#fff6f5;border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}
+
+/* 进度播报：时间线（每步一句人话 + 时间，最新一条标"现在"） */
+.timeline{list-style:none;margin:0;padding:0}
+.timeline-item{position:relative;padding:0 0 14px 22px;border-left:1px solid #e3ecf5;margin-left:5px}
+.timeline-item:last-child{border-left-color:transparent;padding-bottom:0}
+.timeline-dot{position:absolute;left:-5px;top:3px;width:9px;height:9px;border-radius:50%;background:#c7d6e6}
+.timeline-item.current .timeline-dot{background:#2baa77;box-shadow:0 0 0 3px rgba(43,170,119,.15)}
+.timeline-item.attention .timeline-dot{background:#e0a33c}
+.timeline-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.timeline-head strong{font-size:13px;color:#22384d}
+.timeline-head small{font-size:11px;color:#94a0b2;font-variant-numeric:tabular-nums}
+.timeline-body p{margin:4px 0 0;font-size:12px;overflow-wrap:anywhere}
+#ai-activity{max-height:340px;overflow:auto}

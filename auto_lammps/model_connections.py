@@ -11,8 +11,10 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
+from .deepseek import DeepSeekClient, ModelError, https_transport
 from .manifest import canonical, private_directory, sha256
 from .runtime_launcher import read_regular
+from .tls_context import ssl_context
 from .tasks import TaskError, task_id
 
 PROVIDERS = {
@@ -20,6 +22,14 @@ PROVIDERS = {
     'glm': ('GLM', 'open.bigmodel.cn', None, '/api/paas/v4/chat/completions'),
     'anthropic': ('Claude', 'api.anthropic.com', '/v1/models?limit=1000', '/v1/messages'),
     'openai': ('GPT', 'api.openai.com', '/v1/models', '/v1/chat/completions'),
+}
+ERROR_CLASSES = {
+    'model_key_missing_or_invalid': 'missing_or_invalid_credential',
+    'model_budget_exhausted': 'budget_exhausted',
+    'request_already_reserved': 'duplicate_request',
+    'provider_request_failed': 'provider_rejected',
+    'model_tls_trust_unavailable': 'tls_trust_unavailable',
+    'invalid_request_id': 'invalid_request_id',
 }
 MODEL_ID = re.compile(r'[A-Za-z0-9._:/-]{1,100}')
 
@@ -31,7 +41,11 @@ def official_request(provider, key, method, path, payload=None):
         headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
     else:
         headers['Authorization'] = 'Bearer ' + key
-    connection = http.client.HTTPSConnection(PROVIDERS[provider][1], timeout=60)
+    try:
+        context = ssl_context()
+    except OSError:
+        raise TaskError('本机缺少可用的证书包，无法建立 HTTPS 连接；请设置 SSL_CERT_FILE。') from None
+    connection = http.client.HTTPSConnection(PROVIDERS[provider][1], timeout=60, context=context)
     try:
         connection.request(method, path, body=canonical(payload) if payload is not None else None, headers=headers)
         response = connection.getresponse()
@@ -118,6 +132,42 @@ class ModelConnections:
             raise TaskError('模型目录格式无法识别。') from None
         return {'provider': provider, 'models': models, 'has_more': bool(result.get('has_more', False)),
                 'note': '提供方返回的模型目录；不代表每个模型都支持科研流程所需能力。'}
+
+    def client(self, provider='deepseek-official', *, calls, transport=None):
+        """Runtime generation client for the saved connection.
+
+        Accounting stays in the caller's existing ledger: this factory only
+        supplies the saved credential and the model chosen in the product
+        settings. A missing credential is refused instead of falling back to an
+        environment variable or another project's key.
+        """
+        if provider != 'deepseek-official':
+            raise TaskError('研究生成链目前只支持 DeepSeek（deepseek-official）连接。')
+        if not self._read(provider):
+            raise TaskError('请先保存该模型商的 API 密钥。')
+        def key_reader():
+            value = self._read(provider) or {}
+            return value.get('key')
+        value = self._read(provider) or {}
+        return DeepSeekClient(calls, transport=transport or https_transport,
+                              key_reader=key_reader, model=value.get('model') or None, thinking=True)
+
+    def check(self, provider='deepseek-official', *, calls, identifier=None, transport=None):
+        """One minimal accounted request proving the saved route can be called."""
+        identifier = identifier or task_id(os.urandom(16).hex())
+        client = self.client(provider, calls=calls, transport=transport)
+        messages = [{'role': 'system', 'content': 'Answer with a JSON object only.'},
+                    {'role': 'user', 'content': 'Reply with the JSON object {"ok": true}.'}]
+        ledger = {'request_id': identifier, 'accounted': True}
+        try:
+            completion = client.complete_json(identifier, messages)
+        except (ModelError, TaskError) as error:
+            return {'ok': False, 'model': client.model, 'ledger': ledger,
+                    'error_class': ERROR_CLASSES.get(str(error), 'transport_or_protocol_error'),
+                    'error': str(error)}
+        usage = (completion.get('receipt') or {}).get('usage') or {}
+        return {'ok': True, 'model': client.model, 'ledger': ledger,
+                'usage': {key: value for key, value in usage.items() if type(value) is int}}
 
     def history(self, identifier):
         self.tasks.get(identifier)
