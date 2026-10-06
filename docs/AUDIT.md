@@ -1355,3 +1355,74 @@ application renders the two existing saved answers as 9 headings, 4 tables and
 original numeric values and recorded model history; no new API or HPC request.
 A restored browser handle was stale after session cleanup; a fresh app tab was
 used without altering the task. PAB preparation remains incomplete.
+
+2026-10-06 continuation preparation: the shared checkout was found to retain a
+historical branch, and its target-planning document was absent. It was read-only;
+current norms and source remain the owned worktree plus live origin/main. An
+upstream module search also used an incorrect package-root path; enumerate actual
+files before further reuse. No shared branch, research database, credential or
+simulation was modified. These are lookup errors, not runtime failures.
+
+Git fetch of origin/main terminated with HTTPS receive timeout during case
+preparation. Existing installed candidate remains intact; remote delivery state
+must be read through the authorized API before selecting a new code baseline.
+Do not infer that GitHub or the app is down from this transport failure.
+
+### 2026-10-06 — 文献工作台许可文件定位纠正
+
+- 证据：上游根目录没有 LICENSE，实际声明是 COPYRIGHT.md；首次路径读取失败。
+- 影响：只影响开发端许可定位，没有复制代码或执行计算。
+- 纠正与验证：枚举实际文件后读取 COPYRIGHT.md；仅复用本机已安装模块进行个人本机资料提取，不向本项目公共树复制或再分发上游代码。
+
+### 2026-10-06 — 文献提取不得把漏识别当作无图表
+
+- 证据：复用文献工作台 generic 图表定位时，三份期刊 PDF 返回空清单；实际正文有 Fig. 1 等图注，图号与正文被 PDF 分为同行不同文字块。两份预印本还漏掉各一张图；两张表的结构提取返回 table_structure_not_found。
+- 影响：自动输出不是全篇覆盖，不能据此宣称无目标，也不能标成 P 数值已验证。
+- 已确认原因：逐行图注拼接不能跨同行分块，导致图注主体为空而被过滤；表格失败原因仍待核验。
+- 纠正：保留原始提取失败、页面与模块摘要；对候选正文进行实际页面核对，复用成熟 PDF 渲染，不改上游生产数据库，不把补充人工定位冒称自动成功。
+- 验证：PDF DOI/题名核对及文字提取已完成；图表覆盖和数值确认仍未完成。
+
+### 2026-10-06 — 资料核对命令路径与引用纠正
+
+- 证据：读取器实际是 zotero.py，不存在 local_zotero.py；包含问号的 GitHub API 路径未加引号时被 shell 当作模式而拒绝。
+- 影响：只读定位失败，没有改变资料或提交计算。
+- 纠正：按实际文件导入；后续网络请求使用参数数组或完整引用，保存元数据后只打印需要的摘要。
+
+### 2026-10-06 — 已合并分支不能假定可快进
+
+- 证据：已合并 PR 的本地提交与 origin/main 文件内容一致，但压缩合并后的祖先不同，快进更新被 Git 拒绝；后续创建分支仍从旧祖先开始。
+- 影响：尚未提交或发布这条新分支，没有覆盖共享工作区。当前唯一未提交变更为本人的审计追加。
+- 纠正：单独保留审计差异，将本人新建且未发布的准备分支定位到已核实的 origin/main，再恢复差异。以后依赖前一步成功的 Git 操作逐项执行，不在失败后继续变更。
+- 验证：准备分支基线、文件差异和历史将在恢复后核对。
+
+恢复已核对：本人准备分支从实际 origin/main 开始，仅恢复本人的审计差异，未改共享检出或历史提交。
+
+### 2026-10-06 — 表格定位框未包含数值行
+
+- 证据：复用上游定位所得 Table 1 裁剪只包含图注和后续正文；实际数值表在该框上方。完整页面及成熟 PDF 表格检测定位到两块数值网格。
+- 影响：原先 table_structure_not_found 不能证明正文没有数值，原裁剪也不能作为数值核对依据。
+- 纠正：保留原提取失败，使用完整页面和网格位置重新调用同一上游结构提取器；人工核对与自动候选分别记录。
+- 验证：已看到原页数值网格；修订裁剪和数值来源回执待保存，不改上游生产数据库。
+
+准备检查发现两个候选仓库主要包含已发表计算输出，整仓均超过 2 GiB，超过现有小型整仓读取器的静态限额。没有调用必然拒绝的整仓获取或提高产品限额；复用固定提交/树/文件身份的现有远端读取器，只取得所选作者工作流的依赖闭包。未下载的结果不计为资源缺失，选定依赖齐全也不称为完整仓库或科学验证。
+
+本轮表格复核首次误用应用安装解释器，缺少上游文献工作台的 PyMuPDF；导入即停止，没有写入成果。改回前面已完成正文提取的既有文献解释器，不把文献依赖混装到当前应用或改变运行服务。
+
+### 2026-10-06 — 参考资源提交与树身份不一致
+
+- 证据：远端参考资源准备在提交/树身份检查处拒绝，尚未获取作者文件或执行源码。
+- 影响：本轮资源只能标为未取得；保留远端读取回执及本机准备意图。
+- 原因：待核对已保存树清单的 SHA 是否来自按提交引用查询，以及实际提交指向的 tree SHA；不得放宽身份比较掩盖冲突。
+- 纠正：先核对已返回的提交与清单，重新绑定真实 tree 身份且逐文件核对；恢复查询用新观察记录，原失败保留。
+- 验证：尚未复验，没有提交计算或改变 A/B 身份。
+
+根因已核实：按 commit 引用请求树时，已保存响应的根 SHA 等于 commit 引用，不是提交对象的 tree SHA。恢复使用提交对象返回的真实 tree SHA，并继续逐文件核对原树中的 blob 身份。原准备意图和失败回执保留，新观察单独保存，未放宽任何比对。
+
+用户指出原拉伸基准已验收；后续新增候选清单不再把它作为待复现或安排重复计算。历史单工况验收保留，新应用流程与整篇覆盖不能回写为当时已完成。
+
+参考文件准备第二次在首个 blob 解码时拒绝：GitHub blob 的 Base64 正文带换行，而临时参考编排漏掉现有获取器的空白规范化步骤。提交/树检查已通过，但文件尚未写出。恢复沿用现有获取器的规范化后严格 Base64 检查及 Git blob SHA 校验，原观察不覆盖；该错误属于开发端资料准备，不消耗模拟次数。
+
+本轮复验：两套选定作者依赖分别为 23/7 个文件，提交、真实 tree、Git blob SHA 和
+逐文件 SHA-256 一致，字节只保存在 HPC。FeAl 配套 MEAM 静态解析无阻塞；没有运行
+作者输入。修订 Table 1 数值框后同一上游结构器取得两块真实网格，原自动失败保留，
+人工定位不计为自动全文提取成功。已有拉伸基准不重跑；第三篇新增候选尚未匹配。
