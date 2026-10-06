@@ -5,6 +5,7 @@ not accepted here; a separate release/isolation gate is still needed for testing
 """
 from pathlib import Path
 import json
+import math
 import re
 import shlex
 import tempfile
@@ -19,12 +20,12 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 14
+GENERATOR_VERSION = 15
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
             'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group', 'load_structure', 'delete_atoms', 'write_dump'}
-FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time'}
+FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time', 'atom/swap'}
 COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom', 'reduce'}
 RESERVED_OUTPUTS = {'stdout.txt', 'stderr.txt', 'log.lammps'}
 
@@ -43,13 +44,57 @@ class ReviewContractError(CandidateError):
     """A malformed reviewer report is not evidence that the scientific plan is wrong."""
 
 
+def _atom_swap(tokens, *, type_count, packages):
+    """Declared canonical MC syntax only; no engine or expression evaluation."""
+    if 'MC' not in packages:
+        raise CandidateError('atom/swap requires MC in the configured engine packages; do not invent availability')
+    if type(type_count) is not int or type_count < 2:
+        raise CandidateError('atom/swap requires at least two declared atom types')
+    if len(tokens) < 13 or tokens[2] != 'all':
+        raise CandidateError('atom/swap requires the all group and explicit N, X, seed, T, types and ke')
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,64}', tokens[1]):
+        raise CandidateError('atom/swap fix ID must be a static identifier')
+    for name, value in zip(('N', 'X', 'seed'), tokens[4:7]):
+        if not re.fullmatch(r'[0-9]{1,10}', value) or not 1 <= int(value) <= 2147483647:
+            raise CandidateError('atom/swap '+name+' must be a positive literal 32-bit integer')
+    try:
+        temperature = float(tokens[7])
+    except ValueError:
+        temperature = math.nan
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise CandidateError('atom/swap T must be a finite positive literal temperature')
+    options = {}
+    index = 8
+    while index < len(tokens):
+        key = tokens[index]
+        if key not in {'types', 'ke', 'semi-grand'} or key in options:
+            raise CandidateError('atom/swap supports distinct types, ke and semi-grand no only; no region or mu')
+        size = 2 if key == 'types' else 1
+        values = tokens[index+1:index+1+size]
+        if len(values) != size:
+            raise CandidateError('atom/swap option '+key+' is incomplete')
+        options[key] = values
+        index += size + 1
+    if 'types' not in options or 'ke' not in options:
+        raise CandidateError('atom/swap requires explicit types and kinetic-energy option ke yes/no')
+    pair = options['types']
+    if (any(not re.fullmatch(r'[0-9]{1,10}', x) or not 1 <= int(x) <= type_count for x in pair)
+            or int(pair[0]) == int(pair[1])):
+        raise CandidateError('atom/swap types must be two distinct declared numeric atom types')
+    if options['ke'] not in (['yes'], ['no']) or options.get('semi-grand', ['no']) != ['no']:
+        raise CandidateError('atom/swap requires ke yes/no and preserves composition (semi-grand no)')
+    return dict(fix_id=tokens[1],every_steps=int(tokens[4]),attempts_per_event=int(tokens[5]),
+                seed=int(tokens[6]),temperature=temperature,types=[int(x) for x in pair],
+                conserve_kinetic_energy=options['ke']==['yes'],composition_preserved=True)
+
+
 def normalized_review_issues(value):
     if not isinstance(value,list): return value
     return [next(iter(item.values())) if isinstance(item,dict) and set(item) in ({'error'},{'issue'})
             and isinstance(next(iter(item.values())),str) else item for item in value]
 
 
-def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
+def validate_body(body, outputs, *, output_prefix='/output/', structures=None, type_count=None, packages=()):
     """Conservative syntax/resource screen, NOT a scientific or security verifier.
 
     No subprocess is used. Loops and dynamic dispatch are deliberately unsupported;
@@ -72,6 +117,8 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
     groups, deleted, loaded = {}, set(), set()
     variables = {}
     semantic_errors=[]
+    swaps=[]
+    active_swaps=set()
     pressure_computes,current_computes=set(),set()
     thermo_computes=set()
     counts = structures or {}
@@ -94,6 +141,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
             if len(tokens)!=2 or tokens[1]=='initial' or tokens[1] not in counts or tokens[1] in loaded:
                 raise CandidateError('load_structure must select each supplied additional structure exactly once')
             loaded.add(tokens[1]);atom_count=counts[tokens[1]];groups={};deleted=set()
+            active_swaps.clear()
             pressure_computes,current_computes=set(),set()
             thermo_computes=set()
         if command == 'group' and len(tokens)>2:
@@ -129,6 +177,15 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
                 variables[name]=style
         if command == 'fix' and (len(tokens) < 4 or tokens[3] not in FIX_STYLES):
             raise CandidateError('Unsupported fix style')
+        if command == 'fix' and tokens[1] in active_swaps:
+            raise CandidateError('Unfix an active atom/swap before redefining its parameters')
+        if command == 'fix' and tokens[3] == 'atom/swap':
+            swap=_atom_swap(tokens,type_count=type_count,packages=packages)
+            active_swaps.add(tokens[1]);swaps.append(swap)
+        if command == 'unfix' and len(tokens)==2:
+            active_swaps.discard(tokens[1])
+        if command == 'reset_timestep' and active_swaps:
+            raise CandidateError('Unfix atom/swap before reset_timestep; its MC schedule cannot survive a timestep reset')
         if command == 'compute' and (len(tokens) < 4 or tokens[3] not in COMPUTE_STYLES):
             raise CandidateError('Unsupported compute style')
         if command=='compute' and tokens[3]=='pressure':
@@ -174,12 +231,16 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None):
         raise CandidateError('The proposed workflow contains no calculation stage')
     if set(outputs) != writes:
         raise CandidateError('Declare exactly the analysis files written by the workflow')
-    return {'screen': 'bounded_command_and_output_screen', 'calculation_commands': evaluations,
+    result = {'screen': 'bounded_command_and_output_screen', 'calculation_commands': evaluations,
             'declared_outputs': list(outputs), 'scientific_validation': 'not_performed',
             'execution_authorized': False}
+    if swaps:
+        result['workflow_requirements']={'required_packages':['MC'],'atom_swap_operations':swaps,
+                                         'environment_verified':False}
+    return result
 
 
-def validate_proposal(value, *, max_atoms, output_layout="isolated", require_analysis_plan=False):
+def validate_proposal(value, *, max_atoms, output_layout="isolated", require_analysis_plan=False, packages=()):
     fields = {'summary', 'questions', 'structure', 'potential_pin', 'workflow', 'analysis'}
     if not isinstance(value, dict) or set(value) not in (fields, fields|{'additional_structures'}):
         raise CandidateError('Candidate proposal fields are incomplete')
@@ -240,7 +301,8 @@ def validate_proposal(value, *, max_atoms, output_layout="isolated", require_ana
         body = expand_tools(value['workflow'], analysis.get('plan'), output_prefix(output_layout))
     except ValueError as error:
         raise CandidateError(str(error)) from None
-    return validate_body(body, files, output_prefix=output_prefix(output_layout), structures=counts)
+    return validate_body(body, files, output_prefix=output_prefix(output_layout), structures=counts,
+                         type_count=len(value['structure']['type_elements']),packages=packages)
 
 
 def structure_counts(proposal, *, max_atoms):
@@ -290,7 +352,7 @@ def output_prefix(layout):
     return '/output/' if layout == 'isolated' else ''
 
 
-def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated', answers=None, guidance=None):
+def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated', answers=None, guidance=None, packages=()):
     from .resource_limits import description as resource_policy_description
     prefix = output_prefix(output_layout)
     _text(task_text, 24000)
@@ -347,6 +409,17 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'One ASCII command per line; no continuation. Supported commands: ' + ', '.join(sorted(COMMANDS)) + '. '
         'Supported fix styles: ' + ', '.join(sorted(FIX_STYLES)) + '. Supported compute styles: '
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
+        'For composition-preserving MC/MD, atom/swap requires MC in configured_engine_packages. '
+        'Use fix ID all atom/swap N X seed T types i j ke yes_or_no, optionally semi-grand no. '
+        'N is the positive MD-step interval, X is attempts per event (NOT total cycles), seed is a '
+        'positive integer, T is a positive finite temperature. Use literal numbers and exactly two '
+        'distinct declared numeric types per fix. For multicomponent exchange, independently '
+        'declare the required pair fixes and their scientific schedules; do not silently change '
+        'composition, number of attempts or physical time. ke must be explicit. No mu, semi-grand '
+        'yes or region support; ask for clarification for unsupported algorithms. Unfix before '
+        'redefining the same MC fix or resetting timestep. atom/swap is not invoked by minimize; '
+        'its f_ID[1] and f_ID[2] are cumulative attempts and accepts. Package declarations are not '
+        'a real engine execution check; do not claim simulation or scientific success. '
         'analysis is {quantity,method,files,plan}; method describes analysis, not executable Python. '
         'For executable research, plan is REQUIRED and must contain at least one table and one operation. '
         'Never omit a required plan to bypass a check; unsupported analysis requires clarification. '
@@ -411,6 +484,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
     if extra:
         instruction = instruction + ' ' + extra
     context = {'task_text': task_text, 'units': units, 'resources': resource_summaries, 'max_atoms': max_atoms,
+               'configured_engine_packages':sorted(packages),
                'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])]}
     return [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': canonical(context).decode()}]
 
@@ -437,11 +511,12 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         raise CandidateError('Invalid geometry atom limit')
     runtime = geometry_runtime()
     messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms,
-                                  output_layout=output_layout, answers=answers, guidance=guidance)
+                                  output_layout=output_layout, answers=answers, guidance=guidance, packages=adapter.packages)
     context = {'generator_version': GENERATOR_VERSION, 'require_analysis_plan':require_analysis_plan, 'review_plan':review_plan, 'messages': messages,
                'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])],
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'potential_compatibility': adapter.compatibility_policy(),
+               'configured_engine_packages':sorted(adapter.packages),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
                'requested_model': getattr(client,'model',client.calls.config.model),
                'thinking': getattr(client, 'thinking', False),
@@ -516,7 +591,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             raise CandidateError('Model repeated an unchanged rejected plan: '+str(last_error))
         seen_proposals.add(digest)
         try:
-            screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout, require_analysis_plan=require_analysis_plan)
+            screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout,
+                                      require_analysis_plan=require_analysis_plan, packages=adapter.packages)
             if screen is not None and review_plan:
                 try:
                     check_table_writers(expand_tools(proposal['workflow'],proposal['analysis']['plan'],output_prefix(output_layout)),

@@ -34,7 +34,8 @@ def candidate_check(snapshot, *, max_atoms):
         generation=json.loads(load('generation.json'));context=generation['input']
         analysis_raw=load('analysis.json');analysis=json.loads(analysis_raw)
         proposal=generation['proposal'];layout=context.get('output_layout','isolated')
-        screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout,require_analysis_plan=True)
+        screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout,require_analysis_plan=True,
+                                 packages=context.get('configured_engine_packages',()))
         if screen is None or screen!=generation['script_screen']:
             raise Conflict('Frozen candidate does not pass the current static screen')
         if (sha256(canonical(context))!=manifest['provenance']['task_sha256'] or
