@@ -546,12 +546,26 @@ class Ledger:
         """Claim one upload only after resources have been reserved."""
         with self._transaction() as db:
             row = self._request(db, request_id)
-            if db.execute("SELECT 1 FROM events WHERE request_id=? AND kind='upload_intent'", (request_id,)).fetchone():
+            last = db.execute("SELECT kind FROM events WHERE request_id=? AND kind IN ('upload_intent','upload_reconciled_absent') ORDER BY seq DESC LIMIT 1", (request_id,)).fetchone()
+            if last and last['kind'] != 'upload_reconciled_absent':
                 return False
             if row['state'] != 'prepared':
                 raise Conflict('Only a reserved, undispatched request may upload')
             self._event(db, request_id, 'upload_intent', {'manifest_sha256': row['manifest_sha256']})
             return True
+
+    def reconcile_staging_absent(self, request_id, evidence_sha256):
+        """One upload recovery after trusted inspection proves no remote allocation."""
+        _digest(evidence_sha256)
+        with self._transaction() as db:
+            row = self._request(db, request_id)
+            if row['state'] != 'prepared' or row['dispatch_claimed']:
+                raise Conflict('Only an undispatched request can reconcile input upload')
+            if db.execute("SELECT 1 FROM events WHERE request_id=? AND kind IN ('inputs_staged','upload_reconciled_absent')", (request_id,)).fetchone():
+                raise Conflict('Upload recovery is already used or inputs exist')
+            if not db.execute("SELECT 1 FROM events WHERE request_id=? AND kind='upload_failed'", (request_id,)).fetchone():
+                raise Conflict('No failed upload to reconcile')
+            self._event(db, request_id, 'upload_reconciled_absent', {'evidence_sha256': evidence_sha256})
 
     def staging_result(self, request_id: str, *, evidence_sha256: str | None = None, error_type: str | None = None):
         if (evidence_sha256 is None) == (error_type is None):
@@ -564,7 +578,8 @@ class Ledger:
             self._request(db, request_id)
             if not db.execute("SELECT 1 FROM events WHERE request_id=? AND kind='upload_intent'", (request_id,)).fetchone():
                 raise Conflict('Missing upload intent')
-            if db.execute("SELECT 1 FROM events WHERE request_id=? AND kind IN ('inputs_staged','upload_failed')", (request_id,)).fetchone():
+            last = db.execute("SELECT seq FROM events WHERE request_id=? AND kind='upload_intent' ORDER BY seq DESC LIMIT 1", (request_id,)).fetchone()
+            if db.execute("SELECT 1 FROM events WHERE request_id=? AND seq>? AND kind IN ('inputs_staged','upload_failed')", (request_id, last['seq'])).fetchone():
                 raise Conflict('Upload outcome is already recorded')
             self._event(db, request_id, 'inputs_staged' if evidence_sha256 else 'upload_failed',
                         {'evidence_sha256': evidence_sha256, 'error_type': error_type})

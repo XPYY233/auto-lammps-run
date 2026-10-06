@@ -183,11 +183,43 @@ class StagingTests(unittest.TestCase):
         row = ledger.reserve(evaluation,'upload',self.snapshot.digest,RESOURCE)
         return ledger, row
 
+    def test_capacity_recovery_verifies_absence_and_keeps_same_request(self):
+        ledger,row=self.reserved_ledger()
+        service=StagingService(ledger,StageClient(self.endpoint,self.root/'recovery-audit'))
+        self.policy(65536 + RESOURCE.storage_bytes - 1)
+        with patch('auto_lammps.staging._capture',side_effect=self.local_receiver):
+            with self.assertRaises(UploadUncertain):service.stage(row['id'],self.snapshot)
+            self.assertFalse((self.remote/row['id']).exists())
+            self.assertEqual(service.stage(row['id'],self.snapshot)['upload_state'],'upload_unresolved')
+            self.assertEqual(len([e for e in ledger.events(row['id']) if e['kind']=='upload_intent']),1)
+            self.policy(65536 + RESOURCE.storage_bytes)
+            self.assertEqual(service.stage(row['id'],self.snapshot)['upload_state'],'staged')
+            self.assertEqual(service.stage(row['id'],self.snapshot)['upload_state'],'staged')
+        events=ledger.events(row['id'])
+        self.assertEqual(len([e for e in events if e['kind']=='upload_intent']),2)
+        self.assertEqual(len([e for e in events if e['kind']=='upload_failed']),1)
+        self.assertEqual(len([e for e in events if e['kind']=='upload_reconciled_absent']),1)
+        self.assertFalse(ledger.get(row['id'])['dispatch_claimed'])
+        self.assertIsNone(ledger.get(row['id'])['job_id'])
+        with self.assertRaises(Conflict):ledger.reconcile_staging_absent(row['id'],H)
+
+    def test_partial_remote_upload_never_reuploads_or_overwrites(self):
+        ledger,row=self.reserved_ledger()
+        ledger.begin_staging(row['id']);ledger.staging_result(row['id'],error_type='UploadUncertain')
+        with self.assertRaises(remote_stage.StageError):self.receive(self.payload[:-1],request=row['id'])
+        before=(self.remote/row['id']/'allocation.json').read_bytes()
+        service=StagingService(ledger,StageClient(self.endpoint,self.root/'partial-audit'))
+        with patch('auto_lammps.staging._capture',side_effect=self.local_receiver):
+            self.assertEqual(service.stage(row['id'],self.snapshot)['upload_state'],'upload_unresolved')
+        self.assertEqual((self.remote/row['id']/'allocation.json').read_bytes(),before)
+        self.assertEqual(len([e for e in ledger.events(row['id']) if e['kind']=='upload_intent']),1)
+
     def test_failed_upload_keeps_charge_and_is_not_retried(self):
         ledger, row = self.reserved_ledger()
         client = StageClient(self.endpoint,self.root / 'audit')
         service = StagingService(ledger,client)
-        with patch.object(client,'upload',side_effect=UploadUncertain('synthetic disconnect')) as upload:
+        with patch.object(client,'upload',side_effect=UploadUncertain('synthetic disconnect')) as upload, \
+                patch.object(client,'inspect_absence',side_effect=UploadUncertain('absence not verified')):
             with self.assertRaises(UploadUncertain):
                 service.stage(row['id'],self.snapshot)
             self.assertEqual(service.stage(row['id'],self.snapshot)['upload_state'],'upload_unresolved')

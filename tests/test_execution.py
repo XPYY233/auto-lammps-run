@@ -205,7 +205,9 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):self.execute()
             result=self.execute()
         self.assertEqual(result['reason'],'upload_unresolved')
-        self.assertEqual(self.upload.call_count,1);self.dispatch.assert_not_called()
+        self.assertEqual(self.upload.call_count,2)  # One upload and one read-only absence check.
+        self.assertEqual(sum('input_chunks' in call.kwargs for call in self.upload.call_args_list),1)
+        self.dispatch.assert_not_called()
 
     def test_ambiguous_dispatch_uses_existing_identity_and_never_repeats(self):
         self.authorize_fixture()
