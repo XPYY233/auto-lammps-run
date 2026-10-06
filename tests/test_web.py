@@ -79,6 +79,16 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.client.get(path).status_code,200)
         self.assertEqual(self.client.get('/assets/tasks.sqlite').status_code,404)
 
+    def test_math_assets_are_local_and_integrity_checked(self):
+        root=Path(__file__).resolve().parents[1]/'auto_lammps/web_assets/katex'
+        manifest=json.loads((root/'manifest.json').read_text())
+        for name in manifest['files']:
+            response=self.client.get('/assets/katex/'+name)
+            self.assertEqual(response.status_code,200,name)
+            from auto_lammps.manifest import sha256
+            self.assertEqual(sha256(response.content),manifest['files'][name],name)
+        self.assertEqual(self.client.get('/assets/katex/not-shipped.js').status_code,404)
+
     def test_literature_preview_and_atomic_import_keep_result_context_private(self):
         doc=self.create()
         content=export_csv()
@@ -173,4 +183,3 @@ class ActivityFeedTests(unittest.TestCase):
         self.store.add_guidance(self.doc['id'],self.doc['revision'],'势函数请从我们的势函数库中选取')
         body=self.client.get('/api/tasks/'+self.doc['id']+'/ai-activity').json()
         self.assertTrue(any('引导' in step['title'] for step in body['steps']),[s['title'] for s in body['steps']])
-

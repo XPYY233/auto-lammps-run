@@ -3,6 +3,7 @@ import json
 import math
 from pathlib import Path
 import re
+from datetime import datetime, timezone
 
 from .candidate_jobs import CandidateHistory
 from .manifest import sha256
@@ -36,6 +37,10 @@ def event_label(event):
 
 class ResultUnavailable(ValueError):
     pass
+
+
+def public_time(value):
+    return datetime.fromtimestamp(value,timezone.utc).isoformat() if type(value) in (int,float) else value
 
 
 def existing_private_directory(path):
@@ -80,7 +85,7 @@ class ResultsReader:
             raise ResultUnavailable('Scheduler evidence needs reconciliation')
         if report['scientific_status']!='not_evaluated':raise ResultUnavailable('Unsupported scientific verdict')
         if report['status']=='analysis_failed':
-            return dict(id=identifier,status='analysis_failed',label='分析未完成',at=event['at'],
+            return dict(id=identifier,status='analysis_failed',label='分析未完成',at=public_time(event['at']),
                         message='分析检查未通过，失败记录已保留。请核对分析计划、输出格式与计算记录。')
         if report['status']!='analyzed' or report['manifest_sha256']!=request['manifest_sha256']:
             raise ResultUnavailable('Invalid analysis identity')
@@ -93,7 +98,7 @@ class ResultsReader:
                 raise ResultUnavailable('Invalid numeric result')
             results.append({key:item[key] for key in ('id','method','file','x','y','window','sample_count',
                                                        'source_line_ranges','values','value_units','units_origin')})
-        return dict(id=identifier,status='analyzed',label='数值分析已完成',at=event['at'],
+        return dict(id=identifier,status='analyzed',label='数值分析已完成',at=public_time(event['at']),
                     quantity=report['declared_quantity'],results=results,
                     sources=[{key:item[key] for key in ('file','sha256','columns')} for item in report['sources']],
                     scientific_status='not_evaluated',
@@ -125,7 +130,7 @@ class ResultsReader:
                     if event['kind']!='analysis_saved':continue
                     try:reports.append(self._report(request,event,events))
                     except (KeyError,ValueError,TypeError,AttributeError,OSError,runtime.ExecutionDenied):
-                        reports.append(dict(status='unavailable',label='报告暂不可用',at=event['at'],
+                        reports.append(dict(status='unavailable',label='报告暂不可用',at=public_time(event['at']),
                                             message='报告或关联证据未通过核验，未展示数值。'))
                 ordinal+=bool(request['dispatch_claimed'])
                 kinds={e['kind'] for e in events}
@@ -139,14 +144,74 @@ class ResultsReader:
                        STATES.get(request['state'],'状态待核对'))
                 progress=[json.loads(e['payload']) for e in events if e['kind']=='following_progress']
                 if progress and progress[-1]['state']=='attention':stage='自动跟进需要核对 · '+stage
-                requests.append(dict(id=request['id'],dispatch_ordinal=ordinal if request['dispatch_claimed'] else None,
+                requests.append(dict(id=request['id'],job_id=request['job_id'],dispatch_ordinal=ordinal if request['dispatch_claimed'] else None,
                     state=request['state'],state_label=STATES.get(request['state'],'状态待核对'),stage=stage,
                     accounted=bool(request['accounted']),reports=reports,
-                    history=[dict(at=e['at'],label=event_label(e)) for e in events]))
+                    history=[dict(at=public_time(e['at']),label=event_label(e)) for e in events]))
             pending=sum(r['state']=='prepared' and not r['dispatch_claimed'] for r in group['requests'])
             base['evaluations'].append(dict(id=group['id'],max_attempts=group['max_attempts'],
                 dispatch_count=ordinal,pending_attempts=pending,used_attempts=ordinal+pending,requests=requests))
         return dict(base,message='计算状态、数值分析和科学核验分别记录。' if groups else '尚未提交计算，没有结果记录。')
+
+    def summary(self, identifier):
+        """The list and detail use the same task-bound execution evidence."""
+        groups=self.task(identifier)['evaluations']
+        runs=[r for g in groups for r in g['requests'] if r['dispatch_ordinal'] is not None]
+        if not runs:return {}
+        latest=max(runs,key=lambda r: r['history'][0]['at'])
+        return dict(execution_state=latest['state'],execution_stage=latest['stage'],
+                    job_id=latest['job_id'],submission_count=sum(g['dispatch_count'] for g in groups),
+                    max_submissions=sum(g['max_attempts'] for g in groups),
+                    scientific_status='not_evaluated')
+
+    def tables(self, identifier, analysis_id):
+        """Bounded previews of verified source bytes, never new analysis or fetching."""
+        verified=self.report(identifier,analysis_id)
+        raw=runtime.read_regular(self.reports/(analysis_id+'.json'),65536,private=True)
+        saved=json.loads(raw);context=saved['context'];report=saved['report']
+        if saved['context']['analysis_id']!=verified['id']:raise ResultUnavailable('Report identity changed')
+        # Recheck the full report after the read, so a concurrent replacement cannot
+        # change the source declaration between binding and preview.
+        self.report(identifier,analysis_id)
+        events=self.ledger.events(context['request_id'])
+        proofs=[json.loads(e['payload']) for e in events if e['kind']=='analysis_saved'
+                and json.loads(e['payload']).get('analysis_id')==analysis_id]
+        if len(proofs)!=1 or sha256(raw)!=proofs[0]['evidence_sha256']:
+            raise ResultUnavailable('Report changed during preview')
+        matches=[json.loads(e['payload']) for e in events if e['kind']=='output_fetch_finished'
+                 and json.loads(e['payload']).get('evidence_sha256')==context['collection_sha256']]
+        if len(matches)!=1:raise ResultUnavailable('Missing source receipt')
+        ticket=matches[0]['ticket']
+        if not re.fullmatch(r'[a-f0-9]{32}',ticket):raise ResultUnavailable('Invalid collection identity')
+        receipt=runtime.read_regular(self.collections/ticket/'receipt.json',262144,private=True)
+        if sha256(receipt)!=context['collection_sha256']:raise ResultUnavailable('Source receipt changed')
+        inventory={i['path']:i for i in json.loads(receipt)['header']['files']}
+        from .analysis import parse_table, MAX_TABLE_BYTES
+        from .scalar_analysis import parse_scalar
+        tables=[];total=0
+        if not 1<=len(report['sources'])<=16:raise ResultUnavailable('Preview table limit exceeded')
+        for source in report['sources']:
+            name=source['file']
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',name):
+                raise ResultUnavailable('Invalid source name')
+            item=inventory.get('output/'+name)
+            if not item or item['sha256']!=source['sha256'] or item['size']!=source['size']:
+                raise ResultUnavailable('Source declaration differs from receipt')
+            total+=item['size']
+            if total>MAX_TABLE_BYTES:raise ResultUnavailable('Preview byte limit exceeded')
+            data=runtime.read_regular(self.collections/ticket/'payload'/'output'/name,item['size'])
+            if sha256(data)!=source['sha256']:raise ResultUnavailable('Source bytes changed')
+            spec={k:source[k] for k in ('file','columns')}
+            if 'format' in source:spec.update({k:source[k] for k in ('format','headers','steps')})
+            rows=parse_scalar(data,spec) if 'format' in spec else parse_table(data,spec)
+            # Even spacing includes both endpoints; the UI states that this is a
+            # preview. Fit metrics still come from the original frozen analysis.
+            indices=sorted({round(i*(len(rows)-1)/127) for i in range(min(128,len(rows)))}) if len(rows)>128 else range(len(rows))
+            selected=[rows[i] for i in indices]
+            tables.append(dict(file=name,sha256=source['sha256'],columns=verified['sources'][len(tables)]['columns'],
+                               total_rows=len(rows),sampled=len(rows)>128,
+                               rows=[values for _,values in selected],source_lines=[line for line,_ in selected]))
+        return dict(analysis_id=analysis_id,tables=tables,scientific_status='not_evaluated')
 
     def report(self, identifier, analysis_id):
         runtime.hash_value(analysis_id)

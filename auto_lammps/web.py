@@ -80,7 +80,7 @@ class LocalBoundary:
             if message['type'] == 'http.response.start':
                 message['headers'] += [(b'cache-control', b'no-store'), (b'x-content-type-options', b'nosniff'),
                     (b'referrer-policy', b'no-referrer'), (b'content-security-policy',
-                     b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")]
+                     b"default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")]
             await send(message)
         await self.app(scope, bounded_receive, protected_send)
 
@@ -319,9 +319,19 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/assets/{name}')
     def asset(name: str):
-        if name not in {'app.js', 'app.css', 'session.js'}:
+        if name not in {'app.js', 'app.css', 'session.js', 'results-view.js', 'math-view.js'}:
             return JSONResponse({'detail': '文件不存在'}, status_code=404)
         return FileResponse(ASSETS/name)
+
+    @app.get('/assets/katex/{name:path}')
+    def math_asset(name: str):
+        allowed=json.loads((ASSETS/'katex'/'manifest.json').read_text())['files']
+        if name not in allowed:return JSONResponse({'detail':'文件不存在'},status_code=404)
+        path=ASSETS/'katex'/name
+        try:proof=sha256(path.read_bytes())
+        except OSError:return JSONResponse({'detail':'公式渲染文件尚未正确安装'},status_code=409)
+        if proof!=allowed[name]:return JSONResponse({'detail':'文件核验未通过'},status_code=409)
+        return FileResponse(path)
 
     # Local-entry page activity. Enabled only by --session-activity-file (desktop entry);
     # an ordinary launch keeps these routes inert and records nothing.
@@ -427,15 +437,36 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.post('/api/tasks/{identifier}/discussion')
     def discuss_result(identifier: str, data: DiscussionInput):
-        store.get(identifier)
+        document=store.get(identifier)
         report = reference_views.get(identifier) if reference_views else None
         if report:
             context = {k: report[k] for k in ('scope','metrics','curves','limitations','scientific_status','report_sha256')}
         elif results_reader:
             context = results_reader.task(identifier)
             if not context.get('evaluations'): raise TaskError('尚无可分析的计算结果。')
+            context['source_tables']=[]
+            for group in context['evaluations']:
+                for request in group['requests']:
+                    # Execution history stays in the product; repeated scheduler
+                    # events are not scientific evidence for a result question.
+                    request.pop('history',None)
+                    for analysis in request['reports']:
+                        if analysis['status']=='analyzed':
+                            context['source_tables'].append(results_reader.tables(identifier,analysis['id']))
         else:
             raise TaskError('尚无可分析的计算结果。')
+        # The result assistant needs the actual method and convergence criteria,
+        # not generic assumptions inferred from a material or an energy unit.
+        if document['status']=='conditions_frozen':
+            frozen=json.loads(store.export(identifier))
+            conditions={}
+            for field, choices in frozen['conditions'].items():
+                if field in {'reference','resources'}:continue
+                selected=next((item for item in choices['candidates'] if item['id']==choices['selected']),None)
+                if selected:
+                    conditions[field]={key:selected[key] for key in ('value','unit','applicability')}
+            context['frozen_scientific_conditions']=conditions
+            context['condition_record_sha256']=document['record_sha256']
         return connections.discuss(identifier, data.request_id, data.provider, data.question, context)
 
     @app.get('/api/tasks/{identifier}/reference-result')
@@ -584,6 +615,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 if job is not None:
                     row['preparation_state'] = job.get('state')
                     row['preparation_label'] = job.get('label')
+        if results_reader:
+            for row in rows:
+                try:row.update(results_reader.summary(row['id']))
+                except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+                    row['execution_state']='reconcile_required'
+                    row['execution_stage']='计算记录暂不可核对'
         if closeouts:
             for row in rows:
                 try:
@@ -626,6 +663,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return results_reader.task(identifier)
         except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
             return JSONResponse({'detail':'结果记录暂不可读，请联系管理员核对。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/results/{analysis_id}/tables')
+    def task_tables(identifier: str, analysis_id: str):
+        store.get(identifier)
+        if results_reader is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:return results_reader.tables(identifier,analysis_id)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'原始数据或来源核验未通过，未展示数据与图表。'},status_code=409)
 
     @app.get('/api/tasks/{identifier}/results/{analysis_id}/download')
     def task_report(identifier: str, analysis_id: str):
@@ -1040,7 +1085,9 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
-    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant,credentials_directory=args.model_connections_directory)
+    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant or bool(model_client),
+                                 credentials_directory=args.model_connections_directory,
+                                 calls=model_client.calls if model_client else None)
     if model_client is not None:
         # Wire the saved connection before any service is built from it: the candidate
         # service and the runtime route must hold the same client object, and the

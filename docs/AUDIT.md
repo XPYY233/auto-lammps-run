@@ -1240,3 +1240,69 @@ GitHub两次连接超时，2d86d33的远端状态待核实；本地版本已安�
 发现：最小化以能量容差停止，缺陷体系报告的最大原子力仍高于方案力阈值。原因是最小化满足能量或力条件之一即可停止，正常退出不能推出两项都达标。保留“科学尚未核验”，不放宽冻结标准、不追加提交。应用 AI 的科学收敛核验、基于结果的分析/图表及经验晋升仍需完成；控制端此次算术与日志核对不能冒称这些运行能力已经实现。
 
 GitHub 交付：安装版已更新，修订分支已推送，全部三项 CI 成功。按用户授权尝试正常快进更新 main，服务端返回 GH006 / Changes must be made through a pull request，分支保护拒绝直接更新。未强推、未关闭保护、未新建 PR；已有 PR #154 保留，等待用户裁定是否通过该已有入口合入。不能声称 main 已更新。
+
+## Issue #155 — ordinary user flow gaps and P evidence role (2026-10-06)
+
+Installed acceptance found a completed ordinary research job on the detail page,
+but its task-list/home row remained prepared with no job number. The list merged
+only paper-register executions; ordinary ledger results were omitted. Reuse the
+same task-bound ResultsReader projection; retain scientific status separately.
+Data and plots tabs also displayed the same numeric report. Add read-only,
+hash-verified previews from the collected original tables and generic curves
+selected by the model's frozen analysis operations, with units and sampling labels.
+The configured runtime did not enable its result assistant; wire explicit user
+questions to the saved project connection and shared DeepSeek call accounting.
+These changes require offline and installed-browser verification; no new physical
+calculation, scoring change or scientific acceptance is authorized by this fix.
+
+The work-turn fetch failed before a subsequent command created a branch from a
+stale remote-tracking ref. No code was edited there. A bounded fetch succeeded;
+the clean private branch was reset to the actual merged main before changes.
+Future dependent branch creation must stop on fetch failure. Guessed document
+names were also absent: use the file inventory rather than guessing specification
+paths. Neither event incurred a simulation or model call.
+
+User clarification: literature-workbench extraction establishes **P**, including
+paper values, figures/tables, units and source locations. A runs pinned author
+code. A separate conditions-only prompt enters the ordinary research-user flow
+for B; P, A, source solution and scoring answers stay outside B generation.
+
+Issue #155 offline check initially failed in two new fixture assertions (wrong Ledger method name and assumed first row). Fixture definitions confirmed get() and the -1/-1 first row; corrected assertions before rerun. This was a test-authoring error, not a new simulation failure.
+
+The next offline check caught immutable fixture output permissions in the tamper test and a guessed model-ledger accessor. Only the synthetic tamper fixture was made writable; the real reader remains read-only. Confirmed ModelCalls.lookup from its source before correcting the assertion.
+
+Issue #155 candidate installation initially could not import setuptools.build_meta
+in the cloned isolated runtime. Existing dependencies were reusable, but the
+runtime lacked the optional build backend. Build the wheel in the development
+environment and install that fixed artifact without rebuilding inside runtime;
+retain the prior runtime for rollback. No scientific code, data or task identities
+changed. A venv regeneration warning is separately checked by inspecting the new
+interpreter prefix, site-package path and native architecture before use.
+
+Installed preview caught a 404 for the math auto-render extension: the distribution retains its contrib/ subdirectory. Corrected the local URL; inspect rendered math in the browser before claiming formula rendering. The read-only preview deliberately lacks the execution worker; completed result evidence must still be displayed rather than replaced by a no-service placeholder.
+
+The standalone JS clarification harness lacked normalResult; the new read-only fallback now explicitly handles an absent results binding as no evidence. Installed application data remains the source when present; offline regression rerun required.
+
+Installed preview exposed a real timestamp mismatch: ledger events are Unix
+seconds, while the browser assumed ISO strings (localeCompare failed and dates
+could render as 1970). Normalize timestamps only in the read-only public
+projection, without rewriting ledger events. Verify restored activity/status,
+dates and multi-attempt ordering before accepting this fix.
+
+The installed wheel omitted katex/contrib/*.js although the source manifest
+contained it; the corrected URL therefore raised an asset error. Add the nested
+package-data pattern and return a bounded installation error for absent assets.
+The first real result-discussion request completed and used the saved project
+DeepSeek route, but its answer suggested DFT k-points/cutoff/functionals for a
+classical LAMMPS calculation. This is a scientific-context failure: the discussion
+context lacked frozen method/convergence conditions. Preserve the answer and cost;
+add selected scientific inputs, prohibit assumptions from other methods, and
+verify in a new explicit user discussion (no hidden retry or new simulation).
+
+### #155 复验结果（2026-10-06）
+
+- 完整离线检查：747 个 Python 测试通过（8 个可选项跳过），49 个 JavaScript 测试通过。资产检查涵盖本地 KaTeX 字体、扩展脚本和内容摘要。
+- 安装候选的真实页面复验：原始三行数值、拟合图、48 处公式、真实作业号与累计提交次数可读；没有恢复计算或生成新提交。调度与科学核验仍分开。
+- 两次用户界面结果讨论均由应用配置的 DeepSeek 返回并进入共同模型用量账本。第一份答复的 DFT 方法误判保留；第二份在冻结方法与阈值上下文中正确更正，并指出空位残余力未达到请求阈值。该更正是实际模型证据，不是开发者替换答案。
+- 结果问题去除重复调度事件作为模型上下文，产品内历史保留；数值、来源与冻结科学条件保留。模型助手目前只解读已有结果，不能冒称已执行后续绘图或工具操作。
+- 三篇 PAB 尚未就绪：已核对本地期刊条目与成套源码候选，匹配到的两条是势函数文献记录，缺作者工作流。正文、作者身份与结构闭合等缺项必须处理，不以资源条数冒充三篇验收。

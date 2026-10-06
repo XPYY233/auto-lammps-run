@@ -569,3 +569,14 @@ Issue #129 部署核验补充：同项目主服务和界面预览原来使用不
 2026-10-06：按用户要求，在已提交计算等待期间修订方案工作区（Issue #153）：方案摘要、就地修改、版本差异、当前 AI 进度和真实提交回执集中展示；新方案准备时保留已有结果和失败历史。741 项 Python / 46 项浏览器逻辑测试通过（Python 2 项平台跳过）。不新增计算、不修改运行中输入；安装版界面验收及第四次计算的科学核验分别记录。
 
 安装版验收补充：实际页面已验证当前方案、计算文件、修改依据/步骤差异和 AI 工作记录入口，提交状态及次数持续可见。分析完成后的阶段条、后台服务文案和只读记录入口已复验；浏览器逻辑检查现为49项通过。用户端第四次计算已正常结束，应用自动回收输出并保存数值分析；控制端校验文件与形成能算术。力收敛尚未满足方案阈值，科学验收保留未完成。未新增计算；关键数据表/图表分工、结果助手和运行端科学核验列入下一阶段，不把本轮页面修订称为完整科研自动化通过。
+
+## Issue #155 — ongoing user-flow completion
+
+P is extracted paper evidence, A is author-source execution, and B uses the normal
+research-user interface with a conditions-only prompt. Three PAB cases must be
+prepared from existing matched source/potential resources and Zotero texts;
+preparation is not a completed reproduction. Current fixes target ordinary task
+status consistency, verified source tables/plots, result discussion and local
+LaTeX rendering. Implementation in progress; installed acceptance pending.
+
+#155 候选复验：747 Python / 49 JavaScript 通过；安装页面已经展示原始表、实际拟合与本地公式，并通过应用结果讨论获得方法/阈值更正。没有新增模拟；已有任务仍是数值处理完成、科学核验未完成。三篇 PAB 仍在正文与完整作者资源匹配阶段，未计为复现成功。

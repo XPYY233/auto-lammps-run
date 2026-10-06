@@ -28,3 +28,13 @@ HPC 参考资料工具包随软件包含原项目 Apache-2.0 许可、版权说�
 MIT 声明。`auto_lammps/worker_licenses/` 的文本副本用于安装后构造远端工具包；
 不改变原文件或任何论文、作者源码和势函数的权利。工具包只包含本项目必要模块，
 不夹带论文、数据、凭据或目标作者代码。
+
+### Local formula renderer
+
+KaTeX 0.16.28 (MIT), distribution from the official npm package `katex`.
+The package integrity was verified against its SHA-512 registry digest.
+Retained files, fonts and SHA-256 values are listed in
+`auto_lammps/web_assets/katex/manifest.json`; the original MIT license is included.
+Rendering uses local assets, disables trusted HTML/remote-resource commands and
+limits macro expansion. Fonts are the only new public binaries, checked against
+the exact manifest. No CDN or researcher data transfer is needed for rendering.

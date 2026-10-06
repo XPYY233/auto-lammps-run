@@ -3,6 +3,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import json
+import hashlib
 
 root = Path(__file__).resolve().parents[1]
 names = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
@@ -12,6 +14,8 @@ patterns = [re.compile(x) for x in [
     r"\bsk-[A-Za-z0-9_-]{20,}",
 ]]
 bad = []
+font_manifest=root/'auto_lammps/web_assets/katex/manifest.json'
+fonts=json.loads(font_manifest.read_text())['files'] if font_manifest.exists() else {}
 for name in filter(None, names):
     path = root / name
     if path.is_symlink():
@@ -22,6 +26,12 @@ for name in filter(None, names):
         bad.append((name, "private file class"))
         continue
     data = path.read_bytes()
+    # Only the licensed, pinned math renderer's exact fonts are public binaries.
+    font_root=root/'auto_lammps/web_assets/katex'
+    if path.is_relative_to(font_root) and path.suffix=='.woff2':
+        relative=str(path.relative_to(font_root))
+        if fonts.get(relative)!=hashlib.sha256(data).hexdigest():bad.append((name,'unverified font'))
+        continue
     if len(data) > 1_000_000 or b"\0" in data:
         bad.append((name, "binary or oversized file"))
         continue

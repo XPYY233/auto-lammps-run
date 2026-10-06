@@ -33,6 +33,20 @@ class ModelConnectionTests(unittest.TestCase):
         self.connections.save('deepseek-official','',remove=True)
         self.assertFalse(path.exists())
 
+    def test_runtime_discussion_shares_model_accounting_without_duplicate_send(self):
+        from auto_lammps.deepseek import DeepSeekConfig, ModelCalls
+        calls=ModelCalls(Path(self.tmp.name)/'models.sqlite',DeepSeekConfig('synthetic-model'),max_requests=1)
+        self.connections.calls=calls
+        self.connections.save('deepseek-official','synthetic-model','test-key-sentinel')
+        task=self.store.create(title='synthetic',prompt='synthetic',mode='research')
+        identifier='a'*32
+        result=self.connections.discuss(task['id'],identifier,'deepseek-official','解释数据',{'verified':True})
+        self.assertEqual(result['state'],'completed')
+        self.assertEqual(calls.status()['used_requests'],1)
+        self.assertEqual(calls.lookup(identifier)['receipt']['usage']['total_tokens'],12)
+        self.connections.discuss(task['id'],identifier,'deepseek-official','解释数据',{'verified':True})
+        self.transport.assert_called_once()
+
     def test_connection_discovery_and_failed_transport_do_not_leak(self):
         # A first-time user can save the key and discover IDs without knowing one.
         self.connections.save('openai','','test-key-sentinel')
