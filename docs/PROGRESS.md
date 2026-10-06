@@ -580,3 +580,5 @@ status consistency, verified source tables/plots, result discussion and local
 LaTeX rendering. Implementation in progress; installed acceptance pending.
 
 #155 候选复验：747 Python / 49 JavaScript 通过；安装页面已经展示原始表、实际拟合与本地公式，并通过应用结果讨论获得方法/阈值更正。没有新增模拟；已有任务仍是数值处理完成、科学核验未完成。三篇 PAB 仍在正文与完整作者资源匹配阶段，未计为复现成功。
+
+#155 公式观察器恢复：已用固定 KaTeX 的解析失败场景复现文本替换循环，并阻止观察器监听自身渲染；合并重复子树扫描，保留 SVG/代码/错误文本。747 Python（8 项可选跳过）、54 JavaScript 检查通过；实际安装页仍待复验。P 始终是文献工作台提取的论文结果及出处，条件提示词另存，三篇尚未就绪。
