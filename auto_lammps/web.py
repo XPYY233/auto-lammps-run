@@ -319,7 +319,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/assets/{name}')
     def asset(name: str):
-        if name not in {'app.js', 'app.css', 'session.js', 'results-view.js', 'math-view.js'}:
+        if name not in {'app.js', 'app.css', 'session.js', 'results-view.js', 'math-view.js', 'markdown-view.js'}:
             return JSONResponse({'detail': '文件不存在'}, status_code=404)
         return FileResponse(ASSETS/name)
 
@@ -330,6 +330,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         path=ASSETS/'katex'/name
         try:proof=sha256(path.read_bytes())
         except OSError:return JSONResponse({'detail':'公式渲染文件尚未正确安装'},status_code=409)
+        if proof!=allowed[name]:return JSONResponse({'detail':'文件核验未通过'},status_code=409)
+        return FileResponse(path)
+
+    @app.get('/assets/markdown/{name}')
+    def markdown_asset(name: str):
+        allowed=json.loads((ASSETS/'markdown'/'manifest.json').read_text())['files']
+        if name not in allowed:return JSONResponse({'detail':'文件不存在'},status_code=404)
+        path=ASSETS/'markdown'/name
+        try:proof=sha256(path.read_bytes())
+        except OSError:return JSONResponse({'detail':'问答渲染文件尚未正确安装'},status_code=409)
         if proof!=allowed[name]:return JSONResponse({'detail':'文件核验未通过'},status_code=409)
         return FileResponse(path)
 

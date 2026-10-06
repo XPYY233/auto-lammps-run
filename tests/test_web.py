@@ -1,5 +1,6 @@
 """Real ASGI requests to the persistent local review app; no HPC/API backend."""
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -88,6 +89,17 @@ class WebTests(unittest.TestCase):
             from auto_lammps.manifest import sha256
             self.assertEqual(sha256(response.content),manifest['files'][name],name)
         self.assertEqual(self.client.get('/assets/katex/not-shipped.js').status_code,404)
+
+    def test_answer_renderer_assets_are_pinned_and_locally_available(self):
+        root=Path(__file__).resolve().parents[1]/'auto_lammps/web_assets/markdown'
+        manifest=json.loads((root/'manifest.json').read_text())
+        for name,digest in manifest['files'].items():
+            response=self.client.get('/assets/markdown/'+name)
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(hashlib.sha256(response.content).hexdigest(),digest)
+        self.assertEqual(self.client.get('/assets/markdown/unknown.js').status_code,404)
+        self.assertEqual(self.client.get('/assets/markdown-view.js').status_code,200)
+        self.assertIn('/assets/markdown/markdown-it.min.js',self.client.get('/').text)
 
     def test_literature_preview_and_atomic_import_keep_result_context_private(self):
         doc=self.create()

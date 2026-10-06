@@ -1323,3 +1323,35 @@ disconnects its observer while changing text, coalesces overlapping added roots,
 and preserves code/SVG/generated/error nodes. Five regression checks and the
 real-library parse-error probe pass; installed detail-page acceptance remains
 required. No task identity, results, model request or HPC submission changed.
+
+### #155 安装恢复与验证边界（2026-10-06）
+
+公式观察器修复后的固定安装候选已由真实页面复验：普通任务列表、原始数据、实际
+拟合图、本地公式和完整提交历史均可响应。该证据解除本轮安装页复验缺口；精确触发
+旧卡顿的真实公式文本仍未单独定位，合成解析失败复现与实际恢复不可混为同一证据。
+未新增模拟或模型问题，未修改科研结果与任务身份。
+
+用户再次明确：工作台原文提取建立 P；研究条件是另一个无答案产物。现有自动表格
+提取失败与人工核对记录保留，不能将其写为自动提取成功。
+
+用户将当前 W 案例限定为流程完整性核验，排除准确度统计；保留原始失败、次数、
+成本和收敛诊断。后续 PAB 的 B 必须走正常应用页面按钮；开发者后台补步骤不计
+产品验收。报错先审计并修复产品，再由页面恢复，不能私有脚本绕过。
+
+#155 用户截图指出问答标题与表格仍为 Markdown 原文。现有答复只创建纯文本段落，
+KaTeX 仅处理公式，没有 Markdown 结构解析。补本地固定版本解析器，禁用原始 HTML
+和自动图片请求，保留数学文本、原始回答与费用；修复须有安全/排版和安装页复验。
+GitHub 连接器写协作评论返回 integration 403，改用既有已授权 CLI；不声称评论已写。
+获取依赖元数据时系统 Python 的 TLS 信任链缺失，保留证书验证，改用系统 HTTPS
+客户端取固定包并核对 registry 摘要，不绕过 TLS。以上没有新增模型调用或物理计算。
+
+新增资源接口检查首次暴露测试缺少 hashlib 导入；补测试导入后再核对，产品解析器
+行为未受影响。已有回答作为只读验收样本，不重新收费生成回答。
+
+#155 Markdown installed acceptance: 748 Python checks pass (8 optional skips),
+60 JavaScript checks pass, and public-tree inspection passes. The actual installed
+application renders the two existing saved answers as 9 headings, 4 tables and
+61 formula nodes, with no formula error nodes. Browser acceptance preserves
+original numeric values and recorded model history; no new API or HPC request.
+A restored browser handle was stale after session cleanup; a fresh app tab was
+used without altering the task. PAB preparation remains incomplete.

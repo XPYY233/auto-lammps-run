@@ -38,3 +38,12 @@ Retained files, fonts and SHA-256 values are listed in
 Rendering uses local assets, disables trusted HTML/remote-resource commands and
 limits macro expansion. Fonts are the only new public binaries, checked against
 the exact manifest. No CDN or researcher data transfer is needed for rendering.
+
+### Local answer renderer
+
+markdown-it 15.0.2 (MIT), fixed browser distribution from the official npm package.
+The registry SHA-512 archive digest was checked before retaining its browser file
+and original license. SHA-256 values are in `web_assets/markdown/manifest.json`.
+Raw HTML and automatic image requests are disabled; only explicit HTTP(S) links
+are rendered. Math expressions are preserved for the existing local KaTeX renderer.
+No CDN, model request or external upload is used to display saved answers.
