@@ -57,10 +57,12 @@ def _metadata(document):
         raise PotentialError('Unsupported potential metadata fields')
     for key in ('name', 'license', 'applicability', 'usage_evidence'):
         _text(document[key])
-    if document['format'] not in {'snap', 'meam'} or document['units'] not in {'metal', 'real'}:
+    if document['format'] not in {'snap', 'meam', 'eam/alloy'} or document['units'] not in {'metal', 'real'}:
         raise PotentialError('Unsupported model format or units')
     if document['format'] == 'meam' and document['units'] != 'metal':
         raise PotentialError('MEAM binding currently requires source-verified metal units')
+    if document['format'] == 'eam/alloy' and document['units'] != 'metal':
+        raise PotentialError('EAM/alloy binding requires source-verified metal units')
     if document['interaction'] not in {'standalone', 'hybrid', 'unresolved'}:
         raise PotentialError('Declare standalone, hybrid or unresolved interaction')
     elements = document['elements']
@@ -280,13 +282,97 @@ def inspect_meam(library, parameters, elements, *, version=2):
     return result
 
 
+def inspect_eam_alloy(model, elements):
+    """Validate one metal-unit setfl file without changing or evaluating it.
+
+    Header element order describes the table, not the simulation atom types.
+    Funcfl, Finnis/Sinclair and concentration-dependent extensions are not
+    converted. Syntax, finite numbers and array sizes are not a physical test.
+    """
+    if not isinstance(model, bytes) or not 1 <= len(model) <= MAX_FILE or not model.isascii():
+        raise PotentialError('EAM/alloy requires a bounded ASCII setfl file')
+    if any((char < 32 and char not in (9, 10, 13)) or char == 127 for char in model):
+        raise PotentialError('Unsupported control character in setfl file')
+    if any(len(line) > 1023 for line in model.splitlines(keepends=True)):
+        raise PotentialError('Setfl text line exceeds supported engine reader buffer')
+    lines = model.decode('ascii').splitlines()
+    if len(lines) < 6:
+        raise PotentialError('Missing setfl headers or element tables')
+    unit_tags = re.findall(r'\bUNITS\s*:\s*(\S+)', '\n'.join(lines[:3]), re.I)
+    if any(tag != 'metal' for tag in unit_tags):
+        raise PotentialError('Setfl header units differ from metal')
+    header = lines[3].split('#', 1)[0].split()
+    if not header or not header[0].isdecimal():
+        raise PotentialError('Invalid setfl element count')
+    count = int(header[0])
+    names = header[1:]
+    if (not 1 <= count <= 118 or len(names) != count or len(set(names)) != count
+            or any(name not in ELEMENTS for name in names) or names != elements):
+        raise PotentialError('Declared elements must match setfl table order exactly')
+    grid = lines[4].split('#', 1)[0].split()
+    if len(grid) != 5 or not grid[0].isdecimal() or not grid[2].isdecimal():
+        raise PotentialError('Invalid setfl density/distance grid')
+    nrho, nr = int(grid[0]), int(grid[2])
+    drho, dr, cutoff = _number(grid[1]), _number(grid[3]), _number(grid[4])
+    if not (2 <= nrho <= 1_000_000 and 2 <= nr <= 1_000_000 and drho > 0 and dr > 0 and cutoff > 0):
+        raise PotentialError('Invalid setfl grid size or spacing')
+    rows = [(line_number, row) for line_number, line in enumerate(lines[5:], 6)
+            if (row := line.split('#', 1)[0].split())]
+    position = 0
+    ignored = []
+
+    def array(length, label):
+        nonlocal position
+        remaining = length
+        while remaining:
+            if position >= len(rows):
+                raise PotentialError('Setfl array is truncated')
+            line_number, values = rows[position]
+            for value in values:
+                _number(value)
+            if len(values) > remaining:
+                # LAMMPS next_dvector discards the rest of the last text line.
+                # Preserve the file and report this; never flatten adjacent tables.
+                ignored.append(dict(array=label, line=line_number, count=len(values) - remaining))
+            remaining -= min(remaining, len(values))
+            position += 1
+
+    headers = []
+    for name in names:
+        if position >= len(rows):
+            raise PotentialError('Missing setfl element table')
+        _, row = rows[position]
+        position += 1
+        if (len(row) != 4 or not row[0].isdecimal() or not 1 <= int(row[0]) <= 118
+                or _number(row[1]) <= 0 or _number(row[2]) < 0
+                or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,31}', row[3])):
+            raise PotentialError('Invalid setfl atomic header')
+        headers.append(dict(element=name, atomic_number=int(row[0]), mass=_number(row[1]),
+                            lattice_constant=_number(row[2]), lattice_type=row[3]))
+        array(nrho, 'embedding:' + name)
+        array(nr, 'density:' + name)
+    for i, name in enumerate(names):
+        for other in names[:i + 1]:
+            array(nr, 'pair:' + name + '-' + other)
+    if position != len(rows):
+        raise PotentialError('Extra setfl tables or unsupported EAM extension')
+    return dict(screen='eam_alloy_static_v1', elements=names, element_headers=headers,
+                grid=dict(nrho=nrho, drho=drho, nr=nr, dr=dr, cutoff=cutoff),
+                pair_tables=count * (count + 1) // 2, blockers=[],
+                warnings=['array_line_tail_ignored'] if ignored else [], ignored_line_tails=ignored)
+
+
 def _roles(metadata):
+    if metadata['format'] == 'eam/alloy':
+        return {'model', 'license'}
     return {'library' if metadata['format'] == 'meam' else 'coefficients', 'parameters', 'license'}
 
 
 def _inspect(content, metadata, *, meam_version=2):
     if metadata['format'] == 'meam':
         return inspect_meam(content['library'], content['parameters'], metadata['elements'], version=meam_version)
+    if metadata['format'] == 'eam/alloy':
+        return inspect_eam_alloy(content['model'], metadata['elements'])
     return inspect_snap(content['coefficients'], content['parameters'], metadata['elements'])
 
 
@@ -299,9 +385,9 @@ class PotentialCatalog:
     def import_model(self, source, *, metadata, files):
         metadata = _metadata(metadata)
         if not isinstance(files, dict) or set(files) != _roles(metadata):
-            raise PotentialError('Exactly the format-specific model, parameters and license files are required')
+            raise PotentialError('Exactly the format-specific model and license file roles are required')
         names = [_name(x) for x in files.values()]
-        if len(set(names)) != 3:
+        if len(set(names)) != len(files):
             raise PotentialError('Model resource roles must use distinct files')
         with root_descriptor(source) as root:
             content = {role: read_file(root, name, MAX_FILE) for role, name in files.items()}
@@ -470,15 +556,16 @@ class PotentialAdapter:
             raise PotentialError('Task and potential units differ; no automatic conversion')
         if meta['interaction'] != 'standalone':
             raise PotentialError('Hybrid or unresolved interactions need another adapter')
-        if meta['format'] == 'meam':
+        if meta['format'] in {'meam', 'eam/alloy'}:
             if pin in self.legacy_snap_pins:
-                raise PotentialError('MEAM cannot use a legacy SNAP conversion policy')
-            parameters, blockers, conversion = content['parameters'], record['inspection']['blockers'], None
+                raise PotentialError('Only SNAP can use a legacy SNAP conversion policy')
+            parameters = content.get('parameters')
+            blockers, conversion = record['inspection']['blockers'], None
         else:
             parameters, blockers, conversion = self._parameters(pin, record, content)
         if blockers:
             raise PotentialError('Potential compatibility blocked: ' + ', '.join(blockers))
-        package = 'MEAM' if meta['format'] == 'meam' else 'ML-SNAP'
+        package = {'meam': 'MEAM', 'snap': 'ML-SNAP', 'eam/alloy': 'MANYBODY'}[meta['format']]
         if package not in self.packages:
             raise PotentialError('Declared software environment lacks ' + package)
         # Fixed names prevent metadata or upstream filenames becoming LAMMPS syntax.
@@ -488,6 +575,11 @@ class PotentialAdapter:
                      prefix + '/model.meam': parameters, prefix + '/LICENSE.txt': content['license']}
             commands = ('pair_style meam', f'pair_coeff * * {prefix}/library.meam '
                         + ' '.join(meta['elements']) + f' {prefix}/model.meam ' + ' '.join(type_elements))
+        elif meta['format'] == 'eam/alloy':
+            files = {prefix + '/model.eam.alloy': content['model'],
+                     prefix + '/LICENSE.txt': content['license']}
+            commands = ('pair_style eam/alloy',
+                        f'pair_coeff * * {prefix}/model.eam.alloy ' + ' '.join(type_elements))
         else:
             files = {prefix + '/model.snapcoeff': content['coefficients'],
                      prefix + '/model.snapparam': parameters,
@@ -505,6 +597,10 @@ class PotentialAdapter:
         if meta['format'] == 'meam':
             receipt['library_index_elements'] = list(meta['elements'])
             receipt['potential_warnings'] = record['inspection'].get('warnings', [])
+        if meta['format'] == 'eam/alloy':
+            receipt['model_element_order'] = list(meta['elements'])
+            receipt['potential_warnings'] = record['inspection']['warnings']
+            receipt['ignored_line_tails'] = record['inspection']['ignored_line_tails']
         return PotentialBinding(pin, files, commands, receipt)
 
 

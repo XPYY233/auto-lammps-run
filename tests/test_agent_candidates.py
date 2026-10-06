@@ -184,6 +184,31 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertEqual(self.calls.history()[0]['receipt']['structured_output'], self.value)
         self.assertFalse((self.root / 'candidates').exists())
 
+    def test_eam_alloy_uses_ordinary_candidate_service_without_changing_element_order(self):
+        import test_eam_potentials as fixture
+        from test_structures import EXPLICIT
+        source = self.root / 'source'
+        (source / fixture.FILES['model']).write_bytes(fixture.MODEL)
+        pin = self.catalog.import_model(source, metadata=fixture.METADATA, files=fixture.FILES)
+        self.value['potential_pin'] = pin
+        self.value['structure'] = deepcopy(EXPLICIT)
+        self.value['structure'].update(site_elements=['Co','Cr','Ni'], type_elements=['Co','Cr','Ni'],
+                                       masses_amu=[58.93,52.00,58.69])
+        self.adapter = PotentialAdapter(self.catalog, allowed_pins=[pin], software_sha256='b'*64,
+                                        packages=['MANYBODY'])
+        with patch('subprocess.Popen', side_effect=AssertionError('no local engine')):
+            result = self.generate()
+        result['snapshot'].verify()
+        script = (result['snapshot'].path / 'in.lammps').read_text()
+        self.assertIn('pair_style eam/alloy\n', script)
+        self.assertIn(f'pair_coeff * * potentials/{pin}/model.eam.alloy Co Cr Ni\n', script)
+        self.assertEqual((result['snapshot'].path / f'potentials/{pin}/model.eam.alloy').read_bytes(), fixture.MODEL)
+        receipt = json.loads((result['snapshot'].path / 'generation.json').read_bytes())['potential_receipt']
+        self.assertEqual(receipt['model_element_order'], ['Ni','Co','Cr'])
+        self.assertFalse(receipt['execution_authorized'])
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertIn('eam/alloy', json.loads(self.transport.call_args.args[0])['messages'][1]['content'])
+
     def test_duplicate_and_restart_never_generate_again(self):
         self.generate()
         self.client = DeepSeekClient(ModelCalls.open_existing(self.calls.path), transport=self.transport,

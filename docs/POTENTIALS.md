@@ -1,8 +1,8 @@
 # 势函数资源与适配接口
 
 Issue #21 为产品执行链路增加私人势函数目录和 `resolve_potential` 领域操作。
-当前支持独立 SNAP / qSNAP 与常规 MEAM 文件的静态资源绑定，已接入同一候选生成、资源筛选和准备历史。
-真实自动选择能力、网页资源浏览及计算尚未验收。源码测试库与运行资源目录分别维护；每个资源只接受三个明确角色的文件。
+当前支持独立 SNAP / qSNAP、常规 MEAM 与 EAM/alloy setfl 文件的静态资源绑定，接入同一候选生成、资源筛选和准备历史。
+真实自动选择能力、网页资源浏览及计算尚未验收。源码测试库与运行资源目录分别维护；每个资源只接受对应格式明确的文件角色。
 
 ## 固定资源
 
@@ -24,6 +24,7 @@ python3 -m auto_lammps.potentials --store "$HOME/.local/share/auto-lammps-privat
 usage_evidence, interaction`。`source` 包含 `url, revision, locator`。
 `files` 将 `coefficients, parameters, license` 分别映射到源目录内的安全文件名。
 `snap` 接收 `metal/real` 单位声明；`meam` 使用 `library, parameters, license` 三个角色，目前只接受 `metal`。
+`eam/alloy` 使用 `model, license` 两个角色，只接受已核对来源的 `metal` 单位声明。
 单位必须通过模型来源核对，文件本身不证明其单位。
 `interaction` 为 `standalone/hybrid/unresolved`，不允许静默遗漏额外相互作用。
 
@@ -31,7 +32,7 @@ usage_evidence, interaction`。`source` 包含 `url, revision, locator`。
 
 服务创建 `PotentialAdapter`，配置该任务允许使用的资源摘要、固定软件环境摘要和依赖包声明。
 Agent 提交资源摘要、按原子类型顺序排列的元素与任务单位。接口检查允许列表、文件完整性、
-元素映射、单位、相应包声明（ML-SNAP 或 MEAM）、参数格式以及常规 SNAP / qSNAP 的系数维度。
+元素映射、单位、相应包声明（ML-SNAP、MEAM 或 MANYBODY）、参数格式以及常规 SNAP / qSNAP 的系数维度。
 返回固定文件名下的模型、许可证、两条势函数设置语句和可追溯绑定记录。
 重复元素映射保留原子类型顺序，不排序、不猜测，不接受 NULL 混合映射。
 
@@ -68,6 +69,23 @@ v2 检查保留重复赋值的顺序与行号，零原子序号作为提示保�
 包清单仍是部署声明，静态检查不证明特定引擎版本兼容、势函数适用或物理结果正确。这个适配层不改写
 作者计算工作流，不将候选生成的输入用于 A；A 仍直接运行经核对的作者入口与原配置。
 合成测试覆盖索引/映射差异、文件破坏、缺包拒绝、旧 SNAP 摘要稳定，以及同一候选服务的历史和重启复用。
+
+## EAM/alloy 文件与映射
+
+按 [LAMMPS EAM 文档](https://docs.lammps.org/pair_eam.html)（2026-10-06 核对）检查
+setfl 的三行注释、元素数与文件顺序、密度/距离网格、逐元素原子头、嵌入能/密度表及
+对称元素对表。数组必须齐全，数值有限；保留全部原字节和许可证据。
+按 [LAMMPS 固定版本读取器](https://github.com/lammps/lammps/blob/stable_2Aug2023_update4/src/text_file_reader.cpp)
+的行读取语义处理数组：到达声明个数后，末行多余项不移入下一数组；保留这些项并在
+静态记录中列出数组、行号和忽略个数。所有项仍检查为有限数值；额外独立行、截断或
+未声明表仍拒绝，不靠改写势函数文件通过检查。
+原子头中的零晶格常数及 dummy 标签按引擎文档保留，不能据此判断模型失效。
+
+文件元素顺序和模拟原子类型顺序分别记录。例如文件为 Ni、Co、Cr，而原子类型为
+Co、Cr、Ni 时，生成 `pair_style eam/alloy` 与按 Co、Cr、Ni 排列的 `pair_coeff`。
+无需使用文件中全部元素，重复类型映射可保留；不接受 NULL 或未声明元素。
+没有 MANYBODY 部署声明时拒绝绑定，不从文件后缀猜测为 funcfl、eam/fs、eam/cd 或混合势。
+新资源仍需来源、许可和环境审查；此静态绑定不是模型适用性或新论文复现通过。
 
 ## 旧参数的明确适配
 
