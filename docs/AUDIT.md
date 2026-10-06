@@ -1347,3 +1347,11 @@ GitHub 连接器写协作评论返回 integration 403，改用既有已授权 CL
 
 新增资源接口检查首次暴露测试缺少 hashlib 导入；补测试导入后再核对，产品解析器
 行为未受影响。已有回答作为只读验收样本，不重新收费生成回答。
+
+#155 Markdown installed acceptance: 748 Python checks pass (8 optional skips),
+60 JavaScript checks pass, and public-tree inspection passes. The actual installed
+application renders the two existing saved answers as 9 headings, 4 tables and
+61 formula nodes, with no formula error nodes. Browser acceptance preserves
+original numeric values and recorded model history; no new API or HPC request.
+A restored browser handle was stale after session cleanup; a fresh app tab was
+used without altering the task. PAB preparation remains incomplete.
