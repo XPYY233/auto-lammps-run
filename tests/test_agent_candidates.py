@@ -57,6 +57,31 @@ class AgentCandidateTests(unittest.TestCase):
         return generate_candidate_draft(self.client, self.adapter, task_text='Synthetic permitted task; no expected answer.',
                                         units='metal', resources=self.resources, store=self.root / 'candidates')
 
+    def test_failure_repair_keeps_hashed_context_and_dispatch_contract_valid(self):
+        from auto_lammps.authorization import candidate_check
+        from auto_lammps.manifest import canonical, sha256
+        diagnosis = {'summary': 'Synthetic failure', 'evidence': ['ERROR: synthetic failure'],
+                     'cause': 'Synthetic fixture', 'repair': 'Preserve this synthetic plan',
+                     'proposed_lesson': 'Unverified synthetic lesson'}
+        calls = ModelCalls(self.root / 'recovery-models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=3)
+        transport = Mock(side_effect=[(200, response(self.value)), (200, response(diagnosis)),
+                                      (200, response(self.value))])
+        client = DeepSeekClient(calls, transport=transport, key_reader=lambda: 'synthetic-key')
+        previous = client.complete_json('a' * 32, [{'role': 'user', 'content': 'JSON fixture'}])
+        evidence = {'condition_sha256': 'a' * 64, 'request_id': 'synthetic-failed',
+                    'logs': [{'tail': 'ERROR: synthetic failure'}]}
+        result = generate_candidate_draft(client, self.adapter, task_text='Synthetic recovery only',
+            units='metal', resources=self.resources, store=self.root / 'recovered',
+            condition_record_sha256='a' * 64, previous_proposal=previous,
+            failure_context=evidence, require_analysis_plan=True)
+        saved = json.loads((result['snapshot'].path / 'generation.json').read_text())
+        self.assertEqual(saved['request_id'], sha256(canonical(saved['input']))[:32])
+        self.assertEqual(len(saved['input']['messages']), 2)
+        self.assertEqual(saved['failure_recovery']['validation_status'], 'proposed_not_verified')
+        self.assertEqual(saved['proposal'], self.value)
+        self.assertEqual(candidate_check(result['snapshot'], max_atoms=100000)['scientific_status'], 'not_evaluated')
+        self.assertIn('Revise this SAME proposal', transport.call_args_list[-1].args[0].decode())
+
     def test_typed_analysis_plan_is_bound_into_generated_snapshot(self):
         from test_analysis import PLAN
         self.value['analysis']={'quantity':'synthetic curve','method':'frozen synthetic arithmetic',
@@ -141,7 +166,7 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 13)
+        self.assertEqual(record['input']['generator_version'], 14)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)

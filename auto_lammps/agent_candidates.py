@@ -19,7 +19,7 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 13
+GENERATOR_VERSION = 14
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -488,7 +488,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         from .failure_recovery import diagnose
         recovery=diagnose(client,failure_context,proposal,on_stage=on_stage)
         receipts.append(recovery['receipt'])
-        messages += [{'role':'assistant','content':canonical(proposal).decode()},
+        # Keep the hashed generation context immutable: messages is also stored
+        # in context and in-place append would change its identity afterwards.
+        messages = messages + [{'role':'assistant','content':canonical(proposal).decode()},
             {'role':'user','content':'Revise this SAME proposal using your diagnosis of its verified failed execution. '
              'Keep all frozen scientific conditions, sizes, potential and outputs. Make the minimal necessary '
              'correction, check the complete subsequent stages too, and return the complete proposal JSON. '
