@@ -64,6 +64,19 @@ class ReaderTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.reader = SlurmReader('test-login', self.root / 'audit')
 
+    def test_fast_terminal_requires_accepted_receipt_and_exact_accounting_identity(self):
+        reader=SlurmReader('test-login',self.root/'fast',retain_queue_identity=True,
+            accepted_receipt=lambda r,m:dict(job_id='123',evidence_sha256='e'*64))
+        value,proof=reader._accounting_identity('',account(comment=''),REQUEST,MANIFEST,'')
+        self.assertEqual(interpret('',value,REQUEST,MANIFEST).state,'completed')
+        self.assertEqual(proof,'e'*64)
+        for raw in [account(job='124',comment=''),account(comment='wrong'),account(comment='',restarts='1'),account(comment='')+account(comment='')]:
+            value,_=reader._accounting_identity('',raw,REQUEST,MANIFEST,'')
+            self.assertEqual(interpret('',value,REQUEST,MANIFEST).state,'unknown')
+        reader.accepted_receipt=lambda r,m:None
+        value,_=reader._accounting_identity('',account(comment=''),REQUEST,MANIFEST,'')
+        self.assertEqual(interpret('',value,REQUEST,MANIFEST).state,'unknown')
+
     def fake_capture(self, argv, **kwargs):
         self.assertIn('StrictHostKeyChecking=yes', argv)
         self.assertIn('BatchMode=yes', argv)

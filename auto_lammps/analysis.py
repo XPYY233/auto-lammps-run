@@ -16,9 +16,12 @@ from .slurm_read import _write_new
 
 VERSION = 1
 UNITS = {'1','step','K','bar','atm','Pa','MPa','GPa','eV','kcal/mol',
-         'angstrom','angstrom^2','nm','nm^2','ps','fs','g/cm^3'}
+         'eV/angstrom','angstrom','angstrom^2','nm','nm^2','ps','fs','g/cm^3'}
 MAX_TABLE_BYTES = 8*1024*1024
 MAX_ROWS = 100000
+# 契约上限：校验器与候选提示词共用同一来源，禁止在提示词里手写副本（防漂移）。
+MAX_TABLES, MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS = 16, 2, 16, 32
+METHODS = ('summary', 'last', 'linear_fit')
 
 
 def adapter_identity():
@@ -48,7 +51,7 @@ def validate_plan(plan, files):
     if not isinstance(plan,dict) or set(plan) != {'tables','operations'}:
         raise AnalysisError('Explicit analysis tables and operations are required')
     tables,operations=plan['tables'],plan['operations']
-    if not isinstance(tables,list) or not 1 <= len(tables) <= 16:
+    if not isinstance(tables,list) or not 1 <= len(tables) <= MAX_TABLES:
         raise AnalysisError('Declare one to sixteen analysis tables')
     declared={}
     for table in tables:
@@ -59,7 +62,7 @@ def validate_plan(plan, files):
                 or name not in files or name in declared):
             raise AnalysisError('Analysis must use a distinct declared output file')
         columns=table['columns']
-        if not isinstance(columns,list) or not 2 <= len(columns) <= 16:
+        if not isinstance(columns,list) or not MIN_COLUMNS <= len(columns) <= MAX_COLUMNS:
             raise AnalysisError('Declare two to sixteen labeled columns')
         names=set()
         for column in columns:
@@ -70,14 +73,14 @@ def validate_plan(plan, files):
                 raise AnalysisError('Duplicate column or unsupported unit')
             names.add(column['name'])
         declared[name]=names
-    if not isinstance(operations,list) or not 1 <= len(operations) <= 32:
+    if not isinstance(operations,list) or not 1 <= len(operations) <= MAX_OPERATIONS:
         raise AnalysisError('Declare one to thirty-two analysis operations')
     ids=set()
     for operation in operations:
         if not isinstance(operation,dict) or set(operation) != {'id','method','file','x','y','window'}:
             raise AnalysisError('Invalid analysis operation')
         _name(operation['id'])
-        if operation['id'] in ids or operation['method'] not in ('summary','last','linear_fit'):
+        if operation['id'] in ids or operation['method'] not in METHODS:
             raise AnalysisError('Duplicate operation or unsupported analysis method')
         ids.add(operation['id'])
         if not isinstance(operation['file'],str) or operation['file'] not in declared:

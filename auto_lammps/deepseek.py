@@ -9,12 +9,14 @@ from datetime import datetime, timezone
 import http.client
 import json
 import os
+import time
 from pathlib import Path
 import re
 import sqlite3
 import stat
 
 from .manifest import canonical, private_directory, sha256
+from .tls_context import ssl_context
 
 APP_ID = 0x414C4D43
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -50,12 +52,12 @@ class DeepSeekConfig:
     def __post_init__(self):
         if not isinstance(self.model, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', self.model):
             raise ModelError('invalid_model')
-        for value, limit in ((self.max_output_tokens, 32768), (self.max_input_bytes, 262144), (self.timeout_seconds, 120)):
+        for value, limit in ((self.max_output_tokens, 131072), (self.max_input_bytes, 262144), (self.timeout_seconds, 600)):
             if type(value) is not int or not 1 <= value <= limit:
                 raise ModelError('invalid_model_limits')
 
 
-def request_body(config, messages):
+def request_body(config, messages, model=None, *, thinking=False, reasoning_effort=None):
     if not isinstance(messages, list) or not messages or len(messages) > 32:
         raise ModelError('invalid_messages')
     for message in messages:
@@ -65,9 +67,13 @@ def request_body(config, messages):
             raise ModelError('invalid_messages')
     if not any('json' in item['content'].lower() for item in messages):
         raise ModelError('json_instruction_required')
-    body = canonical(dict(model=config.model, messages=messages, stream=False,
-                          thinking={'type': 'disabled'}, max_tokens=config.max_output_tokens,
-                          response_format={'type': 'json_object'}))
+    payload = dict(model=model or config.model, messages=messages, stream=False,
+                   thinking={'type': 'enabled' if thinking else 'disabled'}, max_tokens=config.max_output_tokens,
+                   response_format={'type': 'json_object'})
+    if reasoning_effort is not None:
+        if reasoning_effort not in {'low','high','max'}: raise ModelError('invalid_reasoning_effort')
+        if thinking: payload['reasoning_effort'] = reasoning_effort
+    body = canonical(payload)
     if len(body) > config.max_input_bytes:
         raise ModelError('input_too_large')
     return body
@@ -75,12 +81,30 @@ def request_body(config, messages):
 
 def https_transport(body, key, timeout):
     """Fixed official host; no redirects, proxy discovery or automatic retries."""
-    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout)
+    try:
+        context = ssl_context()
+    except OSError:
+        raise ModelError('model_tls_trust_unavailable') from None
+    deadline = time.monotonic() + timeout
+    connection = http.client.HTTPSConnection('api.deepseek.com', timeout=timeout, context=context)
     try:
         connection.request('POST', '/chat/completions', body=body,
                            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
+        sock = connection.sock
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0: raise TimeoutError('model response deadline')
+            sock.settimeout(value)
+        remaining()
         response = connection.getresponse()
-        content = response.read(MAX_RESPONSE_BYTES + 1)
+        chunks, size = [], 0
+        while size <= MAX_RESPONSE_BYTES:
+            if response.isclosed(): break
+            remaining()
+            chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - size))
+            if not chunk: break
+            chunks.append(chunk); size += len(chunk)
+        content = b''.join(chunks)
         if len(content) > MAX_RESPONSE_BYTES:
             raise ModelError('response_too_large')
         return response.status, content
@@ -119,7 +143,8 @@ class ModelCalls:
             db.execute('CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL, at TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY REFERENCES calls(id), document TEXT NOT NULL)')
-            for table in ('policy', 'calls', 'receipts'):
+            db.execute('CREATE TABLE IF NOT EXISTS policy_revisions (seq INTEGER PRIMARY KEY, document TEXT NOT NULL, previous_sha256 TEXT NOT NULL, reason_sha256 TEXT NOT NULL, at TEXT NOT NULL)')
+            for table in ('policy', 'policy_revisions', 'calls', 'receipts'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable model accounting'); END")
@@ -130,6 +155,28 @@ class ModelCalls:
                 raise ModelError('model_policy_mismatch')
             db.execute(f'PRAGMA application_id={APP_ID}')
             db.execute('PRAGMA user_version=1')
+            latest=db.execute('SELECT document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
+            if latest:
+                self.config=DeepSeekConfig(**json.loads(latest[0])['config'])
+
+    def amend_limits(self, config, *, reason_sha256):
+        """Administrator-approved append-only per-call limits; no allowance reset."""
+        if not isinstance(config,DeepSeekConfig) or config.model!=self.config.model:
+            raise ModelError('limits_amendment_cannot_change_model')
+        if not isinstance(reason_sha256,str) or not re.fullmatch('[a-f0-9]{64}',reason_sha256):
+            raise ModelError('limits_amendment_requires_evidence')
+        with self.transaction() as db:
+            row=db.execute('SELECT seq,document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
+            previous=row[1] if row else db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0]
+            policy=json.loads(previous)
+            if policy['config']!=asdict(self.config):
+                raise ModelError('model_policy_changed_reload_before_amendment')
+            policy['config']=asdict(config)
+            document=canonical(policy).decode()
+            if document!=previous:
+                db.execute('INSERT INTO policy_revisions VALUES (?,?,?,?,?)',
+                    ((row[0]+1) if row else 1,document,sha256(previous.encode()),reason_sha256,datetime.now(timezone.utc).isoformat()))
+        self.config=config
 
     @contextmanager
     def transaction(self):
@@ -210,6 +257,34 @@ class ModelCalls:
                     receipt=json.loads(row[1]) if row[1] else None)
 
 
+def lenient_json(text):
+    """Parse JSON that is valid except for raw control characters inside strings.
+
+    Models routinely embed a multi-line LAMMPS script in a JSON string and emit real
+    newlines instead of \n escapes. Escaping those characters inside string literals
+    changes no content and recovers the object the model meant; the strict parser is
+    still tried first and nothing else is relaxed.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                out.append(char); escaped = False; continue
+            if char == '\\':
+                out.append(char); escaped = True; continue
+            if char == '"':
+                out.append(char); in_string = False; continue
+            if char == '\n': out.append('\\n'); continue
+            if char == '\r': out.append('\\r'); continue
+            if char == '\t': out.append('\\t'); continue
+            if ord(char) < 0x20: out.append('\\u%04x' % ord(char)); continue
+            out.append(char); continue
+        out.append(char)
+        if char == '"': in_string = True
+    return strict_json(''.join(out))
+
 def parse_completion(content):
     data = strict_json(content)
     if not isinstance(data, dict):
@@ -224,7 +299,11 @@ def parse_completion(content):
     if (not isinstance(message, dict) or message.get('role') != 'assistant' or message.get('tool_calls')
             or not isinstance(message.get('content'), str) or not message['content'].strip()):
         raise ModelError('empty_or_unexpected_output')
-    value = strict_json(message['content'])
+    try:
+        value = strict_json(message['content'])
+    except ModelError:
+        # 多行工作流被写成裸换行是常见近似错误；容错解析不改变任何内容。
+        value = lenient_json(message['content'])
     if not isinstance(value, dict):
         raise ModelError('json_object_required')
     return value
@@ -247,14 +326,22 @@ def usage_from_response(content):
 
 
 class DeepSeekClient:
-    def __init__(self, calls, *, transport=https_transport, key_reader=None):
+    def __init__(self, calls, *, transport=https_transport, key_reader=None, model=None, thinking=False):
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,100}', model)):
+            raise ModelError('invalid_model')
+        if type(thinking) is not bool:
+            raise ModelError("invalid_thinking_mode")
+        self.thinking = thinking
         self.calls, self.transport = calls, transport
         self.key_reader = key_reader or (lambda: os.environ.get('DEEPSEEK_API_KEY'))
+        # The runtime route may name a model chosen in the product settings; the
+        # receipt always records the model actually requested.
+        self.model = model or calls.config.model
 
-    def complete_json(self, identifier, messages):
-        body = request_body(self.calls.config, messages)
+    def complete_json(self, identifier, messages, *, reasoning_effort=None):
+        body = request_body(self.calls.config, messages, model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort)
         self.calls.reserve(identifier, body)
-        receipt = dict(provider='deepseek', requested_model=self.calls.config.model,
+        receipt = dict(provider='deepseek', requested_model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort,
                        request_sha256=sha256(body), state='not_sent', usage=None,
                        http_status=None, response_sha256=None, output_sha256=None)
         try:
@@ -263,6 +350,8 @@ class DeepSeekClient:
                     or any(ord(char) < 33 or ord(char) > 126 for char in key)):
                 raise ModelError('model_key_missing_or_invalid')
             receipt['state'] = 'unknown'
+            # A timeout does not prove the provider did not run/bill the call.
+            receipt['transport_attempts'] = 1
             status, content = self.transport(body, key, self.calls.config.timeout_seconds)
             if type(status) is not int or not isinstance(content, bytes) or len(content) > MAX_RESPONSE_BYTES:
                 raise ModelError('invalid_transport_response')
@@ -279,7 +368,7 @@ class DeepSeekClient:
             safe = str(exc) if type(exc) is ModelError and str(exc) in {
                 'model_key_missing_or_invalid', 'invalid_transport_response', 'provider_request_failed',
                 'invalid_json', 'invalid_response', 'incomplete_generation', 'empty_or_unexpected_output',
-                'json_object_required', 'response_too_large'} else 'model_transport_unknown'
+                'json_object_required', 'response_too_large', 'model_tls_trust_unavailable'} else 'model_transport_unknown'
             receipt['error'] = safe
             self.calls.record(identifier, receipt)
             raise ModelError(safe) from None

@@ -43,6 +43,30 @@ class SlurmSubmitter:
     def prepare(self, submission: Submission):
         self._reserved(submission, {'prepared'})
 
+    def accepted_identity(self, request_id, manifest_sha256):
+        """Prove an accepted job even if it finishes before the first queue query."""
+        from .runtime_launcher import read_regular
+        from .manifest import sha256
+        identity(request_id,manifest_sha256)
+        row=self.ledger.get(request_id)
+        if not row['dispatch_claimed'] or not row['job_id']:return None
+        if row['manifest_sha256']!=manifest_sha256:raise ValueError('Manifest binding changed')
+        events=[e for e in self.ledger.events(request_id) if e['kind']=='scheduler_accepted']
+        if len(events)!=1:return None
+        saved=events[0]['payload']
+        if isinstance(saved,str):saved=json.loads(saved)
+        proof=saved.get('evidence',{}).get('evidence_sha256')
+        if not proof:return None
+        raw=read_regular(self.audit_directory/request_id/'result.json',1000000,private=True)
+        if sha256(raw)!=proof:raise ValueError('Acceptance receipt changed')
+        result=json.loads(raw)
+        receipt=json.loads(base64.b64decode(result['stdout'],validate=True))
+        if (result['failure'] or result['returncode']!=0 or receipt.get('state')!='accepted'
+                or receipt.get('request_id')!=request_id or receipt.get('manifest_sha256')!=manifest_sha256
+                or receipt.get('job_id')!=row['job_id'] or saved['job_id']!=row['job_id']):
+            raise ValueError('Acceptance identity mismatch')
+        return dict(job_id=row['job_id'],evidence_sha256=proof)
+
     def submit(self, submission: Submission):
         row = self._reserved(submission, {'dispatching'})
         if not row['dispatch_claimed']:

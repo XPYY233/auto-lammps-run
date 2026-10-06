@@ -13,6 +13,10 @@ from .runtime_launcher import hash_value
 from .tasks import TaskError, StaleTask
 
 
+# Stable v1 enrollment protocol; implementation fixes must not create new evaluations.
+ENROLLMENT_PROTOCOL_SHA256 = '93a0a63b88a8703116b40fa2a9aaf978adf3efc39182417c52bbb635b29846a8'
+
+
 class ResearchEnrollment:
     def __init__(self,tasks,ledger,*,campaign,system_sha256,policy_sha256):
         if not isinstance(campaign,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',campaign):
@@ -20,9 +24,12 @@ class ResearchEnrollment:
         hash_value(system_sha256);hash_value(policy_sha256)
         self.tasks,self.ledger=tasks,ledger
         self.identity=dict(campaign=campaign,system_sha256=system_sha256,policy_sha256=policy_sha256,
-                           role='agent',repetition=0,max_attempts=2,source_sha256=sha256(Path(__file__).read_bytes()))
+                           role='agent',repetition=0,max_attempts=2,source_sha256=ENROLLMENT_PROTOCOL_SHA256)
         self.digest=sha256(canonical(self.identity));self.history=CandidateHistory(tasks)
         self._check_policy()
+        from .resource_limits import TASK_CPU_CORE_SECONDS, APPROVAL_SHA256
+        self.ledger.approve_task_resource_limit(campaign, TASK_CPU_CORE_SECONDS,
+                                               approval_sha256=APPROVAL_SHA256)
         with tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS research_execution_bindings ('
                        'task_id TEXT PRIMARY KEY REFERENCES tasks(id), revision INTEGER NOT NULL, '
@@ -44,9 +51,21 @@ class ResearchEnrollment:
             self.tasks._read(db,identifier)
             row=db.execute('SELECT * FROM research_execution_bindings WHERE task_id=?',(identifier,)).fetchone()
         if row is None:return None
-        if row['scope_sha256']!=self.digest:
+        if not self._matches_policy_scope(row):
             raise TaskError('此任务已经绑定其他计算授权，不能重新登记。')
         return dict(row)
+
+    def _matches_policy_scope(self,row):
+        """Approved policy amendments preserve original enrollment, never reset it."""
+        if row['scope_sha256']==self.digest:return True
+        with self.ledger._transaction() as db:
+            policies=[r[0] for r in db.execute('SELECT policy FROM campaigns WHERE id=?',
+                (self.identity['campaign'],))]
+            policies += [r[0] for r in db.execute('SELECT policy FROM campaign_policy_revisions WHERE campaign=?',
+                (self.identity['campaign'],))]
+        import json
+        return any(sha256(canonical({**self.identity,'policy_sha256':sha256(canonical(json.loads(p)))}))
+                   ==row['scope_sha256'] for p in policies)
 
     def register(self,identifier,revision):
         inputs=research_inputs(self.tasks,identifier,revision)
@@ -56,7 +75,7 @@ class ResearchEnrollment:
             if task['revision']!=revision:raise StaleTask('任务已变化，请刷新后再生成。')
             row=db.execute('SELECT * FROM research_execution_bindings WHERE task_id=?',(identifier,)).fetchone()
             if row:
-                if (row['scope_sha256']!=self.digest or row['revision']!=revision or
+                if (not self._matches_policy_scope(row) or
                         row['condition_sha256']!=inputs['condition_record_sha256']):
                     raise TaskError('任务与原计算登记不一致，不能重置提交次数。')
                 return row['evaluation']

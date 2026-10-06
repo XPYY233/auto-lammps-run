@@ -105,6 +105,33 @@ class LedgerTests(unittest.TestCase):
             same.register_evaluation('campaign', task_sha256=H1, repetition=0,
                                      role='agent', system_sha256=H2, max_attempts=1)
 
+    def test_task_cap_counts_failures_across_versions_without_resetting_identity(self):
+        self.ledger.approve_task_resource_limit('campaign', 30, approval_sha256=H3)
+        row = self.accepted_job()
+        self.ledger.observe(row['id'], '101', 'failed', {'synthetic': True})
+        self.ledger.account(row['id'], 15, H3)
+        with self.assertRaisesRegex(LimitExceeded, 'Task cumulative'):
+            self.reserve('retry')
+        another_version = self.register(repetition=1)
+        with self.assertRaisesRegex(LimitExceeded, 'Task cumulative'):
+            self.reserve('new-version', evaluation=another_version)
+        different = self.ledger.register_evaluation('campaign', task_sha256=H2,
+                    repetition=0, role='agent', system_sha256=H2)
+        self.reserve('different-task', evaluation=different)
+        state = self.ledger.evaluation_snapshot(self.evaluation)
+        self.assertEqual(state['dispatch_claims'], 1)
+        self.assertEqual(state['task_resource_limit']['remaining_core_seconds'], 15)
+        self.assertEqual(self.register(), self.evaluation)
+        with self.ledger._transaction() as db, self.assertRaises(sqlite3.IntegrityError):
+            db.execute('DELETE FROM task_resource_limits')
+
+    def test_new_task_cap_blocks_old_undispatched_reservation(self):
+        row = self.reserve()
+        self.ledger.approve_task_resource_limit('campaign', 19, approval_sha256=H3)
+        with self.assertRaisesRegex(LimitExceeded, 'Task cumulative'):
+            self.ledger.begin_dispatch(row['id'])
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['dispatch_claims'], 0)
+
     def test_reference_continuation_retains_failures_and_cannot_extend_agent(self):
         reference = self.register(role='reference')
         self.ledger.approve_week_one_third_attempt(reference, approval_sha256=H1)

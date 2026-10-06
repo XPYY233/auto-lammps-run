@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import ssl
 import unittest
 from unittest.mock import Mock, patch
 
@@ -24,6 +25,22 @@ def response(value=None, **changes):
 
 
 class DeepSeekTests(unittest.TestCase):
+    def test_limit_amendment_is_append_only_and_keeps_costs(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'model.sqlite'
+            calls=ModelCalls(path,DeepSeekConfig('synthetic-model'),max_requests=2)
+            calls.reserve('a'*32,b'first request')
+            calls.amend_limits(replace(calls.config,max_output_tokens=16384),reason_sha256='b'*64)
+            reopened=ModelCalls.open_existing(path)
+            self.assertEqual(reopened.config.max_output_tokens,16384)
+            self.assertEqual(reopened.status()['remaining_requests'],1)
+            with reopened.transaction() as db:
+                base=json.loads(db.execute('SELECT document FROM policy').fetchone()[0])
+                self.assertEqual(base['config']['max_output_tokens'],4096)
+                self.assertEqual(db.execute('SELECT count(*) FROM calls').fetchone()[0],1)
+                with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM policy_revisions')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -63,6 +80,16 @@ class DeepSeekTests(unittest.TestCase):
             DeepSeekClient(reopened, transport=self.transport).complete_json('a'*32, MESSAGES)
         self.assertEqual(self.transport.call_count, 1)
 
+    def test_explicit_thinking_mode_preserves_accounting_and_json(self):
+        client=self.client(1)
+        client.thinking=True
+        result=client.complete_json('b'*32, MESSAGES)
+        body=json.loads(self.transport.call_args.args[0])
+        self.assertEqual(body['thinking'], {'type':'enabled'})
+        self.assertEqual(body['response_format'], {'type':'json_object'})
+        self.assertTrue(result['receipt']['thinking'])
+        self.assertEqual(self.calls.status()['remaining_requests'],0)
+
     def test_concurrent_workers_share_last_request_slot(self):
         self.client(1)
         def execute(index):
@@ -89,6 +116,7 @@ class DeepSeekTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelError, 'request_already_reserved'):
             client.complete_json('a'*32, MESSAGES)
         self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(history[0]['receipt']['transport_attempts'], 1)
 
     def test_rejection_body_and_missing_key_do_not_leak(self):
         client = self.client(2, transport=Mock(return_value=(401, b'SECRET_CANARY')))
@@ -142,12 +170,42 @@ class DeepSeekTests(unittest.TestCase):
         self.assertEqual(self.calls.history(), [])
         self.transport.assert_not_called()
 
+    def test_keepalive_cannot_extend_total_response_deadline(self):
+        with patch('auto_lammps.deepseek.http.client.HTTPSConnection') as connection, patch('auto_lammps.deepseek.time.monotonic',side_effect=[0,1,2,31]):
+            stream=connection.return_value.getresponse.return_value
+            stream.isclosed.return_value=False
+            stream.read1.return_value=b' '
+            with self.assertRaises(TimeoutError):https_transport(b'{}','synthetic-key',30)
+            self.assertEqual(stream.read1.call_count,1)
+            connection.return_value.close.assert_called_once()
+
     def test_fixed_https_transport_does_not_follow_redirects(self):
         with patch('auto_lammps.deepseek.http.client.HTTPSConnection') as connection:
             stream = connection.return_value.getresponse.return_value
             stream.status = 307
-            stream.read.return_value = b'redirect'
+            stream.isclosed.return_value = False
+            stream.read1.side_effect = [b'redirect',b'']
             self.assertEqual(https_transport(b'{}', 'synthetic-key', 30), (307, b'redirect'))
-            connection.assert_called_once_with('api.deepseek.com', timeout=30)
-            stream.read.assert_called_once_with(MAX_RESPONSE_BYTES+1)
+            # The fixed host is still the only target, and the connection now carries
+            # a verifying TLS context instead of relying on an implicit default.
+            connection.assert_called_once_with('api.deepseek.com', timeout=30,
+                                               context=connection.call_args.kwargs['context'])
+            self.assertEqual(connection.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
+            self.assertEqual(stream.read1.call_count,2)
             connection.return_value.close.assert_called_once()
+
+class LenientJsonTests(unittest.TestCase):
+    """字符串内的裸换行（模型写多行脚本时常见）应被容错解析，其他错误不放宽。"""
+
+    def test_raw_newline_inside_string_is_escaped(self):
+        from auto_lammps.deepseek import lenient_json
+        text = '{"workflow": "minimize 1e-10 1e-10\nrun 0", "ok": 1}'
+        # 上面的字面量本就是合法转义；这里构造真正的裸换行
+        raw = '{"workflow": "line one' + chr(10) + 'line two", "ok": 1}'
+        self.assertEqual(lenient_json(raw)['workflow'], 'line one' + chr(10) + 'line two')
+
+    def test_other_malformed_json_still_raises(self):
+        from auto_lammps.deepseek import ModelError, lenient_json
+        with self.assertRaises(ModelError):
+            lenient_json('{"a": ')
+

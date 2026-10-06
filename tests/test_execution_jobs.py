@@ -56,6 +56,67 @@ class ExecutionJobTests(unittest.TestCase):
             self.assertEqual((self.f.upload.call_count,self.f.dispatch.call_count,self.f.download.call_count),(1,1,1))
         self.assertFalse(self.jobs.thread.is_alive())
 
+    def fail_first(self):
+        self.enqueue()
+        ledger=self.f.ledger;rid=self.f.request_id
+        ledger.begin_dispatch(rid);ledger.accepted(rid,'123',{})
+        ledger.observe(rid,'123','failed',{})
+        ledger.account(rid,core_seconds=0,evidence_sha256='a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+
+    def test_explicit_retry_preserves_plan_identity_and_survives_restart(self):
+        self.fail_first()
+        self.assertTrue(self.jobs.status(self.task)['job']['can_retry'])
+        first=self.jobs.retry(self.task,self.revision)
+        second=self.jobs.retry(self.task,self.revision)
+        rid=first['job']['request_id'];self.assertEqual(rid,second['job']['request_id'])
+        self.assertNotEqual(rid,self.f.request_id)
+        self.assertEqual(first['job']['dispatch_count'],1)
+        reopened=self.service()
+        plan=self.f.controller.prepare(self.task,self.f.evaluation,retry_after=reopened.retry_parent(self.task))
+        self.assertEqual(plan['row']['id'],rid)
+        self.assertEqual(plan['snapshot'].digest,self.f.plan['snapshot'].digest)
+        self.f.ledger.begin_dispatch(rid);self.f.ledger.accepted(rid,'124',{})
+        self.f.ledger.observe(rid,'124','failed',{});self.f.ledger.account(rid,core_seconds=0,evidence_sha256='a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        self.f.ledger.approve_development_third_attempt(self.f.evaluation,approval_sha256='e'*64)
+        self.f.ledger.approve_development_third_attempt(self.f.evaluation,approval_sha256='e'*64)
+        third=self.jobs.retry(self.task,self.revision)
+        self.assertEqual(third['job']['max_attempts'],3)
+        self.assertEqual(third['job']['dispatch_count'],2)
+        rid3=third['job']['request_id'];self.assertNotEqual(rid,rid3)
+        self.f.ledger.begin_dispatch(rid3);self.f.ledger.accepted(rid3,'125',{})
+        self.f.ledger.observe(rid3,'125','failed',{});self.f.ledger.account(rid3,0,'a'*64)
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        snap=self.f.ledger.evaluation_snapshot(self.f.evaluation)
+        self.assertEqual(snap['original_max_attempts'],2)
+        self.assertEqual(snap['attempt_scope'],'development_validation')
+        self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='f'*64)
+        self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='f'*64)
+        with self.assertRaises(execution.Conflict):
+            self.f.ledger.approve_development_fourth_attempt(self.f.evaluation,approval_sha256='a'*64)
+        fourth=self.jobs.retry(self.task,self.revision)
+        self.assertEqual(fourth['job']['max_attempts'],4)
+        rid4=fourth['job']['request_id'];self.assertNotEqual(rid3,rid4)
+        self.f.ledger.begin_dispatch(rid4);self.f.ledger.accepted(rid4,'126',{})
+        self.f.ledger.observe(rid4,'126','failed',{});self.f.ledger.account(rid4,0,'a'*64)
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_failure')
+        self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+
+    def test_retry_rejects_unknown_or_unaccounted_and_stale_actions(self):
+        self.enqueue()
+        job_id=self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:self.jobs._event(db,job_id,'attention','test_unknown')
+        with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
+        with self.assertRaises(StaleTask):self.jobs.retry(self.task,self.revision-1)
+
     def test_restart_resumes_existing_queued_intent(self):
         self.f.authorize_fixture();self.enqueue();reopened=self.service()
         with self.f.transports():
@@ -94,6 +155,29 @@ class ExecutionJobTests(unittest.TestCase):
         with self.f.transports():
             result=reopened.advance(self.task);self.f.upload.assert_not_called();self.f.dispatch.assert_not_called()
         self.assertEqual(result['job']['reason'],'deployment_changed')
+
+    def test_recheck_worker_repair_keeps_unclaimed_request_and_charge(self):
+        self.enqueue();reopened=self.service();reopened.config_sha256='f'*64
+        before=self.f.ledger.get(self.f.request_id)
+        reopened.advance(self.task)
+        resumed=reopened.recheck(self.task,self.revision)
+        self.assertEqual(resumed['job']['request_id'],self.f.request_id)
+        after=self.f.ledger.get(self.f.request_id)
+        self.assertEqual(after,before)
+        self.assertEqual(resumed['job']['dispatch_count'],0)
+
+    def test_worker_exception_does_not_nest_transaction_or_stop_following(self):
+        self.enqueue();visited=[]
+        def broken_once(identifier):
+            visited.append(identifier)
+            if len(visited)==1:raise TaskError('synthetic binding failure')
+            self.jobs.stop.set();self.jobs.wake.set()
+        with patch.object(self.jobs,'advance',side_effect=broken_once),patch('traceback.print_exc'):
+            self.jobs.wake.set();self.jobs.start();self.jobs.thread.join(3)
+            self.assertFalse(self.jobs.thread.is_alive(),'Worker exception recovery blocked on its own transaction')
+            self.assertGreaterEqual(len(visited),2)
+        self.assertEqual(self.jobs.get(self.task)['reason'],'worker_error_taskerror')
+        self.assertEqual(self.f.ledger.evaluation_snapshot(self.f.evaluation)['dispatch_claims'],0)
 
     def test_concurrent_workers_have_one_dispatch(self):
         self.f.authorize_fixture();self.enqueue();other=self.service();entered=threading.Event();release=threading.Event()

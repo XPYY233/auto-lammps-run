@@ -157,5 +157,16 @@ class ResultsTests(unittest.TestCase):
         link_synthetic_candidate(self.tasks,other,self.analysis.snapshot.digest,'0'*64)
         self.assertEqual(self.client.get('/api/tasks/'+other['id']+'/results').status_code,409)
 
+    def test_iteration_does_not_hide_past_verified_results_or_submission_history(self):
+        self.analysis.run_analysis()
+        before=self.client.get(self.url).json()
+        history=CandidateHistory(self.tasks)
+        job=history.get(self.doc['id'])
+        with self.tasks.transaction() as db:
+            history._event(db,job['id'],'checking_plan',{'message':'Preparing the next version'})
+        after=self.client.get(self.url).json()
+        self.assertEqual(after['evaluations'],before['evaluations'])
+        self.assertEqual(after['scientific_status'],'not_evaluated')
+
 
 if __name__=='__main__':unittest.main()

@@ -70,6 +70,9 @@ def render_batch(submission: Submission, environment: BatchEnvironment):
     if environment.account:
         lines.append(f'#SBATCH --account={environment.account}')
     lines.extend(['set -eu', 'umask 077', 'test -n "${SLURM_JOB_ID:-}" || exit 97',
+                  '# CPU-only policy: reject GPU allocations before launching any simulation.',
+                  'test -z "${SLURM_JOB_GPUS:-}" || exit 96',
+                  'test "${SLURM_GPUS_ON_NODE:-0}" = 0 || exit 96',
                   'exec ' + shlex.join(arguments)])
     data = ('\n'.join(lines) + '\n').encode()
     return BatchPlan(data, sha256(data))
