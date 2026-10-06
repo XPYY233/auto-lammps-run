@@ -36,3 +36,9 @@ test('once the previous action settles a new one runs',async()=>{
   await c.action(async()=>{order.push('second')});
   assert.deepEqual(order,['first','second']);
 });
+test('viewing AI records remains available while a background action is busy',async()=>{
+ let clicks={},reads=0,scrolls=0,mutations=0;const panel={open:false,scrollIntoView(){scrolls++}};
+ const c=vm.createContext({bind:(id,fn)=>clicks[id]=fn,$:()=>panel,refreshActivity:()=>{reads++},action:()=>{mutations++}});
+ vm.runInContext(source.split('\n').find(line=>line.startsWith("bind('open-ai-records',")),c);
+ await clicks['open-ai-records']();assert.equal(panel.open,true);assert.equal(scrolls,1);assert.equal(reads,1);assert.equal(mutations,0);
+});

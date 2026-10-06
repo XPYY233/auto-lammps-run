@@ -685,7 +685,7 @@ function renderCurrentActivity(){
     title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
       (job.state==='analyzed'?'已保存分析结果，请查看下方结果；科学结论仍需核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
-    meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState.worker_alive?'后台正在运行':'后台当前未运行')+' · 调度完成与科学核验分别记录';
+    meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
   }else{
     title.textContent=activityData?.now||'等待准备计算方案';
     detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':'应用按已确认的研究需求组织方案。';
@@ -1647,7 +1647,7 @@ function renderExecutionControls(){
  if(job){
   box.replaceChildren(node('h2','执行进度'));
   const progress=node('ol',undefined,'execution-stages');
-  const index=['collecting','analyzing','analyzed','analysis_failed'].includes(job.state)?3:job.job_id?2:1;
+  const index=job.state==='analyzed'?4:['collecting','analyzing','analysis_failed'].includes(job.state)?3:job.job_id?2:1;
   ['需求已确认','方案确认','HPC 计算','回收与分析'].forEach((label,n)=>{
     const item=node('li',undefined,n<index?'done':n===index?'current':'pending');
     item.append(node('span',n<index?'✓':String(n+1)),node('strong',label));progress.append(item);
@@ -1811,7 +1811,7 @@ const activityPanel=document.getElementById('ai-activity-panel');
 if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)action(refreshActivity);};
 checkForUpdate();setInterval(checkForUpdate,30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkForUpdate();});
-bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-panel').scrollIntoView({block:'start',behavior:'smooth'});action(refreshActivity);});
+bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-panel').scrollIntoView({block:'start',behavior:'smooth'});refreshActivity();});
 bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();action(refreshActivity);});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
