@@ -62,8 +62,9 @@ def official_request(provider, key, method, path, payload=None):
 
 
 class ModelConnections:
-    def __init__(self, tasks, *, transport=official_request, assistant_enabled=False, credentials_directory=None):
+    def __init__(self, tasks, *, transport=official_request, assistant_enabled=False, credentials_directory=None, calls=None):
         self.tasks, self.transport, self.assistant_enabled = tasks, transport, assistant_enabled
+        self.calls=calls
         self.directory = private_directory(Path(credentials_directory) if credentials_directory is not None else tasks.path.parent / 'model-connections')
         with tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY, provider TEXT, event TEXT, at TEXT)')
@@ -202,7 +203,12 @@ class ModelConnections:
             'Reply in concise Chinese using ONLY the supplied verified result data and conversation. '
             'Do not invent numbers, claim new calculations or pretend to have executed tools. '
             'Identify result limitations. No code execution, HPC access or hidden retry is available. '
-            'For new plots, explain which existing data support them; clearly distinguish suggestions from completed plots.')
+            'Use frozen_scientific_conditions for the calculation method and convergence requirements. '
+            'Do not introduce DFT k-points, electronic cutoffs or exchange-correlation functionals for classical LAMMPS potentials. '
+            'If a method or threshold is absent, say it is unknown instead of recommending unrelated defaults. '
+            'Verified current context takes precedence over earlier assistant statements. '
+            'For new plots, explain which existing data support them; clearly distinguish suggestions from completed plots. '
+            'Use LaTeX delimiters \\( ... \\) for inline equations and \\[ ... \\] for display equations.')
         previous = [{'role': role, 'content': text} for item in self.history(identifier)[-9:]
                     if item['id'] != request_id and item['state'] == 'completed'
                     for role, text in [('user', item['question']), ('assistant', item['answer'])]]
@@ -214,8 +220,12 @@ class ModelConnections:
             payload['messages'] = [{'role': 'system', 'content': system}] + messages
             payload['max_completion_tokens' if provider == 'openai' else 'max_tokens'] = 4096
             if provider in {'deepseek-official', 'glm'}: payload['thinking'] = {'type': 'disabled'}
+        reserved=False;sent=False
         try:
             if len(canonical(payload)) > 262144: raise TaskError('结果上下文过大，尚未发送。请下载后分析。')
+            if self.calls is not None and provider=='deepseek-official':
+                self.calls.reserve(request_id,canonical(payload));reserved=True
+            sent=True
             response = self.transport(provider, value['key'], 'POST', PROVIDERS[provider][3], payload)
             answer = ('\n'.join(item['text'] for item in response['content'] if item.get('type') == 'text')
                       if provider == 'anthropic' else response['choices'][0]['message']['content'])
@@ -227,7 +237,10 @@ class ModelConnections:
                      if key in {'input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'} and type(val) is int and val >= 0}
             state = 'completed'
         except Exception:
-            state, answer, usage = 'failed_or_unknown', '请求未完成，未自动重试。请核对模型连接与账户记录。', {}
+            state, answer, usage = ('failed_or_unknown' if sent else 'not_sent'), ('请求未完成，未自动重试。请核对模型连接与账户记录。' if sent else '请求未发送；请核对已批准的模型调用额度及请求记录。'), {}
+        if reserved:
+            self.calls.record(request_id,dict(provider=provider,requested_model=value['model'],state=state,
+                request_sha256=sha256(canonical(payload)),usage=usage,purpose='result_discussion',transport_attempts=1))
         with self.tasks.transaction() as db:
             db.execute('INSERT INTO result_answers VALUES (?,?,?,?)', (request_id, state, answer, json.dumps(usage)))
         return next(item for item in self.history(identifier) if item['id'] == request_id)

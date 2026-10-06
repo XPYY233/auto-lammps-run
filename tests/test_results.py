@@ -73,7 +73,8 @@ class ResultsTests(unittest.TestCase):
             download=self.client.get(self.url+'/'+saved['context']['analysis_id']+'/download')
             self.assertEqual(download.status_code,200)
             self.assertEqual(download.json(),report)
-            for hidden in (str(self.analysis.root),'storage_scope_sha256','payload','job_id','adapter_identity'):
+            self.assertEqual(request['job_id'],self.fixture.ledger.get(self.fixture.request_id)['job_id'])
+            for hidden in (str(self.analysis.root),'storage_scope_sha256','payload','adapter_identity'):
                 self.assertNotIn(hidden,first.text)
                 self.assertNotIn(hidden,download.text)
         self.assertEqual(before,self.fixture.ledger.events(self.fixture.request_id))
@@ -167,6 +168,59 @@ class ResultsTests(unittest.TestCase):
         after=self.client.get(self.url).json()
         self.assertEqual(after['evaluations'],before['evaluations'])
         self.assertEqual(after['scientific_status'],'not_evaluated')
+
+    def test_ordinary_task_list_reuses_execution_evidence_after_preparation(self):
+        self.analysis.run_analysis()
+        row=next(t for t in self.client.get('/api/tasks').json()['tasks'] if t['id']==self.doc['id'])
+        group=self.client.get(self.url).json()['evaluations'][0]
+        self.assertEqual(row['execution_state'],'completed')
+        self.assertEqual(row['submission_count'],group['dispatch_count'])
+        self.assertEqual(row['max_submissions'],group['max_attempts'])
+        self.assertEqual(row['job_id'],group['requests'][0]['job_id'])
+        self.assertEqual(row['scientific_status'],'not_evaluated')
+
+    def test_execution_event_dates_are_iso_timestamps(self):
+        for event in self.request()['history']:
+            parsed=datetime.fromisoformat(event['at'])
+            self.assertIsNotNone(parsed.tzinfo)
+            self.assertGreater(parsed.year,2020)
+
+    def test_result_assistant_receives_frozen_method_and_verified_raw_data(self):
+        from auto_lammps.model_connections import ModelConnections
+        from unittest.mock import Mock
+        self.analysis.run_analysis()
+        transport=Mock(return_value={'choices':[{'message':{'content':'合成答复'}}]})
+        connections=ModelConnections(self.tasks,transport=transport,assistant_enabled=True)
+        connections.save('deepseek-official','synthetic-model','synthetic-key')
+        with TestClient(create_app(self.tasks,results_reader=self.reader,model_connections=connections),base_url=ORIGIN) as client:
+            reply=client.post('/api/tasks/'+self.doc['id']+'/discussion',headers={'Origin':ORIGIN,'X-Task-Review':'1'},
+                json={'request_id':'7'*32,'provider':'deepseek-official','question':'分析已有数据'})
+        self.assertEqual(reply.status_code,200,reply.text)
+        payload=transport.call_args.args[4]
+        context=json.loads(payload['messages'][-1]['content'])['verified_results']
+        self.assertIn('potential',context['frozen_scientific_conditions'])
+        self.assertNotIn('history',context['evaluations'][0]['requests'][0])
+        self.assertTrue(context['source_tables'][0]['tables'][0]['rows'])
+        self.assertNotIn('source_locator',context['frozen_scientific_conditions']['potential'])
+        self.assertIn('classical LAMMPS',payload['messages'][0]['content'])
+
+    def test_source_preview_uses_original_bytes_and_rejects_tamper_and_other_task(self):
+        saved=self.analysis.run_analysis();aid=saved['context']['analysis_id']
+        url=self.url+'/'+aid+'/tables';before=self.fixture.ledger.events(self.fixture.request_id)
+        result=self.client.get(url)
+        self.assertEqual(result.status_code,200,result.text)
+        table=result.json()['tables'][0]
+        self.assertEqual(table['sha256'],sha256(analysis_fixtures.DATA))
+        self.assertEqual(table['rows'][0],[-1,-1])
+        self.assertEqual(table['source_lines'][0],3)
+        self.assertFalse(table['sampled'])
+        other=task_fixtures.frozen_research(self.tasks)
+        self.assertEqual(self.client.get('/api/tasks/'+other['id']+'/results/'+aid+'/tables').status_code,409)
+        source=next((self.analysis.root/'collected').glob('*/payload/output/trajectory.dump'))
+        source.chmod(0o600)
+        source.write_bytes(analysis_fixtures.DATA.replace(b'0 1',b'0 9'))
+        self.assertEqual(self.client.get(url).status_code,409)
+        self.assertEqual(before,self.fixture.ledger.events(self.fixture.request_id))
 
 
 if __name__=='__main__':unittest.main()
