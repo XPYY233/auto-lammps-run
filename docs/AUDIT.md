@@ -1306,3 +1306,20 @@ verify in a new explicit user discussion (no hidden retry or new simulation).
 - 两次用户界面结果讨论均由应用配置的 DeepSeek 返回并进入共同模型用量账本。第一份答复的 DFT 方法误判保留；第二份在冻结方法与阈值上下文中正确更正，并指出空位残余力未达到请求阈值。该更正是实际模型证据，不是开发者替换答案。
 - 结果问题去除重复调度事件作为模型上下文，产品内历史保留；数值、来源与冻结科学条件保留。模型助手目前只解读已有结果，不能冒称已执行后续绘图或工具操作。
 - 三篇 PAB 尚未就绪：已核对本地期刊条目与成套源码候选，匹配到的两条是势函数文献记录，缺作者工作流。正文、作者身份与结构闭合等缺项必须处理，不以资源条数冒充三篇验收。
+
+### #155 正式安装切换后的浏览器超时（2026-10-06，待定因）
+
+- 证据：已安装版本8787服务存活、首次页面导航返回；后续浏览器控制分别在派发前、CDP焦点设置时超时。新候选8788先前页面验证通过。
+- 影响：正式安装后的完整页面复验尚未完成，不能仅凭服务已启动宣告安装验收通过。
+- 原因：可能是页面渲染阻塞或控制连接问题，尚未核实；没有把它解释成HPC失败。
+- 动作：保存错误与服务身份，先用新的只读首页区分故障；不重提HPC、不重发已完成模型问题。检查时出现的缺少文件路径/空glob属于开发端查找错误，已改为先列实际文件和定义；未修改运行策略。
+
+#155 renderer follow-up: both installed detail-tab renderers remained above one
+CPU core while the web service stayed responsive. A synthetic DOM using the pinned
+auto-render library reproduced unbounded observer feedback when a parse error
+retained and replaced the raw formula; ordinary valid formulas did not reproduce
+it. The exact triggering live text is not yet established. The renderer now
+disconnects its observer while changing text, coalesces overlapping added roots,
+and preserves code/SVG/generated/error nodes. Five regression checks and the
+real-library parse-error probe pass; installed detail-page acceptance remains
+required. No task identity, results, model request or HPC submission changed.
