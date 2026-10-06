@@ -92,6 +92,7 @@ async function openTask(id) {
   current=task;
   $('#advanced-task').open=task.status!=='conditions_frozen';
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;
+  activityData=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
   for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
   renderWorkspaceResults();
@@ -103,7 +104,7 @@ async function openTask(id) {
   await listTasks();
   await renderHistory();
   await refreshCandidate(); await refreshGuidance(); await refreshPlanReview();
-  if($('#ai-activity-panel')?.open) await refreshActivity();
+  await refreshActivity();
   await refreshResults();
   await refreshReferenceHistory();
   await refreshWorkspace();
@@ -134,8 +135,8 @@ function render() {
   $('#welcome').hidden = true;
   $('#task-view').hidden = false;
   $('#papers-view').hidden = true;
-  $('#task-title').textContent = current.title;
-  $('#task-prompt').textContent = current.prompt;
+  $('#task-title').textContent = researchText(current.title);
+  $('#task-prompt').textContent = researchText(current.prompt);
   // 全局提示条是上一次动作留下的，打开任务时先清掉，避免用户以为那是当前状态。
   const banner = $('#message');
   if (banner) { banner.hidden = true; banner.textContent = ''; banner.className = ''; }
@@ -148,7 +149,7 @@ function render() {
   renderReference();
   renderTargetPlanning();
   $('#task-status').textContent = frozen ? '条件已冻结' : '条件草稿';
-  $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 版本 ${current.revision} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
+  $('#task-meta').textContent = `${current.mode === 'reproduction' ? '文献复现测试' : '科研计算'} · 更新于 ${new Date(current.updated_at).toLocaleString('zh-CN')}`;
   const relevant = Object.entries(current.fields).filter(([key])=>key !== 'reference' || current.mode === 'reproduction');
   const all = relevant.map(([,field])=>field);
   $('#confirmed-count').textContent = `${all.filter(f=>f.confirmed).length} / ${all.length}`;
@@ -657,6 +658,40 @@ function planFilesText(review){
 }
 
 let activityTimer=null;
+let activityData=null;
+
+function researchText(value){
+  return String(value||'').replace(/\\[()[\]]/g,'').replace(/\\times/g,'×')
+    .replace(/\\(?:mathrm|text)\{([^{}]*)\}/g,'$1')
+    .replace(/\^\{([^{}]*)\}/g,'^($1)').replace(/_\{([^{}]*)\}/g,'_($1)');
+}
+
+function renderCurrentActivity(){
+  const title=$('#ai-current-title'),detail=$('#ai-current-detail'),meta=$('#ai-current-meta');
+  if(!title)return;
+  const job=executionState?.job;
+  const preparing=candidateRecord&&['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state);
+  if(preparing){
+    title.textContent=candidateStatus(candidateRecord).label;
+    detail.textContent='应用正在处理当前方案；之前的方案、计算结果和失败记录仍可查看。';
+    const seconds=Math.max(0,(Date.now()-Date.parse(candidateRecord.updated_at))/1000);
+    meta.textContent='当前阶段开始于 '+new Date(candidateRecord.updated_at).toLocaleTimeString('zh-CN')+' · 已持续 '+duration(seconds)+' · 后台继续，无需保持页面打开';
+  }else if(candidateRecord&&['clarification','failed','interrupted','configuration_changed'].includes(candidateRecord.state)){
+    title.textContent=candidateStatus(candidateRecord).label;
+    detail.textContent=candidateRecord.result?.detail||candidateRecord.result?.message||'请查看页面上方的待处理问题；已有方案和计算历史保留。';
+    meta.textContent='当前准备未完成，不会自动追加计算提交。';
+  }else if(job){
+    const state=job.scheduler_state;
+    title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
+    detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
+      (job.state==='analyzed'?'已保存分析结果，请查看下方结果；科学结论仍需核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
+    meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState.worker_alive?'后台正在运行':'后台当前未运行')+' · 调度完成与科学核验分别记录';
+  }else{
+    title.textContent=activityData?.now||'等待准备计算方案';
+    detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':'应用按已确认的研究需求组织方案。';
+    meta.textContent='进度来自应用记录；刷新页面不会重新生成方案或提交计算。';
+  }
+}
 
 async function refreshActivity(){
   const box=$('#ai-activity'); if(!box) return;
@@ -669,6 +704,8 @@ async function refreshActivity(){
     return;
   }
   if(current?.id!==id) return;
+  activityData=data;
+  renderCurrentActivity();
   const note=$('#ai-activity-note');
   if(note) note.textContent=(data.now?('当前：'+data.now+'　'):'')+(data.note||'');
   const steps=data.steps||[];
@@ -683,7 +720,7 @@ async function refreshActivity(){
     const head=node('div',undefined,'timeline-head');
     head.append(node('strong',step.title||''));
     if(latest) head.append(node('span','现在','badge pending'));
-    head.append(node('small',String(step.at||'').replace('T',' ').slice(11,19)));
+    head.append(node('small',new Date(step.at).toLocaleString('zh-CN')));
     body.append(head);
     if(step.detail) body.append(node('p',step.detail,'subtle'));
     item.append(body);
@@ -697,96 +734,124 @@ async function refreshActivity(){
   box.scrollTop=box.scrollHeight;
 }
 
+function renderPlanSummary(review){
+  const box=$('#plan-summary');
+  const opened=new Set([...box.children].filter(x=>x.open).map(x=>x.dataset?.key));box.replaceChildren();
+  const detailsFor=(key,label,cls)=>{const d=node('details',undefined,cls);d.dataset.key=key;d.open=opened.has(key);d.append(node('summary',label));return d;};
+  const plan=review.workspace?.current;
+  if(!plan){if(review.summary)box.append(node('p',researchText(review.summary)));return;}
+  const quantity=current.fields?.quantity;const target=quantity?.candidates?.find(c=>c.id===quantity.selected)?.value;
+  box.append(node('p','研究目标：'+researchText(target||plan.analysis?.quantity||current.title),'plan-objective'));
+  const cards=node('div',undefined,'plan-facts');
+  const fact=(title,text)=>{const card=node('div',undefined,'plan-fact');card.append(node('span',title),node('p',text));cards.append(card);};
+  const structures=[plan.structure,...plan.additional_structures.map(item=>item.structure)];
+  const names={bcc:'体心立方',fcc:'面心立方',sc:'简单立方',hcp:'密排六方'};
+  const g=plan.structure;
+  fact('材料与结构',`${(g.elements||[]).join(' / ')} · ${names[g.crystal]||g.crystal||'自定义结构'} · ${structures.map(x=>(x.repeat||[]).join('×')).filter(Boolean).join('、')||'尺寸见结构文件'}`);
+  fact('边界与初始晶格',(g.boundary||[]).map(x=>x==='p'?'周期':x==='f'?'固定':x).join(' / ')+(g.a_angstrom?` · 初始晶格常数 ${g.a_angstrom} Å`:''));
+  const potential=plan.potential||{};
+  const selected=current.fields?.potential;const source=selected?.candidates?.find(c=>c.id===selected.selected)?.value;
+  fact('势函数',source||`${(potential.elements||[]).join(' / ')} · ${potential.style||'类型见脚本'} · ${potential.units||''}`);
+  const r=plan.resources||{};
+  fact('计算资源',`${r.cores} CPU 核 · ${r.memory_bytes/1024**3} GiB · 单作业最长 ${r.wall_seconds/3600} 小时`);
+  box.append(cards);
+  const steps=node('div',undefined,'plan-calculation');steps.append(node('h3','计算安排'));
+  const workflow=plan.workflow||'';const list=node('ol');
+  list.append(node('li',`准备 ${structures.length} 种初始结构；尺寸和成分沿用已确认条件。`));
+  if(/box\/relax/.test(workflow))list.append(node('li','完美体系：进行晶胞与原子联合弛豫。'));
+  if(/delete_atoms/.test(workflow))list.append(node('li','缺陷体系：删除指定原子，并保存删除记录。'));
+  if(/minimize/.test(workflow))list.append(node('li',`进行能量最小化（脚本含 ${workflow.split('\n').filter(x=>/^minimize\s/.test(x)).length} 个最小化阶段）；记录实际收敛情况。`));
+  if(/\brun\s/.test(workflow))list.append(node('li','执行模拟阶段，并按方案保存过程数据。'));
+  const columnNames={E_form_eV:'空位形成能（eV）',inv_N:'原子数倒数（1/N）'};
+  for(const op of plan.analysis?.plan?.operations||[])list.append(node('li',`${({linear_fit:'线性拟合',maximum:'最大值',mean:'均值',minimum:'最小值'}[op.method]||op.method)}：${columnNames[op.y]||op.y||''}${op.x?' 对 '+(columnNames[op.x]||op.x):''}；数据来自 ${op.file}。`));
+  steps.append(list);box.append(steps);
+  const files=plan.analysis?.files||[];
+  const outputs=detailsFor('outputs',`查看预期科研产物（${files.length} 个文件）与数据字段`,'plan-output-list');
+  for(const table of plan.analysis?.plan?.tables||[])outputs.append(node('p',`${table.file}：${table.columns.map(c=>c.name+' ['+c.unit+']').join('、')}`));
+  outputs.append(node('p',files.join('、')));box.append(outputs);
+  const check=plan.automatic_check||review.automatic_check;
+  if(check){const details=detailsFor('checks','查看应用的需求与步骤核对结果','plan-checks');
+    for(const item of check.coverage||[])details.append(node('p',researchText(item.requirement+'：'+item.evidence)));box.append(details);}
+  const recovery=plan.failure_recovery||review.failure_recovery;
+  if(recovery){const details=detailsFor('recovery','查看应用内 AI 的失败诊断与本次修正','plan-checks');
+    details.append(node('p',recovery.summary),node('p','原因：'+recovery.cause),node('p','修改：'+recovery.repair));
+    for(const text of recovery.evidence||[])details.append(node('pre',text,'plan-code'));box.append(details);}
+  const explanation=detailsFor('explanation','查看模型完整方案说明','plan-checks');explanation.append(node('p',researchText(plan.summary)));box.append(explanation);
+}
+
+function renderPlanVersions(review){
+  const versions=review.workspace?.versions||[],box=$('#plan-version-list');
+  const opened=new Set([...box.children].filter(x=>x.open).map(x=>x.dataset?.version));box.replaceChildren();
+  $('#plan-versions').hidden=!versions.length;
+  $('#plan-versions-label').textContent=`查看历次方案、修改原因与步骤差异（${versions.length} 版）`;
+  for(const version of [...versions].reverse()){
+    const item=node('details',undefined,'plan-version-item');
+    item.dataset.version=String(version.number);item.open=opened.has(item.dataset.version);
+    const changes=version.available?(version.number===1?'首版方案':version.changes.length?version.changes.join('、'):'科研设置与步骤未变化；重新封装并核验'):version.reason;
+    item.append(node('summary',`第 ${version.number} 版 · ${changes}`));
+    item.append(node('p',new Date(version.at).toLocaleString('zh-CN'),'subtle'),node('p','修改依据：'+researchText(version.reason)));
+    if(version.workflow_diff)item.append(node('pre',version.workflow_diff,'plan-code'));
+    box.append(item);
+  }
+}
+
 async function refreshPlanReview(){
-  const panel=$('#plan-review-panel'); if(!panel) return;
-  const id=current?.id; if(!id){panel.hidden=true;return;}
+  const panel=$('#plan-review-panel');if(!panel)return;
+  const id=current?.id;if(!id){panel.hidden=true;return;}
   let review;
-  try { review=await api(`/api/tasks/${id}/plan`); }
-  catch(error){ panel.hidden=true; return; }
-  if(current?.id!==id) return;
-  const prepared=review.state==='prepared';
-  panel.hidden=!prepared;
-  if(!prepared) return;
-  $('#plan-status').textContent=(review.approved?'已批准当前方案，可以提交。':'方案已准备，等待你审核。')
-    + (review.summary?'　摘要：'+review.summary:'');
-  const summary=$('#plan-summary'); summary.replaceChildren();
-  const geometry=review.geometry||{};
-  if(geometry.formula||geometry.atoms)summary.append(node('p',`结构：${geometry.formula||''} ${geometry.atoms?geometry.atoms+' 原子':''}`,'subtle'));
-  const analysis=review.analysis||{};
-  if(analysis.quantity)summary.append(node('p',`分析：${analysis.quantity}（文件 ${(analysis.files||[]).join('、')}）`,'subtle'));
-  if(review.failure_recovery){
-    const recovery=review.failure_recovery;
-    summary.append(node('p','AI 失败诊断：'+recovery.summary,'form-note'));
-    const details=node('details');details.append(node('summary','查看 AI 读到的错误、原因与本次修正'));
-    details.append(node('p','原因：'+recovery.cause),node('p','修改：'+recovery.repair));
-    for(const excerpt of recovery.evidence||[])details.append(node('pre',excerpt));
-    details.append(node('p','经验待运行验证：'+recovery.proposed_lesson));summary.append(details);
-  }
-  if(review.automatic_check){
-    const check=review.automatic_check;
-    summary.append(node('p','应用已检查需求与步骤的一致性；实际运行后还会核对输出。','form-note'));
-    const details=node('details');details.append(node('summary','查看应用的需求核对记录'));
-    for(const item of check.coverage||[])details.append(node('p',item.requirement+'：'+item.evidence));
-    summary.append(details);
-  }
-  const files=$('#plan-files'); files.replaceChildren();
-  for(const file of (review.files||[])){
+  try{review=await api(`/api/tasks/${id}/plan`);}
+  catch(error){$('#plan-status').textContent='暂时无法读取方案，已展示的方案未更新。请刷新核对。';$('#plan-approve').disabled=true;$('#plan-revise').disabled=true;return;}
+  if(current?.id!==id)return;
+  const plan=review.workspace?.current;
+  const prepared=review.state==='prepared'&&(!review.workspace||(plan&&!plan.historical));
+  panel.hidden=!prepared&&!plan;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden)return;
+  $('#plan-version').textContent=plan?`第 ${plan.version} 版${plan.historical?' · 上一份已准备方案':''}`:'已准备';
+  $('#plan-status').textContent=prepared?(review.approved?'当前方案已批准。':'方案已准备，等待你确认。'):'应用正在处理下一版；下方保留最近一版方案供查看，暂不能批准。';
+  renderPlanSummary(review);renderPlanVersions(review);
+  const files=$('#plan-files');const opened=new Set([...files.children].filter(x=>x.open).map(x=>x.dataset?.file));files.replaceChildren();
+  for(const file of (plan?.files||review.files||[])){
     const block=node('details',undefined,'plan-file');
-    block.append(node('summary',`${file.name} · ${(file.size/1024).toFixed(1)} KiB · ${String(file.sha256||'').slice(0,12)}`));
-    if(file.content){
-      const pre=node('pre',file.content.slice(0,20000),'plan-code');
-      block.append(pre);
-      if(file.name==='in.lammps'){
-        const box=node('textarea',undefined,'plan-edit'); box.rows=8; box.value=file.content;
-        box.placeholder='如需直接改脚本，可在此编辑后点“保存脚本并重新准备”（会重新生成方案并需要再次批准）';
-        const save=node('button','保存脚本并重新准备','quiet'); save.type='button';
-        save.onclick=()=>action(async()=>{
-          await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,
-            note:'请按以下我直接修改过的脚本内容重新准备方案：\n'+box.value});
-          current=await api(`/api/tasks/${current.id}`);
-          await afterChange('已提交你的脚本修改，应用会重新组织方案（需再次批准）。');
-        });
-        block.append(box,save);
-      }
-    }
-    files.append(block);
+    block.dataset.file=file.name;block.open=opened.has(file.name);
+    const labels={'in.lammps':'LAMMPS 计算脚本','analysis.json':'数据分析定义','structure.data':'初始原子结构'};
+    block.append(node('summary',`${labels[file.name]||'其他尺寸初始结构'} · ${file.name} · ${(file.size/1024).toFixed(1)} KiB`));
+    if(file.content)block.append(node('pre',file.content.slice(0,20000),'plan-code'));
+    block.append(node('p','文件校验值：'+file.sha256,'form-note'));files.append(block);
   }
-  const approve=$('#plan-approve');
-  const note=$('#plan-note');
-  // 按钮永远给出可执行动作与真实结果：批准→提交；已提交→显示状态；失败→可重试并显示具体原因。
-  let execution={};
-  try { execution=await api(`/api/tasks/${current.id}/execution`); } catch(error) { execution={}; }
-  const job=execution.job||{};
-  const dispatched=Boolean(job.job_id);
+  let execution=executionState||{},executionReadable=true;
+  // A refresh of the plan always reads the real dispatch receipt; approval never regenerates a plan.
+  try{execution=await api(`/api/tasks/${id}/execution`);}catch(error){execution={};executionReadable=false;}
+  if(current?.id!==id)return;
+  const job=execution.job||{},dispatched=Boolean(job.job_id);
   const active=['queued','running','waiting','dispatching'].includes(job.state);
+  const unresolved=['unknown','reconcile_required'].includes(job.scheduler_state);
+  const blocked=!executionReadable||execution.configured===false;
   const retryAvailable=job.scheduler_state==='failed'&&job.accounted&&job.dispatch_count<job.max_attempts;
-  approve.disabled=active||(dispatched&&!retryAvailable);
-  approve.textContent=retryAvailable?`${review.approved?'使用':'批准方案并使用'}第 ${job.dispatch_count+1} 次机会提交 HPC`:
-    (dispatched?'已有提交，查看执行结果':(active?'提交中…':(review.approved?'提交计算':'批准并提交 HPC')));
-  const reason=job.reason?('　当前状态：'+(job.label||job.state||'')+'（'+job.reason+'）'):'';
-  note.textContent=(dispatched?'已产生作业号 '+job.job_id+'。':(review.approved?'方案已批准，点“提交计算”即提交真实计算。':'批准后应用才会提交真实计算；方案一旦变化需要重新批准。'))
-    +' 方案变化需要重新批准。'+reason;
+  const approve=$('#plan-approve');approve.disabled=!prepared||active||blocked||(dispatched&&!retryAvailable);
+  approve.textContent=retryAvailable?`使用第 ${job.dispatch_count+1} 次机会提交 HPC`:dispatched?'已提交 · 作业 '+job.job_id:active?'正在提交，请等待回执':unresolved?'核对已有提交回执':review.approved?'提交已批准方案':'批准并提交 HPC';
+  $('#plan-note').textContent=blocked?'执行回执暂不可读取或执行服务未配置；已暂停批准与修改，请刷新核对。':dispatched?'作业 '+job.job_id+' · '+(requestStates[job.scheduler_state]||job.label)+'。状态与提交次数见上方；本按钮不会重复提交。':
+    !prepared?'等待当前方案修改与核对结束；旧版批准不能用于新版。':active?'应用正在传送输入或等待调度回执，请勿重复提交。':review.approved?'提交将使用这一份已批准方案，不会重新生成。':'确认后，应用将提交这一份方案到 HPC；修改后需要重新确认。';
   approve.onclick=()=>action(async()=>{
+    if(approve.disabled)return;
     approve.disabled=true;
-    if(!review.approved) await api(`/api/tasks/${current.id}/plan/approve`,{revision:current.revision,note:'页面批准'});
-    current=await api(`/api/tasks/${current.id}`);
-    const endpoint=retryAvailable?'execution/retry':(job.state==='attention'?'execution/recheck':'execution');
-    try {
-      await api(`/api/tasks/${current.id}/${endpoint}`,{revision:current.revision});
-      await afterChange('已提交申请；应用会提交 HPC 并自动跟进状态。');
-    } catch(error) {
-      // 失败必须说清原因，并保留可重试状态（按钮不会永久变灰）。
-      await afterChange('提交未通过：'+error.message);
-    }
-    await refreshPlanReview(); await refreshCandidate();
+    if(!review.approved)await api(`/api/tasks/${id}/plan/approve`,{revision:current.revision,note:'页面批准'});
+    current=await api(`/api/tasks/${id}`);
+    const endpoint=retryAvailable?'execution/retry':job.state==='attention'?'execution/recheck':'execution';
+    try{await api(`/api/tasks/${id}/${endpoint}`,{revision:current.revision});await afterChange('已提交申请；请查看真实 HPC 作业回执。');}
+    catch(error){await afterChange('提交未通过：'+error.message);}
+    await refreshPlanReview();await refreshCandidate();
   });
-  $('#plan-revise').onclick=()=>action(async()=>{
-    const note=($('#guidance-note')?.value||'').trim();
-    if(!note){notice('请在“引导与暂停”里写下你的修改意见，再点这里。',true);return;}
-    await api(`/api/tasks/${current.id}/plan/revise`,{revision:current.revision,note});
-    current=await api(`/api/tasks/${current.id}`);
-    await afterChange('已把你的意见交给应用内 AI，它会重新组织方案（需再次批准）。');
-    await refreshPlanReview(); await refreshCandidate();
+  const revise=$('#plan-revise'),input=$('#plan-revision-note');
+  revise.disabled=!prepared||active||unresolved||blocked;input.disabled=active||unresolved||blocked;
+  $('#plan-revision-help').textContent=active?'本次计算已经提交，运行中的方案保持固定。计算结束后可讨论结果；不会修改正在运行的计算。':'写下具体修改意见；应用内 AI 将迭代当前方案，保留旧版和修改记录，新版需要重新确认。';
+  revise.onclick=()=>action(async()=>{
+    if(revise.disabled)return;
+    const note=input.value.trim();if(!note){notice('请在方案旁的修改意见框填写要求。',true);input.focus();return;}
+    revise.disabled=true;
+    await api(`/api/tasks/${id}/plan/revise`,{revision:current.revision,note});
+    if(current?.id!==id)return;
+    current=await api(`/api/tasks/${id}`);input.value='';
+    await afterChange('修改意见已交给应用内 AI；完成后会显示新版与差异，需要重新确认。');
+    await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
 }
 
@@ -796,6 +861,7 @@ async function refreshCandidate() {
   const {candidate,downloads_enabled}=await api(`/api/tasks/${id}/candidate`);
   if(current?.id!==id || $('#task-view').hidden) return;
   candidateState=candidate?.state || null; candidateTask=id; candidateRecord=candidate||null;
+  renderCurrentActivity();
   const automatic=schema.automatic_workflow?.configured;
   const available=(automatic?schema.automatic_workflow:schema.candidate_preparation) || {enabled:false,reason:'方案准备服务尚未配置。'};
   const retriggerable=Boolean(candidate)&&['clarification','failed','interrupted','configuration_changed'].includes(candidate.state);
@@ -847,7 +913,7 @@ async function refreshCandidate() {
     jump.onclick=()=>{$('#advanced-task').open=true;$('#candidate-panel').scrollIntoView({block:'start'});};
     attention.append(jump);
   }
-  $('#prepare-candidate').textContent=candidate?(automatic?'重新启动自动流程':'重新准备方案'):(automatic?'开始自动计算':'准备计算方案');
+  $('#prepare-candidate').textContent=candidate?'重新准备计算方案':'生成计算方案';
   $('#prepare-candidate').hidden=current.mode!=='research'||(Boolean(candidate)&&!retriggerable);
   $('#prepare-candidate').disabled=!available.enabled;
   $('#candidate-stage').replaceChildren();
@@ -863,7 +929,7 @@ async function refreshCandidate() {
   const summary=$('#candidate-summary'); summary.replaceChildren(); $('#candidate-downloads').replaceChildren();
   $('#candidate-outcome').textContent=candidateOutcome||'';
   if(automatic && schema.task_resource_policy) summary.append(node('p',schema.task_resource_policy.description));
-  if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件自动准备、提交与分析。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
+  if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件生成并核对方案；你批准后才提交 HPC 和分析结果。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
   if(!candidate) {renderCandidateClarification(null);return;}
   const result=candidate.result||{};
   if(result.summary) summary.append(node('p',result.summary));
@@ -910,7 +976,7 @@ setInterval(async()=>{
   if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
      !['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files',null].includes(candidateState)) return;
   candidatePolling=true;
-  try {await refreshCandidate();await renderHistory();await refreshModelStatus();if(candidateState==='prepared') await refreshPlanReview();}
+  try {await refreshCandidate();await renderHistory();await refreshModelStatus();await refreshPlanReview();await refreshActivity();}
   catch(error) {notice('暂时无法读取准备进度；不会重新发起模型请求。',true);}
   finally {candidatePolling=false;}
 },3000);
@@ -1554,7 +1620,7 @@ async function refreshWorkspace(){
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
  if(r){$('#task-status').textContent='A 已结束 · B '+bState(r);$('#task-meta').textContent='文献复现验证 · '+r.scope;for(const label of (r.closeout?['作者原始流程','P–A–B 比较已保存',acceptanceLabel(r.closeout.acceptance)]:['作者原始流程','P–A 诊断已保存','科学结论待核验']))$('#task-tags').append(node('span',label,'tag'));}
- else{for(const key of ['material','temperature','potential']){const f=current.fields[key],c=f?.candidates.find(c=>c.id===f.selected);if(c)$('#task-tags').append(node('span',c.value+(c.unit?' '+c.unit:''),'tag'));}}
+ else{for(const key of ['material','temperature']){const f=current.fields[key],c=f?.candidates.find(c=>c.id===f.selected);if(c)$('#task-tags').append(node('span',researchText(c.value)+(c.unit?' '+c.unit:''),'tag'));}}
  renderFlow(r);$('#task-information').replaceChildren();$('#task-files').replaceChildren();$('#task-resources').replaceChildren();
  addInfo('状态',r?'A 已结束，B '+bState(r):current.status==='conditions_frozen'?'条件已保存':'需求已保存');addInfo('记录更新',new Date(current.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}));
  if(r){addInfo('A 运行时长',duration(r.runtime.elapsed_seconds));addInfo('A 使用核数',String(r.runtime.cores));addInfo('A 提交次数',`${r.evaluation.dispatch_claims} 次（含失败）`);addInfo('B 提交次数',bCount(r));addInfo('A 本次核时',number(r.runtime.core_hours,3));addInfo('B 资源额度','用户未设上限');addInfo('A 作业号',r.job_id);reportDownloads(r,$('#task-files'));const a=node('a','论文与 DOI ↗','resource-link');a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';a.append(node('small',r.title));$('#task-resources').append(a);}
@@ -1572,13 +1638,24 @@ async function refreshWorkspace(){
   $('#execution-flow').replaceChildren(node('h2','计算记录'),node('p','原始输出已回收，可下载查看。完整执行阶段及分析报告尚未接入。','flow-note'));
  }
  renderExecutionControls();renderWorkspaceResults();
+ await refreshPlanReview();await refreshActivity();
  if(!$('.discussion-panel').hidden)await refreshDiscussion();
 }
 function renderExecutionControls(){
  if(workspaceReport||!executionState)return;
  const box=$('#execution-flow'),job=executionState.job;
  if(job){
-  box.replaceChildren(node('h2','任务执行流程'),node('p',job.label,'flow-note'));
+  box.replaceChildren(node('h2','执行进度'));
+  const progress=node('ol',undefined,'execution-stages');
+  const index=['collecting','analyzing','analyzed','analysis_failed'].includes(job.state)?3:job.job_id?2:1;
+  ['需求已确认','方案确认','HPC 计算','回收与分析'].forEach((label,n)=>{
+    const item=node('li',undefined,n<index?'done':n===index?'current':'pending');
+    item.append(node('span',n<index?'✓':String(n+1)),node('strong',label));progress.append(item);
+  });box.append(progress);
+  const receipt=node('div',undefined,'execution-receipt');
+  receipt.append(node('strong',job.job_id?'HPC 作业 '+job.job_id:'等待 HPC 接收回执'),
+    node('span',job.job_id?(requestStates[job.scheduler_state]||job.label):job.label),
+    node('span',`已提交 ${job.dispatch_count} / ${job.max_attempts} 次`));box.append(receipt);
   $('#task-status').textContent=job.label;
   $('#task-information').replaceChildren();addInfo('执行状态',job.label);addInfo('提交次数',`${job.dispatch_count} / ${job.max_attempts}`);
   addInfo('HPC 作业号',job.job_id||(job.dispatch_count?'提交结果待核对':'尚未提交'));
@@ -1595,7 +1672,7 @@ function renderExecutionControls(){
    resume.onclick=()=>action(async()=>{resume.disabled=true;await api(`/api/tasks/${current.id}/execution/recheck`,{revision:current.revision});await refreshWorkspace();await refreshPlanReview();});
    box.append(resume);
   }
-  const details=node('details');details.append(node('summary','执行历史'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
+  const details=node('details');details.append(node('summary','查看提交、调度、回收与分析的完整记录'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
  }else{
   $('#task-information').replaceChildren();
   addInfo('HPC 作业号',executionState.submissions?.count?'已有提交，回执待核对':'尚未提交');
@@ -1608,12 +1685,11 @@ function renderExecutionControls(){
    return;
   }
   if(executionState.can_start){
-   box.replaceChildren(node('h2','计算方案已准备'),node('p','开始后将核对执行许可，自动提交、跟进和处理结果。','flow-note'));
+   box.replaceChildren(node('h2','计算方案已准备'),node('p','请确认下方方案并使用“批准并提交 HPC”。应用会按这一份方案提交、跟进和处理结果。','flow-note'));
    $('#task-status').textContent='方案已准备';$('#task-information').replaceChildren();addInfo('执行状态','等待开始');
    if(executionState.submissions)addInfo('提交次数',`${executionState.submissions.count} / ${executionState.submissions.maximum}`);
   }
   box.append(node('p',executionState.message||'计算服务状态待核对。','form-note'));
-  if(executionState.can_start){const button=node('button','开始计算','primary');button.onclick=()=>action(async()=>{const id=current.id;button.disabled=true;await api(`/api/tasks/${id}/execution`,{revision:current.revision});if(current?.id===id){await refreshResults();await refreshWorkspace();}});box.append(button);}
  }
 }
 let hpcState=null,hpcEditingId=null;
@@ -1735,6 +1811,8 @@ const activityPanel=document.getElementById('ai-activity-panel');
 if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)action(refreshActivity);};
 checkForUpdate();setInterval(checkForUpdate,30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkForUpdate();});
+bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-panel').scrollIntoView({block:'start',behavior:'smooth'});action(refreshActivity);});
+bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();action(refreshActivity);});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});

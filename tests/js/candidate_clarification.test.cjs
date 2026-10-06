@@ -31,12 +31,14 @@ function setupPanel({status='conditions_frozen',automatic=false,candidatePrepara
       analysis:'分析方法',outputs:'输出文件与内容',temperature:'温度',material:'材料与成分'},
       automatic_workflow:{configured:automatic},candidate_preparation:candidatePreparation},
     current:{id:TASK,status,revision:21,mode:'research',fields:{}},
+    executionState:null,
     candidateState:null,candidateTask:null,candidateRecord:null,candidateAnswers:[],candidateOutcome:'',
     $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
     api:(path,data)=>{calls.push({path,data});return Promise.resolve(documents.length?documents.shift():{id:TASK,revision:22});},
     notice:(message,error)=>{notices.push({message,error:Boolean(error)});},
     renderHistory:async()=>{},refreshModelStatus:async()=>{},refreshWorkspace:async()=>{},
     number:(value,digits=4)=>String(value),
+    duration:seconds=>String(seconds),
     action:async work=>work(),
   });
   vm.runInContext(nodeCode,context);
@@ -164,7 +166,7 @@ test('候选面板如实显示 execution_authorized 与澄清入口，并保留�
   assert.match(elements.get('#candidate-authorization').textContent,/不构成执行授权/);
   assert.match(elements.get('#candidate-stage').children[0].textContent,/需要澄清/);
   assert.equal(elements.get('#prepare-candidate').hidden,false);
-  assert.equal(elements.get('#prepare-candidate').textContent,'重新准备方案');
+  assert.equal(elements.get('#prepare-candidate').textContent,'重新准备计算方案');
   assert.equal(elements.get('#candidate-clarification').children.length>0,true);
   assert.match(elements.get('#candidate-note').textContent,/条件版本 21/);
   assert.equal(elements.get('#candidate-downloads').children.length,0,'未准备完成时不应提供方案文件下载');

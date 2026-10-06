@@ -902,6 +902,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             scope = 'plan:' + digest
         review['approved'] = bool(scope) and store.plan_approved(identifier, scope)
         review['approvals'] = store.approvals(identifier)
+        from .plan_workspace import workspace
+        review['workspace'] = workspace(candidate_service, identifier)
         return review
 
     @app.post('/api/tasks/{identifier}/plan/approve')

@@ -107,12 +107,16 @@ class ResultsReader:
         self.tasks.get(identifier)
         candidate=self.preparations.get(identifier)
         base=dict(configured=True,evaluations=[],scientific_status='not_evaluated')
-        if not candidate or candidate['state']!='prepared':
+        if not candidate:
             return dict(base,message='尚无已准备的计算方案。结果会在计算与分析完成后出现在这里。')
         if sha256(self.tasks.export(identifier))!=candidate['condition_sha256']:
             raise ResultUnavailable('Prepared conditions changed')
-        digest=runtime.hash_value(candidate['result']['snapshot_sha256'])
-        groups=self.ledger.product_results(digest)
+        # Preparation of the next version must not hide past runs of this task.
+        # Only immutable prepared events bound to the same frozen conditions qualify.
+        digests={runtime.hash_value(e['payload']['snapshot_sha256']) for e in candidate['events']
+                 if e['state']=='prepared' and e['payload'].get('snapshot_sha256')}
+        groups=list({group['id']:group for digest in sorted(digests)
+                     for group in self.ledger.product_results(digest)}.values())
         for group in groups:
             requests=[];ordinal=0
             for request in group['requests']:
