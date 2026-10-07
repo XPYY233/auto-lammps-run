@@ -40,7 +40,7 @@
 
 | 入口 | 我的输出 | 硬规则 |
 |---|---|---|
-| `condition_generation.generate_condition_draft`（研究条件整理） | 带原文引用的条件条目＋缺项问题清单 | 值和单位必须出现在逐字引用中；引用错误、未知字段、额外授权字段 → 整体失败，不部分导入 |
+| `condition_generation.generate_condition_draft`（研究条件整理） | 带原文引用或原文片段 ID 的条件条目＋缺项问题清单 | 主动来源 Adapter 只给允许的用户/论文原文片段；可信端按 ID 和精确字符位置取得原文，值和单位必须原样包含。旧逐字 quote 继续严格校验；错误 → 整体失败，不部分导入 |
 | `agent_candidates.generate_candidate_draft` / `generate_research_candidate`（主 Agent / B 生成） | 结构规格、势函数选择、平铺命令脚本、冻结分析计划 | 只接收冻结后的已选条件＋允许资源摘要＋单位约定＋几何工具范围＋输出协议；候选状态一律 `candidate_prepared_review_required`，`execution_authorized` 恒为 false |
 | `reference_generation.generate_reference_draft`（参考侧证据整理，**独立角色**） | 论文条件/结果草稿＋逐项引文 | 走独立账本、独立密钥，与研究侧严格隔离 |
 

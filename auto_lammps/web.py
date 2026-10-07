@@ -19,7 +19,7 @@ from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
 from .literature import preview_csv
 from .papers import PaperStore
 from .deepseek import DeepSeekClient, ModelCalls, ModelError
-from .condition_generation import complete_condition_draft, generate_condition_draft
+from .condition_generation import complete_condition_draft, generate_condition_draft, legacy_condition_request_status
 from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
@@ -606,9 +606,41 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if state['deleted'] or state['user_finished']:
             raise TaskError('此任务记录已结束或删除，请新建任务开展后续计算。')
 
+    condition_failure_details = {
+            'source_quote_mismatch': 'AI 改写了原文引文，来源核对未通过；条件没有导入。',
+            'value_quote_mismatch': '提取的条件值没有出现在引用原文中；条件没有导入。',
+            'unit_quote_mismatch': '单位没有出现在引用原文中；条件没有导入。',
+            'source_identity_invalid': '原文位置或来源身份未通过核对；条件没有导入。',
+            'output_contract_invalid': 'AI 答复格式未通过检查；条件没有导入。',
+            'task_changed': '需求版本已变化，旧答复没有写入新版本。',
+            'model_budget_exhausted': '模型调用额度不足，请核对模型设置；本次未发送，已有费用与记录保留。',
+            'model_input_too_large': '需求超出当前模型输入容量；本次未发送，请核对需求与模型设置。',
+            'model_request_failed': '模型请求未完成；实际调用与费用按账本保留，未发送不计为调用。',
+            'model_state_unknown': '调用状态尚需核对，不会重复发送。',
+            'import_rejected': '条件导入未通过检查，原条件和调用记录保留。',
+    }
+
+    def condition_progress(identifier):
+        records = (legacy_condition_request_status(model_client, store, identifier)
+                   if model_client is not None else store.condition_requests(identifier))
+        if not records:
+            return records, None
+        latest = records[-1]
+        summary = {k: latest.get(k) for k in ('request_id', 'state', 'label', 'error_code', 'updated_at', 'reconstructed', 'recovery_required')}
+        detail = condition_failure_details.get(latest['error_code'], '模型答复与原文依据分开检查；核对通过后仍需你确认条件。')
+        if latest.get('recovery_required'):
+            detail = 'AI 答复已保存，条件尚未导入；恢复使用同一回执，不新增模型调用。'
+        summary.update(call_count=sum(bool(call.get('reserved')) for call in latest['calls']), detail=detail)
+        return records, summary
+
     @app.get('/api/tasks')
     def tasks():
         rows=store.list()
+        for row in rows:
+            _, progress = condition_progress(row['id'])
+            if progress is not None:
+                row['condition_preparation_state'] = progress['state']
+                row['condition_preparation_label'] = progress['label']
         if papers.ledger is not None:
             for paper in papers.list()['papers']:
                 for row in rows:
@@ -825,8 +857,27 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             add(receipt.get('at'), '应用内 AI ' + purpose, detail,
                 'ai', 'ok' if state == 'completed' else 'attention')
 
+        condition_records, condition_summary = condition_progress(identifier)
+        recorded_calls = set()
+        for record in condition_records:
+            for event in record['events']:
+                detail = ''
+                if event.get('call_id'):
+                    recorded_calls.add(event['call_id'])
+                    call = next((c for c in record['calls'] if c['call_id']==event['call_id']), {})
+                    usage = call.get('usage') or {}
+                    if usage.get('total_tokens'):
+                        detail = '已记账 ' + str(usage['total_tokens']) + ' tokens'
+                if event.get('error_code'):
+                    detail = (condition_failure_details.get(event['error_code'], '条件整理未完成，已有记录保留。') if event['state']=='failed'
+                              else '正在基于具体检查问题修正，已有费用与答复保留。')
+                if record.get('reconstructed'):
+                    detail += ' · 根据已有调用回执只读核对，未写入新条件。'
+                add(event.get('at'), event['label'], detail, 'ai',
+                    'attention' if event['state'] in ('failed', 'uncertain') else 'ok')
         for request_id in (document.get('generated_batches') or {}):
-            add_model(request_id, '整理了你的计算条件')
+            if request_id not in recorded_calls:
+                add_model(request_id, '整理了你的计算条件')
 
         # ③ 方案准备阶段
         job = preparations.get(identifier) if preparations else None
@@ -882,6 +933,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         steps.sort(key=lambda item: str(item['at']))
         latest = steps[-1] if steps else None
         return {'task_id': identifier, 'steps': steps,
+                'condition_preparation': condition_summary,
                 'now': (latest or {}).get('title') or '',
                 'note': '这是应用内 AI 的实时进度。技术细节（模型、用量、具体失败原因）在每一步的补充说明里。'}
 
@@ -1059,7 +1111,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         # Reference documents never enter through a browser-supplied path/URL.
         sources = [dict(id='user-request', origin='user', locator='用户原始任务描述', text=doc['prompt'])]
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision, sources=sources,
-                                           operation='generate-conditions-v1')))[:32]
+                                           operation='generate-conditions-v2')))[:32]
         return generate_condition_draft(model_client, store, identifier, data.revision, sources, request_id)
 
     @app.get('/api/tasks/{identifier}/export')

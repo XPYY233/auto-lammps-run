@@ -25,6 +25,24 @@ ESSENTIAL = {'scope', 'material', 'structure', 'potential', 'units', 'quantity',
 ORIGINS = {'user', 'paper', 'code', 'proposed'}
 APP_ID = 0x414C5453
 
+# Only fixed public-facing classifications are kept in condition progress.
+# Raw model answers, exception text and source excerpts stay in their own ledgers.
+CONDITION_EVENTS = {
+    'prepared': ('prepared', '已保存条件整理请求'),
+    'call_started': ('generating', 'AI 正在整理原始需求'),
+    'model_completed': ('validating', 'AI 已返回，正在核对原文依据'),
+    'validation_failed': ('repairing', '原文依据核对未通过，正在有限修正'),
+    'repair_started': ('repairing', 'AI 正在修正原文依据'),
+    'imported': ('imported', '条件已整理，待用户确认'),
+    'failed': ('failed', '条件整理未完成，已有调用和失败记录已保留'),
+}
+CONDITION_ERROR_CODES = {
+    '', 'source_quote_mismatch', 'value_quote_mismatch', 'unit_quote_mismatch',
+    'source_identity_invalid', 'output_contract_invalid', 'task_changed',
+    'model_not_completed', 'model_request_failed', 'model_state_unknown',
+    'model_budget_exhausted', 'model_input_too_large', 'import_rejected',
+}
+
 
 class TaskError(ValueError):
     pass
@@ -148,7 +166,14 @@ class TaskStore:
             db.execute('CREATE TABLE IF NOT EXISTS task_approvals (task_id TEXT NOT NULL REFERENCES tasks(id), '
                        'sequence INTEGER NOT NULL, scope TEXT NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL, '
                        'PRIMARY KEY(task_id,sequence))')
-            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle', 'task_guidance', 'task_control', 'task_approvals'):
+            db.execute('CREATE TABLE IF NOT EXISTS condition_requests (id TEXT PRIMARY KEY, '
+                       'task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL, '
+                       'source_sha256 TEXT NOT NULL, messages_sha256 TEXT NOT NULL, at TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS condition_request_events (request_id TEXT NOT NULL REFERENCES condition_requests(id), '
+                       'sequence INTEGER NOT NULL, kind TEXT NOT NULL, at TEXT NOT NULL, document TEXT NOT NULL, '
+                       'PRIMARY KEY(request_id,sequence))')
+            for table in ('revisions', 'frozen', 'reference_intents', 'task_lifecycle', 'task_guidance', 'task_control', 'task_approvals',
+                          'condition_requests', 'condition_request_events'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} "
                                "BEGIN SELECT RAISE(ABORT, 'immutable task evidence'); END")
@@ -182,6 +207,115 @@ class TaskStore:
         with self.transaction() as db:
             document = self._read(db, identifier)
         return {**document, 'issues': issues(document)}
+
+    def begin_condition_request(self, identifier, revision, request_id, source_sha256, messages_sha256):
+        """Reserve a durable preparation identity before any model I/O.
+
+        This does not advance the scientific condition revision or reset model
+        accounting. A concurrent or abandoned request must be reconciled first.
+        """
+        task_id(request_id)
+        for digest in (source_sha256, messages_sha256):
+            if not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{64}', digest):
+                raise TaskError('条件整理意图摘要无效')
+        with self.transaction() as db:
+            self._editable(db, identifier, revision)
+            old = db.execute('SELECT * FROM condition_requests WHERE id=?', (request_id,)).fetchone()
+            if old:
+                if (old['task_id'], old['revision'], old['source_sha256'], old['messages_sha256']) != (
+                        identifier, revision, source_sha256, messages_sha256):
+                    raise TaskError('条件整理请求身份不能替换')
+                return False
+            rows = db.execute('SELECT id FROM condition_requests WHERE task_id=?', (identifier,)).fetchall()
+            for row in rows:
+                last = db.execute('SELECT kind FROM condition_request_events WHERE request_id=? '
+                                  'ORDER BY sequence DESC LIMIT 1', (row['id'],)).fetchone()
+                if last is None or last['kind'] not in {'imported', 'failed'}:
+                    raise TaskError('已有条件整理请求尚未核对，未发送新的模型调用')
+            if len(rows) >= 32:
+                raise TaskError('此任务条件整理请求已达上限，请核对已有记录')
+            db.execute('INSERT INTO condition_requests VALUES (?,?,?,?,?,?)',
+                       (request_id, identifier, revision, source_sha256, messages_sha256,
+                        datetime.now(timezone.utc).isoformat()))
+            self._condition_event(db, request_id, 'prepared')
+        return True
+
+    def _condition_event(self, db, request_id, kind, *, call_id=None, error_code='', receipt=None, reserved=None):
+        if kind not in CONDITION_EVENTS or error_code not in CONDITION_ERROR_CODES:
+            raise TaskError('条件整理进度分类无效')
+        if call_id is not None:
+            task_id(call_id)
+            repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+            if call_id not in {request_id, repair_id}:
+                raise TaskError('模型调用不属于此条件整理请求')
+        if db.execute('SELECT 1 FROM condition_requests WHERE id=?', (request_id,)).fetchone() is None:
+            raise TaskError('缺少条件整理意图')
+        last = db.execute('SELECT sequence,kind,document FROM condition_request_events WHERE request_id=? '
+                          'ORDER BY sequence DESC LIMIT 1', (request_id,)).fetchone()
+        document = dict(call_id=call_id, error_code=error_code)
+        if reserved is not None:
+            if type(reserved) is not bool:
+                raise TaskError('模型请求预留状态无效')
+            document['reserved'] = reserved
+        if receipt is not None:
+            if not isinstance(receipt, dict) or receipt.get('state') not in {
+                    'not_sent', 'unknown', 'rejected', 'response_invalid', 'completed'}:
+                raise TaskError('模型进度回执状态无效')
+            document['model_state'] = receipt['state']
+            document['reserved'] = True
+            usage = receipt.get('usage')
+            if isinstance(usage, dict):
+                document['usage'] = {k: v for k, v in usage.items()
+                                     if k in {'prompt_tokens', 'completion_tokens', 'total_tokens'}
+                                     and type(v) is int and v >= 0}
+        encoded = canonical(document).decode()
+        if last and last['kind'] == kind and last['document'] == encoded:
+            return
+        if last and last['kind'] in {'imported', 'failed'}:
+            raise TaskError('条件整理终态不可覆盖')
+        if last and last['sequence'] >= 24:
+            raise TaskError('条件整理进度记录已达上限')
+        db.execute('INSERT INTO condition_request_events VALUES (?,?,?,?,?)',
+                   (request_id, (last['sequence'] + 1) if last else 1, kind,
+                    datetime.now(timezone.utc).isoformat(), encoded))
+
+    def record_condition_request_event(self, identifier, request_id, kind, **data):
+        with self.transaction() as db:
+            self._read(db, identifier)
+            row = db.execute('SELECT task_id FROM condition_requests WHERE id=?', (request_id,)).fetchone()
+            if row is None or row['task_id'] != identifier:
+                raise TaskError('条件整理请求不属于此任务')
+            self._condition_event(db, request_id, kind, **data)
+
+    def condition_requests(self, identifier):
+        """Safe progress DTO: no source excerpts, private paths or raw answers."""
+        with self.transaction() as db:
+            self._read(db, identifier)
+            rows = db.execute('SELECT * FROM condition_requests WHERE task_id=? ORDER BY at,id', (identifier,)).fetchall()
+            result = []
+            for row in rows:
+                events = []
+                calls = {}
+                for event in db.execute('SELECT * FROM condition_request_events WHERE request_id=? ORDER BY sequence',
+                                        (row['id'],)):
+                    data = json.loads(event['document'])
+                    state, label = CONDITION_EVENTS[event['kind']]
+                    events.append(dict(sequence=event['sequence'], kind=event['kind'], at=event['at'],
+                                       state=state, label=label, **data))
+                    if data.get('call_id'):
+                        previous = calls.get(data['call_id'], {})
+                        reserved = data.get('reserved', previous.get('reserved'))
+                        calls[data['call_id']] = dict(call_id=data['call_id'],
+                                                     state='not_reserved' if reserved is False else data.get('model_state', previous.get('state', 'pending')),
+                                                     reserved=reserved,
+                                                     usage=data.get('usage', previous.get('usage')))
+                latest = events[-1]
+                result.append(dict(request_id=row['id'], revision=row['revision'], at=row['at'],
+                                   source_sha256=row['source_sha256'], messages_sha256=row['messages_sha256'],
+                                   state=latest['state'], label=latest['label'], error_code=latest['error_code'],
+                                   updated_at=latest['at'], events=events, calls=list(calls.values()),
+                                   reconstructed=False))
+        return result
 
     def lifecycle(self, identifier):
         with self.transaction() as db:
@@ -377,7 +511,7 @@ class TaskStore:
                 doc['fields'][key]['confirmed'] = True
             return self._write(db, doc, 'user_confirmed:'+','.join(fields))
 
-    def import_generated_conditions(self, identifier, revision, sources, completion):
+    def import_generated_conditions(self, identifier, revision, sources, completion, *, condition_request_id=None):
         from .condition_generation import validate_conditions
         if (not isinstance(completion, dict) or set(completion) != {'value', 'request_id', 'receipt'}
                 or not isinstance(completion['request_id'], str)
@@ -391,6 +525,12 @@ class TaskStore:
         request_id = completion['request_id']
         with self.transaction() as db:
             doc = self._editable(db, identifier, revision)
+            if condition_request_id is not None:
+                intent = db.execute('SELECT * FROM condition_requests WHERE id=?', (condition_request_id,)).fetchone()
+                repair_id = sha256(canonical({'base': condition_request_id, 'repair': 1}))[:32]
+                if (intent is None or intent['task_id'] != identifier or intent['revision'] != revision
+                        or intent['source_sha256'] != source_digest or request_id not in {condition_request_id, repair_id}):
+                    raise TaskError('条件整理导入与意图不一致')
             batches = doc.setdefault('generated_batches', {})
             if request_id in batches:
                 raise TaskError('这次生成结果已经导入')
@@ -406,7 +546,11 @@ class TaskStore:
             batches[request_id] = dict(sources=sources, sources_sha256=source_digest,
                                       questions=questions, response=completion['value'], receipt=completion['receipt'],
                                       revision=doc['revision']+1)
-            return self._write(db, doc, 'conditions_generated')
+            result = self._write(db, doc, 'conditions_generated')
+            if condition_request_id is not None:
+                self._condition_event(db, condition_request_id, 'imported', call_id=request_id,
+                                      receipt=completion['receipt'])
+            return result
 
     def save_reference_intent(self, identifier, revision, request_id, context, operation):
         """Trusted reference service only; preserve source bytes before model I/O."""

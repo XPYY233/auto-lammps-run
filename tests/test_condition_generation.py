@@ -3,10 +3,16 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from concurrent.futures import ThreadPoolExecutor
+import json
+import sqlite3
 
-from auto_lammps.condition_generation import generate_condition_draft, validate_conditions
-from auto_lammps.deepseek import DeepSeekClient, DeepSeekConfig, ModelCalls, ModelError
+from auto_lammps.condition_generation import (condition_evidence_context, condition_evidence_spans,
+    condition_messages, generate_condition_draft, legacy_condition_request_status,
+    recover_condition_request, validate_conditions)
+from auto_lammps.deepseek import DeepSeekClient, DeepSeekConfig, ModelCalls, ModelError, request_body
+from auto_lammps.manifest import canonical, sha256
 from auto_lammps.tasks import FIELDS, TaskError, TaskStore
 from test_deepseek import response
 from test_tasks import evidence
@@ -117,3 +123,308 @@ class GenerationTests(unittest.TestCase):
         self.transport.return_value = (200,response(output))
         with self.assertRaisesRegex(TaskError, '不要求论文'): self.generate()
         self.assertEqual(self.store.get(self.doc['id']), self.doc)
+
+    def test_active_locator_selects_exact_unicode_slice_and_still_rejects_invented_values(self):
+        spans = condition_evidence_spans(SOURCES)
+        span = spans[0]
+        self.assertEqual(SOURCES[0]['text'][span['start']:span['end']], span['quote'])
+        output = deepcopy(OUTPUT)
+        output['conditions'][0].pop('quote')
+        output['conditions'][0]['evidence_span_id'] = span['id']
+        choices, _, _ = validate_conditions(SOURCES, output)
+        evidence = choices[0]['candidate']['generated_evidence']
+        self.assertEqual(evidence['quote'], span['quote'])
+        self.assertEqual(evidence['source_start'], span['start'])
+        self.assertEqual(evidence['semantic_verification'], 'not_performed')
+        for key, value in [('evidence_span_id', 'f'*24), ('value', '400'), ('unit', 'bar'),
+                           ('source_id', 'unknown'), ('quote', '温度300K')]:
+            changed = deepcopy(output)
+            changed['conditions'][0][key] = value
+            with self.subTest(key=key), self.assertRaises(TaskError):
+                validate_conditions(SOURCES, changed)
+        payload = json.loads(condition_messages(SOURCES)[1]['content'])
+        self.assertEqual(payload['source_locator_adapter']['spans'], spans)
+        self.assertEqual(payload['source_locator_adapter']['matching'], 'exact_only')
+
+    def test_source_changed_or_author_code_cannot_reuse_locator_identity(self):
+        span = condition_evidence_spans(SOURCES)[0]
+        output = deepcopy(OUTPUT)
+        output['conditions'][0].pop('quote')
+        output['conditions'][0]['evidence_span_id'] = span['id']
+        for source in [{**SOURCES[0], 'text': SOURCES[0]['text'] + ' 新版本。'},
+                       {**SOURCES[0], 'origin': 'code'}]:
+            with self.subTest(source=source['origin']), self.assertRaises(TaskError):
+                validate_conditions([source], output)
+        self.assertEqual(condition_evidence_spans([{**SOURCES[0], 'origin': 'code'}]), [])
+
+    def test_locator_preserves_long_request_once_within_default_input_limit(self):
+        for source_text in ('铜温度参数说明'*750, '铜。'*2625):
+            source = {**SOURCES[0], 'text': source_text}
+            messages = condition_messages([source])
+            body = request_body(DeepSeekConfig('synthetic-model'), messages)
+            self.assertLess(len(body), 65536)
+            payload = json.loads(messages[1]['content'])
+            self.assertNotIn('text', payload['sources'][0])
+            self.assertEqual(''.join(span['quote'] for span in payload['source_locator_adapter']['spans']), source['text'])
+            self.assertEqual(payload['sources'][0]['origin'], 'user')
+            self.assertEqual(payload['sources'][0]['source_sha256'], sha256(canonical(source)))
+
+    def test_full_source_with_whitespace_and_paper_origin_is_retained_in_locator(self):
+        source = dict(id='paper-section', origin='paper', locator='方法第2段', text='温度300 K。\n\n压力0 bar；\n采样5 ps。')
+        payload = json.loads(condition_messages([source], 'reproduction')[1]['content'])
+        self.assertEqual(payload['sources'][0]['origin'], 'paper')
+        spans = payload['source_locator_adapter']['spans']
+        self.assertEqual(''.join(span['quote'] for span in spans), source['text'])
+        self.assertEqual([(span['start'], span['end']) for span in spans][0][0], 0)
+        self.assertEqual(spans[-1]['end'], len(source['text']))
+        output = dict(conditions=[dict(field='temperature', value='300', unit='K', source_id='paper-section',
+                                       evidence_span_id=spans[0]['id'])], questions=[])
+        self.assertEqual(validate_conditions([source], output)[0][0]['candidate']['origin'], 'paper')
+
+    def test_failure_progress_survives_restart_without_answers_quotes_or_private_paths(self):
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = '/private/secret-path 不在原文'
+        self.transport.return_value = (200, response(bad))
+        with self.assertRaises(TaskError):
+            self.generate()
+        restarted = TaskStore(self.store.path)
+        requests = restarted.condition_requests(self.doc['id'])
+        self.assertEqual(len(requests), 1)
+        latest = requests[0]
+        self.assertEqual(latest['state'], 'failed')
+        self.assertEqual(latest['error_code'], 'source_quote_mismatch')
+        self.assertEqual(len(latest['calls']), 2)
+        self.assertEqual([call['state'] for call in latest['calls']], ['completed', 'completed'])
+        self.assertNotIn('/private/secret-path', json.dumps(requests))
+        self.assertNotIn('structured_output', json.dumps(requests))
+        self.assertEqual(restarted.get(self.doc['id']), self.doc)
+        with self.assertRaisesRegex(TaskError, '原调用'):
+            self.generate()
+        self.assertEqual(self.transport.call_count, 2)
+        self.assertEqual(len(self.calls.history()), 2)
+
+    def test_preparation_blocks_concurrent_request_before_spending_and_is_immutable(self):
+        def begin(identifier):
+            try:
+                return self.store.begin_condition_request(self.doc['id'], self.doc['revision'],
+                    identifier, sha256(canonical(SOURCES)), 'c'*64)
+            except TaskError:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(begin, ['a'*32, 'b'*32]))
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(len(self.store.condition_requests(self.doc['id'])), 1)
+        self.assertEqual(self.calls.history(), [])
+        with self.store.transaction() as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('DELETE FROM condition_requests')
+
+    def test_import_and_success_progress_commit_together(self):
+        self.generate()
+        request = self.store.condition_requests(self.doc['id'])[0]
+        self.assertEqual(request['state'], 'imported')
+        self.assertEqual(request['calls'][0]['state'], 'completed')
+        self.assertEqual(self.store.history(self.doc['id'])[-1]['event'], 'conditions_generated')
+        with self.assertRaisesRegex(TaskError, '终态'):
+            self.store.record_condition_request_event(self.doc['id'], 'a'*32, 'failed')
+
+    def test_progress_commit_failure_rolls_back_all_condition_import(self):
+        request_id = 'a'*32
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], request_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        completion = self.client.complete_json(request_id, messages)
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'failed',
+                                                 error_code='import_rejected')
+        with self.assertRaisesRegex(TaskError, '终态'):
+            self.store.import_generated_conditions(self.doc['id'], self.doc['revision'], SOURCES, completion,
+                                                   condition_request_id=request_id)
+        self.assertEqual(self.store.get(self.doc['id']), self.doc)
+        self.assertEqual(len(self.store.history(self.doc['id'])), 1)
+
+    def test_transport_failure_has_accounted_model_state_and_safe_reason(self):
+        self.client.transport = Mock(side_effect=RuntimeError('/private/secret-path'))
+        with self.assertRaises(ModelError):
+            self.generate()
+        latest = self.store.condition_requests(self.doc['id'])[0]
+        self.assertEqual(latest['state'], 'failed')
+        self.assertEqual(latest['error_code'], 'model_state_unknown')
+        self.assertEqual(latest['calls'][0]['state'], 'unknown')
+        self.assertNotIn('/private/secret-path', json.dumps(latest))
+        self.assertEqual(len(self.calls.history()), 1)
+
+    def test_budget_or_input_rejection_keeps_intent_but_counts_zero_reserved_calls(self):
+        for quota, input_limit, reason in [(0, 65536, 'model_budget_exhausted'),
+                                           (2, 1024, 'model_input_too_large')]:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as folder:
+                store = TaskStore(Path(folder)/'tasks.sqlite')
+                document = store.create('调用前拒绝', SOURCES[0]['text'], 'research')
+                calls = ModelCalls(Path(folder)/'models.sqlite', DeepSeekConfig('synthetic-model', max_input_bytes=input_limit),
+                                   max_requests=quota)
+                transport = Mock()
+                reader = Mock(return_value='synthetic-key')
+                client = DeepSeekClient(calls, transport=transport, key_reader=reader)
+                with self.assertRaises(ModelError):
+                    generate_condition_draft(client, store, document['id'], document['revision'], SOURCES, 'a'*32)
+                self.assertEqual(calls.history(), [])
+                transport.assert_not_called()
+                reader.assert_not_called()
+                request = legacy_condition_request_status(client, store, document['id'])[-1]
+                self.assertEqual(request['state'], 'failed')
+                self.assertEqual(request['error_code'], reason)
+                self.assertEqual(request['call_count'], 0)
+                self.assertEqual(len(request['calls']), 1)  # identity intent is retained
+                self.assertFalse(request['calls'][0]['reserved'])
+                self.assertEqual(request['calls'][0]['state'], 'not_reserved')
+                self.assertEqual(store.get(document['id']), document)
+
+    def test_explicit_recovery_uses_completed_receipt_without_second_call(self):
+        request_id = 'a'*32
+        messages = condition_messages(SOURCES, self.doc['mode'])
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], request_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'call_started', call_id=request_id)
+        self.client.complete_json(request_id, messages)
+        # Simulate process death after the response is saved but before import.
+        status = legacy_condition_request_status(self.client, self.store, self.doc['id'])
+        self.assertEqual(status[-1]['state'], 'awaiting_import')
+        result = recover_condition_request(self.client, TaskStore(self.store.path), self.doc['id'], request_id, SOURCES)
+        self.assertEqual(result['fields']['temperature']['candidates'][0]['value'], '300')
+        self.assertEqual(self.store.condition_requests(self.doc['id'])[0]['state'], 'imported')
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(len(self.calls.history()), 1)
+
+    def test_simultaneous_recovery_before_originating_call_returns_same_imported_result(self):
+        complete = self.client.complete_json
+        recovered = []
+        def complete_then_recover(request_id, messages):
+            completion = complete(request_id, messages)
+            # Receipt is durable, but the original generation worker has not
+            # yet received it or written model_completed. A second same-ID
+            # POST recovers the receipt and wins the single import transaction.
+            recovered.append(recover_condition_request(self.client, self.store, self.doc['id'], request_id, SOURCES))
+            return completion
+        self.client.complete_json = complete_then_recover
+        result = self.generate()
+        self.assertEqual(result, recovered[0])
+        self.assertEqual(result['revision'], self.doc['revision'] + 1)
+        self.assertEqual(len(result['generated_batches']), 1)
+        request = self.store.condition_requests(self.doc['id'])[0]
+        self.assertEqual(request['state'], 'imported')
+        self.assertEqual(sum(event['kind'] == 'imported' for event in request['events']), 1)
+        self.assertFalse(any(event['kind'] == 'failed' for event in request['events']))
+        self.assertEqual(len(self.calls.history()), 1)
+        self.assertEqual(self.transport.call_count, 1)
+
+    def test_completed_persisted_first_or_repair_reply_is_visible_without_import(self):
+        for repair in (False, True):
+            with self.subTest(repair=repair), tempfile.TemporaryDirectory() as folder:
+                store = TaskStore(Path(folder)/'tasks.sqlite')
+                document = store.create('进程边界', SOURCES[0]['text'], 'research')
+                calls = ModelCalls(Path(folder)/'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=2)
+                client = DeepSeekClient(calls, transport=Mock(return_value=(200, response(OUTPUT))),
+                                       key_reader=lambda: 'synthetic-key')
+                request_id = 'a'*32
+                messages = condition_messages(SOURCES)
+                store.begin_condition_request(document['id'], document['revision'], request_id,
+                                              sha256(canonical(SOURCES)), sha256(canonical(messages)))
+                store.record_condition_request_event(document['id'], request_id, 'call_started', call_id=request_id)
+                first = client.complete_json(request_id, messages)
+                store.record_condition_request_event(document['id'], request_id, 'model_completed',
+                                                     call_id=request_id, receipt=first['receipt'])
+                if repair:
+                    repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+                    store.record_condition_request_event(document['id'], request_id, 'validation_failed',
+                                                         call_id=request_id, error_code='source_quote_mismatch')
+                    store.record_condition_request_event(document['id'], request_id, 'repair_started', call_id=repair_id)
+                    second = client.complete_json(repair_id, messages)
+                    store.record_condition_request_event(document['id'], request_id, 'model_completed',
+                                                         call_id=repair_id, receipt=second['receipt'])
+                # The durable model_completed event was written; import never ran.
+                before = store.condition_requests(document['id'])
+                history = store.history(document['id'])
+                status = legacy_condition_request_status(client, TaskStore(store.path), document['id'])[-1]
+                self.assertEqual(status['state'], 'awaiting_import')
+                self.assertTrue(status['recovery_required'])
+                self.assertEqual(len(calls.history()), 2 if repair else 1)
+                self.assertEqual(store.condition_requests(document['id']), before)
+                self.assertEqual(store.history(document['id']), history)
+                self.assertEqual(store.get(document['id']), document)
+                self.assertEqual(client.transport.call_count, 2 if repair else 1)
+
+    def test_unknown_recovery_is_read_only_and_task_revision_change_is_not_overwritten(self):
+        messages = condition_messages(SOURCES, self.doc['mode'])
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], 'a'*32,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], 'a'*32, 'call_started', call_id='a'*32)
+        events = self.store.condition_requests(self.doc['id'])
+        with self.assertRaisesRegex(TaskError, '尚无完整回执'):
+            recover_condition_request(self.client, self.store, self.doc['id'], 'a'*32, SOURCES)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), events)
+        self.assertEqual(self.calls.history(), [])
+        self.client.complete_json('a'*32, messages)
+        status = legacy_condition_request_status(self.client, self.store, self.doc['id'])[-1]
+        self.assertTrue(status['recovery_required'])
+        self.store.add_candidate(self.doc['id'], self.doc['revision'], 'material', evidence('Cu'))
+        history = self.store.history(self.doc['id'])
+        status = legacy_condition_request_status(self.client, self.store, self.doc['id'])[-1]
+        self.assertEqual(status['state'], 'needs_reconciliation')
+        self.assertEqual(status['error_code'], 'task_changed')
+        self.assertFalse(status['recovery_required'])
+        self.assertEqual(self.store.history(self.doc['id']), history)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), events)
+        with self.assertRaisesRegex(TaskError, '任务或定位工具已改变'):
+            recover_condition_request(self.client, self.store, self.doc['id'], 'a'*32, SOURCES)
+        self.assertEqual(self.store.get(self.doc['id'])['fields']['temperature']['candidates'], [])
+
+    def test_completed_old_source_or_tool_does_not_offer_current_request_recovery(self):
+        messages = condition_messages(SOURCES, self.doc['mode'])
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], 'a'*32,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], 'a'*32, 'call_started', call_id='a'*32)
+        completion = self.client.complete_json('a'*32, messages)
+        self.store.record_condition_request_event(self.doc['id'], 'a'*32, 'model_completed',
+                                                 call_id='a'*32, receipt=completion['receipt'])
+        saved = self.store.condition_requests(self.doc['id'])
+        history = self.store.history(self.doc['id'])
+        original_calls = self.calls.history()
+        changed_sources = [{**SOURCES[0], 'text': SOURCES[0]['text'] + ' 修改需求。'}]
+        source_status = legacy_condition_request_status(self.client, self.store, self.doc['id'], changed_sources)[-1]
+        changed_messages = deepcopy(messages)
+        changed_messages[0]['content'] += ' synthetic locator contract change'
+        with patch('auto_lammps.condition_generation.condition_messages', return_value=changed_messages):
+            tool_status = legacy_condition_request_status(self.client, self.store, self.doc['id'])[-1]
+        for status in (source_status, tool_status):
+            self.assertEqual(status['state'], 'needs_reconciliation')
+            self.assertEqual(status['error_code'], 'task_changed')
+            self.assertFalse(status['recovery_required'])
+            self.assertEqual(status['call_count'], 1)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), saved)
+        self.assertEqual(self.store.history(self.doc['id']), history)
+        self.assertEqual(self.calls.history(), original_calls)
+        self.assertEqual(self.store.get(self.doc['id']), self.doc)
+        self.assertEqual(self.transport.call_count, 1)
+
+    def test_legacy_failed_calls_are_reconstructed_read_only_with_real_call_times(self):
+        request_id = sha256(canonical(dict(task_id=self.doc['id'], revision=self.doc['revision'], sources=SOURCES,
+                                         operation='generate-conditions-v1')))[:32]
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = '原文被改写'
+        self.transport.return_value = (200, response(bad))
+        self.client.complete_json(request_id, condition_messages(SOURCES))
+        repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+        self.client.complete_json(repair_id, condition_messages(SOURCES))
+        before = self.store.history(self.doc['id'])
+        reconstructed = legacy_condition_request_status(self.client, self.store, self.doc['id'])
+        self.assertEqual(len(reconstructed), 1)
+        self.assertTrue(reconstructed[0]['reconstructed'])
+        self.assertEqual(reconstructed[0]['state'], 'failed')
+        self.assertEqual(reconstructed[0]['error_code'], 'source_quote_mismatch')
+        self.assertEqual(reconstructed[0]['timestamp_kind'], 'model_call')
+        self.assertEqual([event['at'] for event in reconstructed[0]['events']],
+                         [item['at'] for item in self.calls.history()])
+        self.assertEqual(len(reconstructed[0]['calls']), 2)
+        self.assertEqual(self.store.history(self.doc['id']), before)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), [])
+        self.assertEqual(self.store.get(self.doc['id']), self.doc)
+        self.assertEqual(self.transport.call_count, 2)

@@ -160,8 +160,12 @@ class WebTests(unittest.TestCase):
             self.assertEqual(result.status_code,200,result.text)
             self.assertEqual(result.json()['fields']['temperature']['candidates'][0]['value'],'300')
             sent=json.loads(transport.call_args.args[0])
-            source=json.loads(sent['messages'][1]['content'])['sources']
-            self.assertEqual(source,SOURCES)
+            context=json.loads(sent['messages'][1]['content'])
+            self.assertEqual([s['id'] for s in context['sources']],[s['id'] for s in SOURCES])
+            self.assertEqual([s['origin'] for s in context['sources']],['user'])
+            self.assertTrue(all('text' not in s for s in context['sources']))
+            spans=context['source_locator_adapter']['spans']
+            self.assertEqual(''.join(s['quote'] for s in spans if s['source_id']==SOURCES[0]['id']),SOURCES[0]['text'])
             self.assertFalse(client.get('/api/schema').json()['model_calls_enabled'])
             self.assertEqual(client.post(url,json={'revision':1},headers=HEADERS).status_code,422)
             self.assertEqual(client.post(url,json={'revision':2},headers=HEADERS).status_code,422)
@@ -195,3 +199,69 @@ class ActivityFeedTests(unittest.TestCase):
         self.store.add_guidance(self.doc['id'],self.doc['revision'],'势函数请从我们的势函数库中选取')
         body=self.client.get('/api/tasks/'+self.doc['id']+'/ai-activity').json()
         self.assertTrue(any('引导' in step['title'] for step in body['steps']),[s['title'] for s in body['steps']])
+
+    def test_failed_condition_calls_remain_visible_without_import_or_repeat(self):
+        from copy import deepcopy
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = 'fabricated-source-fragment'
+        calls = ModelCalls(Path(self.tmp.name)/'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=2)
+        transport = Mock(return_value=(200, response(bad)))
+        model = DeepSeekClient(calls, transport=transport, key_reader=lambda:'synthetic-key')
+        doc = self.store.create('条件失败反例', SOURCES[0]['text'], 'research')
+        url = f"/api/tasks/{doc['id']}/generate-conditions"
+        with TestClient(create_app(self.store, model_client=model), base_url=ORIGIN) as client:
+            self.assertEqual(client.post(url,json={'revision':1},headers=HEADERS).status_code,422)
+            self.assertEqual(transport.call_count,2)
+            for _ in range(2):
+                body=client.get(f"/api/tasks/{doc['id']}/ai-activity").json()
+                progress=body['condition_preparation']
+                self.assertEqual(progress['state'],'failed')
+                self.assertEqual(progress['error_code'],'source_quote_mismatch')
+                self.assertEqual(progress['call_count'],2)
+                self.assertNotIn('fabricated-source-fragment',json.dumps(body))
+                self.assertIn('未完成',body['now'])
+                row=next(r for r in client.get('/api/tasks').json()['tasks'] if r['id']==doc['id'])
+                self.assertEqual(row['condition_preparation_state'],'failed')
+            self.assertEqual(self.store.get(doc['id']),doc)
+            self.assertEqual(client.post(url,json={'revision':1},headers=HEADERS).status_code,422)
+            self.assertEqual(transport.call_count,2)
+
+    def test_pre_reservation_budget_failure_is_not_displayed_as_a_model_call(self):
+        calls=ModelCalls(Path(self.tmp.name)/'zero-models.sqlite',DeepSeekConfig('synthetic-model'),max_requests=0)
+        transport=Mock(return_value=(200,response(OUTPUT)))
+        model=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
+        doc=self.store.create('预算拒绝反例',SOURCES[0]['text'],'research')
+        with TestClient(create_app(self.store,model_client=model),base_url=ORIGIN) as client:
+            reply=client.post(f"/api/tasks/{doc['id']}/generate-conditions",json={'revision':1},headers=HEADERS)
+            self.assertEqual(reply.status_code,422)
+            body=client.get(f"/api/tasks/{doc['id']}/ai-activity").json()
+            self.assertEqual(body['condition_preparation']['state'],'failed')
+            self.assertEqual(body['condition_preparation']['call_count'],0)
+            self.assertIn('未发送',body['condition_preparation']['detail'])
+        self.assertEqual(transport.call_count,0)
+        self.assertEqual(self.store.get(doc['id']),doc)
+
+    def test_legacy_quotes_are_checked_read_only_and_not_called_imported(self):
+        from auto_lammps.condition_generation import condition_messages
+        from auto_lammps.manifest import canonical,sha256
+        from copy import deepcopy
+        doc=self.store.create('旧调用失败回溯',SOURCES[0]['text'],'research')
+        bad=deepcopy(OUTPUT);bad['conditions'][0]['quote']='different request'
+        calls=ModelCalls(Path(self.tmp.name)/'models.sqlite',DeepSeekConfig('synthetic-model'),max_requests=2)
+        transport=Mock(return_value=(200,response(bad)))
+        model=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
+        request_id=sha256(canonical(dict(task_id=doc['id'],revision=1,sources=SOURCES,operation='generate-conditions-v1')))[:32]
+        model.complete_json(request_id,condition_messages(SOURCES,'research'))
+        model.complete_json(sha256(canonical({'base':request_id,'repair':1}))[:32],condition_messages(SOURCES,'research'))
+        self.assertEqual(self.store.condition_requests(doc['id']),[])
+        with TestClient(create_app(self.store,model_client=model),base_url=ORIGIN) as client:
+            for _ in range(2):
+                body=client.get(f"/api/tasks/{doc['id']}/ai-activity").json()
+                self.assertTrue(body['condition_preparation']['reconstructed'])
+                self.assertEqual(body['condition_preparation']['state'],'failed')
+                self.assertEqual(body['condition_preparation']['call_count'],2)
+                self.assertIn('核对未通过',body['now'])
+                self.assertTrue(any('只读' in s['detail'] for s in body['steps']))
+        self.assertEqual(transport.call_count,2)
+        self.assertEqual(self.store.get(doc['id']),doc)
+        self.assertEqual(self.store.condition_requests(doc['id']),[])

@@ -405,7 +405,7 @@ async function generateConditions() {
     await afterChange('条件草稿已整理。请核对摘要中的条件与待明确事项。');
   } finally {
     await refreshModelStatus();
-    render();
+    if(current?.id===id){render();await refreshActivity();}
   }
 }
 $('#generate-conditions').onclick=()=>action(generateConditions);
@@ -660,6 +660,7 @@ function planFilesText(review){
 
 let activityTimer=null;
 let activityData=null;
+let activityGeneration=0;
 
 function researchText(value){
   return String(value||'').replace(/\\[()[\]]/g,'').replace(/\\times/g,'×')
@@ -697,6 +698,9 @@ function proposalRoundLabel(record){
 function renderCurrentActivity(){
   const title=$('#ai-current-title'),detail=$('#ai-current-detail'),meta=$('#ai-current-meta');
   if(!title)return;
+  const generate=$('#generate-conditions');
+  if(generate)generate.textContent='根据需求整理条件';
+  const taskActivity=activityData?.task_id===current?.id?activityData:null;
   const job=executionState?.job||ordinaryExecutionJob();
   const preparing=candidateRecord&&['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state);
   if(preparing){
@@ -713,31 +717,46 @@ function renderCurrentActivity(){
     title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
       (job.state==='analyzed'?'已保存分析结果，请查看下方结果；科学结论仍需核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
-    meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
+    meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState?.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
+  }else if(current?.status!=='conditions_frozen'&&taskActivity?.condition_preparation){
+    const condition=taskActivity.condition_preparation;
+    title.textContent=condition.label||'正在核对需求中的条件';
+    detail.textContent=condition.detail||'模型答复和来源核对分开记录；未通过核对的条件不会写入方案。';
+    meta.textContent='条件整理已记录 '+(condition.call_count||0)+' 次模型调用 · '+(condition.state==='failed'?'尚未生成方案或提交计算；失败和费用保留。':'条件确认后才能准备方案。');
+    if(generate)generate.textContent=condition.recovery_required&&!condition.reconstructed?'恢复已返回的条件（不新增调用）':'根据需求整理条件';
   }else{
-    title.textContent=activityData?.now||'等待准备计算方案';
+    title.textContent=taskActivity?.now||'等待准备计算方案';
     detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':'应用按已确认的研究需求组织方案。';
     meta.textContent='进度来自应用记录；刷新页面不会重新生成方案或提交计算。';
   }
 }
 
+function scheduleActivityRefresh(){
+  if(activityTimer){clearTimeout(activityTimer);activityTimer=null;}
+  activityTimer=setTimeout(()=>{activityTimer=null;refreshActivity();},6000);
+}
+
 async function refreshActivity(){
   const box=$('#ai-activity'); if(!box) return;
   const id=current?.id;
-  if(!id){box.replaceChildren();return;}
+  const generation=++activityGeneration;
+  if(!id){box.replaceChildren();if(activityTimer){clearTimeout(activityTimer);activityTimer=null;}return;}
   let data;
   try { data=await api(`/api/tasks/${id}/ai-activity`); }
   catch(error){
+    if(current?.id!==id||generation!==activityGeneration)return;
     box.replaceChildren(node('p','暂时读不到进度：'+error.message,'subtle'));
+    scheduleActivityRefresh();
     return;
   }
-  if(current?.id!==id) return;
+  if(current?.id!==id||generation!==activityGeneration) return;
   activityData=data;
   renderCurrentActivity();
   const note=$('#ai-activity-note');
   if(note) note.textContent=(data.now?('当前：'+data.now+'　'):'')+(data.note||'');
   const steps=data.steps||[];
   box.replaceChildren();
+  scheduleActivityRefresh();
   if(!steps.length){ box.append(node('p','还没有进度记录。','subtle')); return; }
   const list=node('ol',undefined,'timeline');
   steps.forEach((step,index)=>{
@@ -755,10 +774,8 @@ async function refreshActivity(){
     list.append(item);
   });
   box.append(list);
-  // 进度是"一段时间一个输出"，所以展开时定时刷新，并把视图滚到最新一条。
-  if(activityTimer){clearTimeout(activityTimer);activityTimer=null;}
-  const panel=$('#ai-activity-panel');
-  if(panel&&panel.open){activityTimer=setTimeout(()=>{activityTimer=null;action(refreshActivity);},6000);}
+  // The current stage remains live even when the detailed event list is collapsed.
+  // These are read-only local records, independent of mutation serialization.
   box.scrollTop=box.scrollHeight;
 }
 
@@ -1838,12 +1855,12 @@ $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-
 
 // 展开时自动加载活动明细（收起时不请求）。
 const activityPanel=document.getElementById('ai-activity-panel');
-if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)action(refreshActivity);};
+if(activityPanel) activityPanel.ontoggle=()=>{if(activityPanel.open)refreshActivity();};
 checkForUpdate();setInterval(checkForUpdate,30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkForUpdate();});
 bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-panel').scrollIntoView({block:'start',behavior:'smooth'});refreshActivity();});
 bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
-bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();action(refreshActivity);});bind('guidance-send',()=>action(sendGuidance));
+bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();refreshActivity();});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
 
@@ -1888,9 +1905,14 @@ function taskState(t){
   if(prep==='clarification') return 'clarification';
   if(prep==='failed') return 'preparation_failed';
   if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(prep)) return 'preparing';
+  if(t.status!=='conditions_frozen'){
+    if(t.condition_preparation_state==='failed')return 'condition_failed';
+    if(['needs_reconciliation','uncertain'].includes(t.condition_preparation_state))return 'condition_attention';
+    if(['prepared','generating','validating','repairing','awaiting_import'].includes(t.condition_preparation_state))return 'understanding';
+  }
   return t.status==='conditions_frozen'?'frozen':'draft';
 }
-function taskStateLabel(t){return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',reconcile_required:'计算记录待核对',unknown:'提交状态待核对',dispatching:'正在提交',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败'})[taskState(t)]||'状态待核对';}
+function taskStateLabel(t){return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',reconcile_required:'计算记录待核对',unknown:'提交状态待核对',dispatching:'正在提交',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败',condition_failed:'需求条件整理失败',condition_attention:'条件整理记录待核对',understanding:'正在整理需求条件'})[taskState(t)]||'状态待核对';}
 function statsFor(tasks, box){box.replaceChildren();for(const [label,value] of [['全部任务',tasks.length],['运行中',tasks.filter(t=>taskState(t)==='running').length],['排队中',tasks.filter(t=>['queued','accepted'].includes(taskState(t))).length],['计算结束',tasks.filter(t=>taskState(t)==='completed').length],['验收通过',tasks.filter(t=>taskState(t)==='validated').length],['已确认结束',tasks.filter(t=>taskFinished(t)).length]]){const c=node('div',undefined,'stat'),icon=node('span',undefined,'stat-icon');icon.append(uiIcon(label==='运行中'?'play':label==='排队中'?'clock':label==='计算结束'?'check':'tasks'));c.append(icon,node('small',label),node('strong',String(value)));box.append(c);}}
 async function showHome(){current=null;hideViews('home-view');selectNavigation('');recordRoute('#home');await listTasks();statsFor(taskCache,$('#home-stats'));const papers=await api('/api/papers');const selected=papers.papers.filter(p=>p.selection==='selected');const box=$('#home-cases-content');box.replaceChildren();for(const p of selected.slice(0,2)){const c=node('article',undefined,'compact-case');c.append(node('span','文献复现验证','badge pending'),node('h3',p.title),node('small','DOI '+p.doi),node('p',p.stage));const go=node('button','查看进度','quiet');go.onclick=()=>requestRoute(p.tasks.length?'#'+p.tasks[0].id:'#papers');c.append(go);box.append(c);}if(!selected.length)box.append(node('p','尚未选定验证案例。','subtle'));const status=$('#home-status');status.replaceChildren();for(const [k,v] of [['计算状态',taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准'],['案例清单',selected.length+' 篇已选'],['模型连接','点击模型设置查看'],['存储空间','未连接实时用量查询']])status.append(node('dt',k),node('dd',v));const dl=$('#home-downloads');dl.replaceChildren();const finished=taskCache.filter(t=>t.reference_stage||taskState(t)==='completed');for(const t of finished.slice(0,3)){const b=node('button',t.title,'download-task');b.onclick=()=>requestRoute('#'+t.id);b.append(node('small','打开结果与下载文件'));dl.append(b);}if(!finished.length)dl.append(node('p','结果文件会随任务保存在这里。','subtle'));}
 $('#go-home').onclick=e=>{e.preventDefault();requestRoute('#home');};

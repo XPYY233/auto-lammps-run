@@ -3,14 +3,60 @@
 Quotes prove text location, not scientific meaning. Imported values remain
 unconfirmed; this module has no tool executor, file fetcher or HPC permission.
 """
+from pathlib import Path
+import re
+
 from .deepseek import ModelError
 from .manifest import canonical, sha256
-from .tasks import ESSENTIAL, FIELDS, TaskError, candidate, text
+from .tasks import ESSENTIAL, FIELDS, TaskError, StaleTask, FrozenTask, candidate, text
 from .resource_limits import description as resource_policy_description
 
 
 class ModelOutputError(TaskError):
     """The model's answer failed validation; only this class is worth one repair call."""
+
+
+def condition_evidence_spans(sources):
+    """Versioned, exact source locations; no inference or fuzzy correction.
+
+    Offsets count Unicode characters in the canonical source_bundle text, not
+    UTF-8 bytes. Only permitted user/paper inputs receive this locator tool;
+    author code never receives generated span identifiers.
+    """
+    spans = []
+    for source in source_bundle(sources):
+        if source['origin'] not in {'user', 'paper'}:
+            continue
+        # Keep punctuation and whitespace. Group adjacent short sentences so
+        # locator metadata cannot overwhelm otherwise valid ordinary input.
+        start = 0
+        for match in re.finditer(r'[。！？\n；;]|$', source['text']):
+            stop = match.end()
+            while stop - start > 6000:
+                end = start + 6000
+                spans.append(_evidence_span(source, start, end))
+                start = end
+            if stop > start and (stop - start >= 512 or stop == len(source['text'])):
+                spans.append(_evidence_span(source, start, stop))
+                start = stop
+    if len(spans) > 1024 or len(canonical(spans)) > 262144:
+        raise TaskError('原文定位片段过多，请按相关段落整理')
+    return spans
+
+
+def _evidence_span(source, start, end):
+    source_digest = sha256(canonical(source))
+    return dict(id=sha256(canonical(dict(source_sha256=source_digest, start=start, end=end)))[:24],
+                source_id=source['id'], source_sha256=source_digest, start=start, end=end,
+                quote=source['text'][start:end])
+
+
+def condition_evidence_context(sources):
+    return dict(tool='condition_source_spans', version=1,
+                source_sha256=sha256(Path(__file__).read_bytes()),
+                offsets='unicode_character_offsets_in_canonical_source_text',
+                allowed_origins=['user', 'paper'], matching='exact_only',
+                semantic_verification='not_performed', spans=condition_evidence_spans(sources))
 
 
 def source_bundle(sources):
@@ -42,15 +88,25 @@ def condition_messages(sources, mode='research'):
         '仅提取原文明确支持的输入。遇到冲突保留多个条目。缺项放入 questions，不要猜测。'
         '同一研究的多个尺寸、温度或其他扫描点是一个完整条件，不是互斥矛盾；使用包含整个列表的连续原文作为一个 value。'
         '输出 JSON 对象，且仅含 conditions 和 questions 两个列表。conditions 每项仅含 '
-        'field,value,unit,source_id,quote；value 必须原样出现在 quote 内，非空 unit 也必须出现在 quote 内，'
+        'field,value,unit,source_id，以及 evidence_span_id 或 quote；优先从主动提供的原文定位 Adapter '
+        '中直接选用 evidence_span_id，可信端将按该 ID 的起止位置取得原文，不需要重打 quote。'
+        '不得改写 ID、来源或原文。仅当没有覆盖所需内容的片段时使用 quote。'
+        'value 必须原样出现在该片段或 quote 内，非空 unit 也必须出现，'
         'quote 必须是所给 source_id 对应文本的连续原文。questions 每项仅含 field,question。'
         '不要确认条件。无法从原文得到任何输入时 conditions 为空。'
         '示例 JSON：{"conditions":[{"field":"temperature","value":"300","unit":"K",'
         '"source_id":"example","quote":"温度为 300 K"}],"questions":[]}。'
         '示例不是任务条件，不要复制。科研计算不要求用户提供论文。可用 field 如下：' + canonical(fields).decode()
     )
+    # Source spans already contain every original character, in order. Sending
+    # the whole text a second time would halve the ordinary request capacity.
+    # Code does not receive this locator tool; preserve its legacy text contract.
+    model_sources = [{key: value for key, value in source.items() if key != 'text'}
+                     | {'source_sha256': sha256(canonical(source))}
+                     if source['origin'] in {'user', 'paper'} else source for source in sources]
     return [{'role': 'system', 'content': system},
-            {'role': 'user', 'content': canonical({'sources': sources}).decode()}]
+            {'role': 'user', 'content': canonical({'sources': model_sources,
+                'source_locator_adapter': condition_evidence_context(sources)}).decode()}]
 
 
 # 模型偶尔会多给一个无关键（例如 units/notes/summary）。这些被忽略而不是被采纳，
@@ -61,6 +117,7 @@ IGNORED_TOP_KEYS = {'units', 'notes', 'summary', 'comment', 'comments'}
 def validate_conditions(sources, result):
     sources = source_bundle(sources)
     by_id = {source['id']: source for source in sources}
+    spans = {span['id']: span for span in condition_evidence_spans(sources)}
     if not isinstance(result, dict):
         raise ModelOutputError('模型条件输出不是 JSON 对象，收到：' + type(result).__name__)
     keys = set(result)
@@ -79,8 +136,10 @@ def validate_conditions(sources, result):
     for index, item in enumerate(result['conditions']):
         if not isinstance(item, dict):
             raise ModelOutputError(f'模型条件第 {index} 条不是对象，收到：{type(item).__name__}')
-        extra = sorted(set(item) - {'field', 'value', 'unit', 'source_id', 'quote'})
-        missing = sorted({'field', 'value', 'unit', 'source_id', 'quote'} - set(item))
+        extra = sorted(set(item) - {'field', 'value', 'unit', 'source_id', 'quote', 'evidence_span_id'})
+        missing = sorted({'field', 'value', 'unit', 'source_id'} - set(item))
+        if not {'quote', 'evidence_span_id'} & set(item):
+            missing.append('quote 或 evidence_span_id')
         if extra or missing:
             detail = []
             if missing: detail.append('缺少 ' + '、'.join(missing))
@@ -91,7 +150,17 @@ def validate_conditions(sources, result):
         if not isinstance(item['source_id'], str) or item['source_id'] not in by_id:
             raise ModelOutputError(f"模型条件第 {index} 条引用了未知来源：{str(item['source_id'])[:40]}")
         source = by_id[item['source_id']]
-        quote, value, unit = text(item['quote'], 6000), text(item['value'], 4000), text(item['unit'], 80, required=False)
+        span = None
+        if 'evidence_span_id' in item:
+            span = spans.get(item['evidence_span_id']) if isinstance(item['evidence_span_id'], str) else None
+            if span is None or span['source_id'] != source['id']:
+                raise ModelOutputError(f'模型条件第 {index} 条的原文定位 ID 或来源不匹配')
+            quote = span['quote']
+            if 'quote' in item and item['quote'] != quote:
+                raise ModelOutputError(f'模型条件第 {index} 条的 quote 与原文定位片段不同')
+        else:
+            quote = text(item['quote'], 6000)
+        value, unit = text(item['value'], 4000), text(item['unit'], 80, required=False)
         if quote not in source['text']:
             raise ModelOutputError(f"模型条件第 {index} 条的 quote 不在 {item['source_id']} 原文中：{quote[:60]}")
         if value not in quote:
@@ -103,6 +172,9 @@ def validate_conditions(sources, result):
         choice['generated_evidence'] = dict(source_id=source['id'], quote=quote,
                                            source_sha256=sha256(canonical(source)),
                                            semantic_verification='not_performed')
+        if span is not None:
+            choice['generated_evidence'].update(evidence_span_id=span['id'], source_start=span['start'],
+                                                source_end=span['end'])
         entry = {'field': item['field'], 'candidate': choice}
         if entry not in choices:
             choices.append(entry)
@@ -115,6 +187,47 @@ def validate_conditions(sources, result):
             raise TaskError('模型缺项说明引用未知条件')
         questions.append(dict(field=item['field'], question=text(item['question'], 2000)))
     return choices, questions, sources
+
+
+def _condition_error_code(error):
+    if isinstance(error, (StaleTask, FrozenTask)):
+        return 'task_changed'
+    message = str(error)
+    if 'quote 不在' in message or 'quote 与原文定位' in message:
+        return 'source_quote_mismatch'
+    if 'value 不在' in message:
+        return 'value_quote_mismatch'
+    if 'unit 不在' in message:
+        return 'unit_quote_mismatch'
+    if '来源' in message or '原文定位' in message:
+        return 'source_identity_invalid'
+    if isinstance(error, ModelOutputError):
+        return 'output_contract_invalid'
+    if isinstance(error, ModelError):
+        if message == 'model_budget_exhausted':
+            return 'model_budget_exhausted'
+        if message == 'input_too_large':
+            return 'model_input_too_large'
+        return 'model_state_unknown' if 'unknown' in message else 'model_request_failed'
+    return 'import_rejected'
+
+
+def _public_model_usage(receipt):
+    usage = receipt.get('usage') if isinstance(receipt, dict) else None
+    return ({key: value for key, value in usage.items()
+             if key in {'prompt_tokens', 'completion_tokens', 'total_tokens'}
+             and type(value) is int and value >= 0} if isinstance(usage, dict) else None)
+
+
+def _public_model_state(receipt):
+    state = receipt.get('state') if isinstance(receipt, dict) else None
+    return state if isinstance(state, str) and state in {
+        'not_sent', 'unknown', 'rejected', 'response_invalid', 'completed'} else 'unknown'
+
+
+def _imported_condition_document(store, identifier, request_id):
+    request = next((item for item in store.condition_requests(identifier) if item['request_id'] == request_id), None)
+    return store.get(identifier) if request and request['state'] == 'imported' else None
 
 
 def generate_condition_draft(client, store, identifier, revision, sources, request_id):
@@ -130,27 +243,201 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
         raise TaskError('任务已更新或冻结，请先核对当前版本')
     bundle = source_bundle(sources)
     messages = condition_messages(bundle, current['mode'])
-    completion = client.complete_json(request_id, messages)
-    if completion['receipt']['state'] != 'completed':
-        raise ModelError('condition_generation_not_completed')
+    if not store.begin_condition_request(identifier, revision, request_id, sha256(canonical(bundle)),
+                                         sha256(canonical(messages))):
+        return recover_condition_request(client, store, identifier, request_id, bundle)
+    call_id = request_id
     try:
-        # Store validates quote provenance again within the import path. If the
-        # task changed during the request, its revision guard rejects the whole
-        # import; the already-issued model call remains in the separate ledger.
-        return store.import_generated_conditions(identifier, revision, bundle, completion)
-    except ModelOutputError as error:
+        store.record_condition_request_event(identifier, request_id, 'call_started', call_id=request_id)
+        completion = client.complete_json(request_id, messages)
+        store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=request_id,
+                                             receipt=completion['receipt'])
+        if completion['receipt']['state'] != 'completed':
+            raise ModelError('condition_generation_not_completed')
+        try:
+            return store.import_generated_conditions(identifier, revision, bundle, completion,
+                                                     condition_request_id=request_id)
+        except ModelOutputError as error:
+            store.record_condition_request_event(identifier, request_id, 'validation_failed', call_id=request_id,
+                                                 error_code=_condition_error_code(error))
+            repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+            repair_messages = messages + [
+                {'role': 'assistant', 'content': canonical(completion['value']).decode()},
+                {'role': 'user', 'content': canonical({
+                    'correction': '上一次输出未通过校验，请只修正被指出的问题后重新输出同一格式。'
+                                  '优先直接使用原文定位 Adapter 中的 evidence_span_id，不重打引用文本。'
+                                  'quote 必须是来源中连续的原文；value/unit 必须在对应片段内。不要改值或新增其他改动。',
+                    'failure': str(error)[:400]}).decode()}]
+            store.record_condition_request_event(identifier, request_id, 'repair_started', call_id=repair_id)
+            call_id = repair_id
+            repair = client.complete_json(repair_id, repair_messages)
+            store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=repair_id,
+                                                 receipt=repair['receipt'])
+            if repair['receipt']['state'] != 'completed':
+                raise ModelError('condition_repair_not_completed')
+            return store.import_generated_conditions(identifier, revision, bundle, repair,
+                                                     condition_request_id=request_id)
+    except Exception as error:
+        imported = _imported_condition_document(store, identifier, request_id)
+        if imported is not None:
+            # A simultaneous explicit POST may have recovered the completed
+            # receipt first. The originating worker returns the same success;
+            # it must not append a failure after the committed import.
+            return imported
+        latest = next(item for item in store.condition_requests(identifier) if item['request_id'] == request_id)
+        if latest['state'] == 'failed':
+            raise
+        found = client.calls.lookup(call_id)
+        receipt = found.get('receipt') if found else None
+        store.record_condition_request_event(identifier, request_id, 'failed', call_id=call_id,
+                                             error_code=_condition_error_code(error), receipt=receipt,
+                                             reserved=found is not None)
+        raise
+
+
+def recover_condition_request(client, store, identifier, request_id, sources):
+    """Explicit POST recovery from saved receipts, never a new model call.
+
+    A crash between the completed model receipt and transactional import can
+    resume the same request. A terminal failure is retained, not reclassified.
+    """
+    bundle = source_bundle(sources)
+    current = store.get(identifier)
+    request = next((item for item in store.condition_requests(identifier) if item['request_id'] == request_id), None)
+    if request is None:
+        raise TaskError('没有可恢复的条件整理请求')
+    if request['state'] == 'imported':
+        return store.get(identifier)
+    if request['state'] == 'failed':
+        raise TaskError('此条件整理已失败，原调用与原因已保留；未发送新调用')
+    if (request['revision'] != current['revision'] or request['source_sha256'] != sha256(canonical(bundle))
+            or request['messages_sha256'] != sha256(canonical(condition_messages(bundle, current['mode'])))):
+        raise TaskError('任务或定位工具已改变，不能将旧结果导入新条件；未发送新调用')
+    ids = [request_id, sha256(canonical({'base': request_id, 'repair': 1}))[:32]]
+    found = [(call_id, client.calls.lookup(call_id)) for call_id in ids]
+    found = [(call_id, call) for call_id, call in found if call is not None]
+    if not found or not isinstance(found[-1][1].get('receipt'), dict):
+        raise TaskError('已有模型请求尚无完整回执，请核对状态；未发送新调用')
+    call_id, call = found[-1]
+    receipt = call['receipt']
+    if receipt.get('state') != 'completed':
+        raise TaskError('已有模型请求尚未完成或状态未知，不能导入或重发')
+    value = receipt.get('structured_output')
+    if receipt.get('output_sha256') != sha256(canonical(value)):
+        raise TaskError('已有模型输出摘要不一致，不能恢复')
+    clean_receipt = {key: val for key, val in receipt.items() if key != 'structured_output'}
+    try:
+        store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=call_id,
+                                             receipt=clean_receipt)
+        return store.import_generated_conditions(identifier, request['revision'], bundle,
+            dict(value=value, request_id=call_id, receipt=clean_receipt), condition_request_id=request_id)
+    except StaleTask:
+        # Another worker may have imported this exact request in the meantime.
+        latest = next(item for item in store.condition_requests(identifier) if item['request_id'] == request_id)
+        if latest['state'] == 'imported':
+            return store.get(identifier)
+        raise
+    except Exception as error:
+        imported = _imported_condition_document(store, identifier, request_id)
+        if imported is not None:
+            return imported
+        latest = next(item for item in store.condition_requests(identifier) if item['request_id'] == request_id)
+        if latest['state'] == 'failed':
+            raise
+        store.record_condition_request_event(identifier, request_id, 'failed', call_id=call_id,
+                                             error_code=_condition_error_code(error), receipt=clean_receipt)
+        raise
+
+
+def legacy_condition_request_status(client, store, identifier, sources=None):
+    """Read-only legacy reconstruction, explicitly distinct from saved events.
+
+    Older deployments kept the calls and responses but no request progress.
+    Re-check only the exact deterministic v1 identities for this task and source;
+    do not create history, import conditions, or issue a model call on a GET.
+    """
+    document = store.get(identifier)
+    bundle = source_bundle(sources or [dict(id='user-request', origin='user', locator='用户原始任务描述',
+                                            text=document['prompt'])])
+    current_source_sha256 = sha256(canonical(bundle))
+    current_messages_sha256 = sha256(canonical(condition_messages(bundle, document['mode'])))
+    durable = store.condition_requests(identifier)
+    # Reconcile evidence read-only after a service crash. A completed receipt
+    # without an import is not success; an absent receipt is still uncertain.
+    for request in durable:
+        for call in request['calls']:
+            found = client.calls.lookup(call['call_id'])
+            call['reserved'] = found is not None
+            receipt = found.get('receipt') if found else None
+            if found is None:
+                call.update(state='not_reserved', usage=None)
+            elif receipt is not None:
+                call['state'] = _public_model_state(receipt)
+                call['usage'] = _public_model_usage(receipt)
+        request['call_count'] = sum(call['reserved'] is True for call in request['calls'])
+        if request['state'] in {'failed', 'imported'}:
+            continue
+        if request['calls']:
+            latest_call = request['calls'][-1]
+            if latest_call['state'] == 'completed' and request['state'] in {
+                    'prepared', 'generating', 'validating', 'repairing'}:
+                if (request['revision'] == document['revision']
+                        and request['source_sha256'] == current_source_sha256
+                        and request['messages_sha256'] == current_messages_sha256):
+                    request.update(state='awaiting_import', label='AI 已返回，条件尚未导入，需恢复已有请求',
+                                   recovery_required=True)
+                else:
+                    request.update(state='needs_reconciliation', error_code='task_changed',
+                                   label='已有旧版本条件响应，需求或定位工具已变化，需核对原记录',
+                                   recovery_required=False)
+    known = {item['request_id'] for item in durable}
+    reconstructed = []
+    # Preserve earlier model revisions if a user edited conditions afterward.
+    for item in store.history(identifier):
+        revision = item['revision']
+        request_id = sha256(canonical(dict(task_id=identifier, revision=revision, sources=bundle,
+                                           operation='generate-conditions-v1')))[:32]
+        if request_id in known:
+            continue
         repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
-        repair_messages = messages + [
-            {'role': 'assistant', 'content': canonical(completion['value']).decode()},
-            {'role': 'user', 'content': canonical({
-                'correction': '上一次输出未通过校验，请只修正被指出的问题后重新输出同一格式。'
-                              'quote 必须是所给来源文本中**连续出现**的原文片段（包含标点与括号），'
-                              'value 必须出现在该 quote 内。不要新增其他改动。',
-                'failure': str(error)[:400]}).decode()}]
-        repair = client.complete_json(repair_id, repair_messages)
-        if repair['receipt']['state'] != 'completed':
-            raise ModelError('condition_repair_not_completed')
-        return store.import_generated_conditions(identifier, revision, bundle, repair)
+        calls, events = [], []
+        for call_id in (request_id, repair_id):
+            found = client.calls.lookup(call_id)
+            if found is None:
+                continue
+            receipt = found.get('receipt')
+            safe_usage = _public_model_usage(receipt)
+            model_state = _public_model_state(receipt)
+            error_code, state, label = '', 'uncertain', '已有模型调用，结果状态需核对，未重新发送'
+            if model_state == 'completed':
+                state, label = 'awaiting_import', 'AI 已返回，条件尚未导入'
+                try:
+                    value = receipt.get('structured_output')
+                    if receipt.get('output_sha256') != sha256(canonical(value)):
+                        raise ModelOutputError('模型输出摘要不符')
+                    choices, questions, _ = validate_conditions(bundle, value)
+                    if document['mode'] == 'research' and (
+                            any(choice['field'] == 'reference' for choice in choices)
+                            or any(question['field'] == 'reference' for question in questions)):
+                        raise TaskError('科研计算不要求论文标识，模型整理结果未导入')
+                    if call_id in document.get('generated_batches', {}):
+                        state, label = 'imported', '条件已整理，待用户确认'
+                except TaskError as error:
+                    state, label, error_code = 'failed', '原文依据核对未通过，条件未导入', _condition_error_code(error)
+            elif model_state in {'not_sent', 'rejected', 'response_invalid'}:
+                state, label, error_code = 'failed', '模型请求未完成，已有调用记录已保留', 'model_request_failed'
+            calls.append(dict(call_id=call_id, state=model_state, reserved=True, usage=safe_usage))
+            events.append(dict(sequence=len(events) + 1, kind='legacy_reconstructed', at=found.get('at'),
+                               state=state, label=label, error_code=error_code, call_id=call_id,
+                               reconstructed=True))
+        if events:
+            latest = events[-1]
+            reconstructed.append(dict(request_id=request_id, revision=revision, at=events[0]['at'] or item['at'],
+                                      updated_at=latest['at'], timestamp_kind='model_call' if latest['at'] else 'task_revision',
+                                      state=latest['state'], label=latest['label'],
+                                      error_code=latest['error_code'], calls=calls, call_count=len(calls),
+                                      events=events, reconstructed=True))
+    return sorted(durable + reconstructed, key=lambda item: (item['at'], item['request_id']))
 
 def completion_messages(missing, extracted, mode='research', request='', resources=None, guidance=None):
     """Ask for confirmable defaults instead of extracting unsupported facts."""

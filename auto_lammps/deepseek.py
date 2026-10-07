@@ -249,11 +249,11 @@ class ModelCalls:
         if not isinstance(identifier, str) or not re.fullmatch('[a-f0-9]{32}', identifier):
             raise ModelError('invalid_request_id')
         with self.transaction() as db:
-            row = db.execute('SELECT c.request_sha256,r.document FROM calls c '
+            row = db.execute('SELECT c.request_sha256,r.document,c.at FROM calls c '
                              'LEFT JOIN receipts r ON c.id=r.id WHERE c.id=?', (identifier,)).fetchone()
         if row is None:
             return None
-        return dict(request_id=identifier, request_sha256=row[0],
+        return dict(request_id=identifier, request_sha256=row[0], at=row[2],
                     receipt=json.loads(row[1]) if row[1] else None)
 
 
