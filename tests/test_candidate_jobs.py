@@ -1,5 +1,6 @@
 """Preparation lifecycle with real persistence, threads and a killed worker."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import json
 import multiprocessing
 import os
@@ -13,6 +14,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from auto_lammps.candidate_jobs import CandidateHistory, CandidateService
+from auto_lammps.agent_candidates import PlanIterationLimit
 from auto_lammps.deepseek import DeepSeekClient, ModelCalls
 from auto_lammps.ledger import Resources
 from auto_lammps.potentials import PotentialAdapter, PotentialCatalog
@@ -91,7 +93,7 @@ class CandidateJobTests(unittest.TestCase):
         self.assertEqual(len({job['id'] for job in jobs}), 1)
         final = self.finished()
         self.assertEqual(final['state'], 'prepared')
-        self.assertEqual([e['state'] for e in final['events']], ['queued', 'running', 'model_requested', 'model_proposal', 'preparing_files', 'prepared'])
+        self.assertEqual([e['state'] for e in final['events']], ['queued', 'running', 'model_requested', 'proposal_request', 'model_proposal', 'preparing_files', 'prepared'])
         restarted = self.make_service()
         restarted.start()
         self.assertEqual(self.enqueue(restarted)['id'], final['id'])
@@ -155,7 +157,7 @@ class CandidateJobTests(unittest.TestCase):
         final = self.finished()
         self.assertEqual(final['state'], 'prepared')
         self.assertEqual([e['state'] for e in final['events']],
-                         ['queued', 'running', 'model_requested', 'model_proposal', 'preparing_files', 'prepared'])
+                         ['queued', 'running', 'model_requested', 'proposal_request', 'model_proposal', 'preparing_files', 'prepared'])
         self.assertIn(b'pair_style meam', self.service.file(self.doc['id'], 'in.lammps'))
         receipt = json.loads(self.service.file(self.doc['id'], 'generation.json'))
         self.assertFalse(receipt['execution_authorized'])
@@ -305,6 +307,112 @@ class CandidateJobTests(unittest.TestCase):
             self.assertFalse(data['downloads_enabled'])
             self.assertFalse(browser.get('/api/schema').json()['candidate_preparation']['enabled'])
             self.assertEqual(browser.post(base, json={'revision': self.doc['revision']}, headers=HEADERS).status_code, 422)
+
+    def bounded_service(self, values):
+        f=self.fixture
+        f.client.calls=ModelCalls(f.root/'bounded-models.sqlite',f.calls.config,max_requests=12)
+        f.transport.side_effect=[(200,candidate_tests.response(value)) for value in values]
+        self.service=self.make_service();self.history=self.service.history
+
+    def invalid_plan(self, index):
+        value=deepcopy(self.fixture.value)
+        value['workflow']='include forbidden-'+str(index)+'.lmp'
+        return value
+
+    def test_three_rounds_succeed_and_keep_complete_plan_approvable_without_fourth(self):
+        self.bounded_service([self.invalid_plan(1),self.invalid_plan(2),deepcopy(self.fixture.value)])
+        self.enqueue();job=self.finished()
+        self.assertEqual(job['state'],'prepared',job['result'])
+        self.assertEqual(job['proposal_rounds'],{'limit':3,'used':3,'remaining':0,'historical_count_unknown':False})
+        self.assertEqual(self.fixture.transport.call_count,3)
+        revision=self.tasks.get(self.doc['id'])['revision']
+        with TestClient(create_app(self.tasks,model_client=self.fixture.client,candidate_service=self.service),base_url=ORIGIN) as web:
+            plan=web.get('/api/tasks/'+self.doc['id']+'/plan').json()
+            self.assertEqual({f['name'] for f in plan['files']},{'in.lammps','structure.data','analysis.json','generation.json'})
+            self.assertEqual(plan['proposal_rounds']['remaining'],0)
+            rejected=web.post('/api/tasks/'+self.doc['id']+'/plan/revise',json={'revision':revision,'note':'Another rewrite'},headers=HEADERS)
+            self.assertEqual(rejected.status_code,422,rejected.text)
+            self.assertIn('三轮',rejected.text)
+            self.assertEqual(self.tasks.get(self.doc['id'])['revision'],revision)
+            self.assertEqual(self.tasks.guidance(self.doc['id']),[])
+            approved=web.post('/api/tasks/'+self.doc['id']+'/plan/approve',json={'revision':revision,'note':'Synthetic scope approval'},headers=HEADERS)
+            self.assertEqual(approved.status_code,200,approved.text)
+        self.assertEqual(self.history.get(self.doc['id'])['result']['snapshot_sha256'],job['result']['snapshot_sha256'])
+        self.assertEqual(self.fixture.transport.call_count,3)
+
+    def test_page_answers_across_separate_preparations_share_task_limit(self):
+        question={**deepcopy(self.fixture.value),'questions':['Clarify synthetic geometry'],
+                  'structure':None,'potential_pin':None,'workflow':None,'analysis':None}
+        self.bounded_service([question,{**question,'summary':'Second synthetic clarification'},deepcopy(self.fixture.value)])
+        self.enqueue()
+        self.assertEqual(self.finished()['state'],'clarification')
+        with TestClient(create_app(self.tasks,model_client=self.fixture.client,candidate_service=self.service),base_url=ORIGIN) as web:
+            base='/api/tasks/'+self.doc['id']+'/candidate'
+            for answer,expected in [('Synthetic answer 1','clarification'),('Synthetic answer 2','prepared')]:
+                reply=web.post(base,json={'revision':self.doc['revision'],'answers':answer},headers=HEADERS)
+                self.assertEqual(reply.status_code,202,reply.text)
+                self.assertEqual(self.finished()['state'],expected)
+            rejected=web.post(base,json={'revision':self.doc['revision'],'answers':'A fourth request'},headers=HEADERS)
+            self.assertEqual(rejected.status_code,422,rejected.text)
+            self.assertEqual(rejected.json()['code'],'plan_iteration_limit')
+        job=self.history.get(self.doc['id'])
+        self.assertEqual(job['proposal_rounds']['used'],3)
+        self.assertEqual(job['proposal_rounds']['remaining'],0)
+        self.assertEqual(self.fixture.transport.call_count,3)
+        self.assertEqual(job['state'],'prepared')
+
+    def test_failed_three_rounds_cannot_reset_on_answers_config_or_restart(self):
+        self.bounded_service([self.invalid_plan(i) for i in range(3)])
+        self.enqueue();job=self.finished()
+        self.assertEqual(job['state'],'failed',job['result'])
+        self.assertEqual(job['result']['error'],'plan_iteration_limit')
+        self.assertEqual(job['proposal_rounds']['used'],3)
+        self.assertEqual(self.fixture.client.calls.status()['used_requests'],3)
+        self.assertEqual(self.fixture.transport.call_count,3)
+        restarted=self.make_service()
+        restarted.rebaseline(self.doc['id'])
+        restarted.start()
+        with self.assertRaises(PlanIterationLimit):
+            restarted.enqueue(self.doc['id'],self.doc['revision'],answers='Try again')
+        self.assertEqual(self.history.get(self.doc['id'])['id'],job['id'])
+        self.assertEqual(self.history.get(self.doc['id'])['proposal_rounds']['remaining'],0)
+        self.assertFalse(any(self.service.snapshots.iterdir()))
+
+    def test_json_correction_shares_three_round_budget_with_validation(self):
+        self.bounded_service([])
+        malformed=json.loads(candidate_tests.response({}))
+        malformed['choices'][0]['message']['content']='{broken'
+        self.fixture.transport.side_effect=[(200,json.dumps(malformed).encode()),
+            (200,candidate_tests.response(self.invalid_plan(1))),
+            (200,candidate_tests.response(self.invalid_plan(2)))]
+        self.enqueue();job=self.finished()
+        self.assertEqual(job['state'],'failed',job['result'])
+        self.assertEqual(job['result']['error'],'plan_iteration_limit')
+        self.assertEqual(self.fixture.transport.call_count,3)
+        requests=[e for e in job['events'] if e['state']=='proposal_request']
+        self.assertEqual([e['payload']['kind'] for e in requests],['initial','json_repair','validation_repair'])
+        self.assertEqual(job['proposal_rounds']['used'],3)
+
+    def test_round_reservations_are_atomic_and_reading_does_not_spend_or_reset(self):
+        with patch.object(self.service.pool,'submit'):
+            job=self.enqueue()
+        def reserve(index):
+            try:
+                return self.history.reserve_proposal(self.doc['id'],str(index).zfill(32),'initial')
+            except PlanIterationLimit:
+                return None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            result=list(pool.map(reserve,range(8)))
+        self.assertEqual(sum(r is not None for r in result),3)
+        budget=self.history.get(self.doc['id'])['proposal_rounds']
+        self.assertEqual(budget['remaining'],0)
+        saved=[e for e in self.history.get(self.doc['id'])['events'] if e['state']=='proposal_request']
+        self.history.reserve_proposal(self.doc['id'],saved[0]['payload']['request_id'],'initial')
+        with TestClient(create_app(self.tasks,model_client=self.fixture.client,candidate_service=self.service),base_url=ORIGIN) as web:
+            for _ in range(3):
+                self.assertEqual(web.get('/api/tasks/'+self.doc['id']+'/candidate').json()['candidate']['proposal_rounds'],budget)
+        self.assertEqual(self.history.get(self.doc['id'])['id'],job['id'])
+        self.fixture.transport.assert_not_called()
 
     def test_corrupt_snapshot_cannot_be_downloaded(self):
         self.enqueue()

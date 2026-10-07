@@ -10,27 +10,40 @@ from pathlib import Path
 import stat
 import uuid
 
-from .agent_candidates import CandidateError, generate_research_candidate, research_inputs, output_prefix
+from .agent_candidates import (CandidateError, PlanIterationLimit, MAX_PROPOSAL_ROUNDS,
+                               generate_research_candidate, research_inputs, output_prefix)
 from .deepseek import ModelError
 from .manifest import ManifestError, Snapshot, canonical, private_directory, read_file, root_descriptor, sha256
 from .potentials import PotentialError
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
-BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal'}
+BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal', 'proposal_request'}
 ACTIVE = {'diagnosing_failure','reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
-LABELS = {'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
+LABELS = {'proposal_request':'方案生成轮次已登记', 'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'diagnosing_failure':'AI 正在读取失败日志并诊断原因',
           'checking_plan':'核对需求与方案', 'repairing_plan':'自动修正方案', 'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
           'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
 ERRORS = {'model_budget_exhausted': '模型额度已用完，没有自动重试。',
+          'plan_iteration_limit': '已达到首版在内三轮方案上限，不能继续追加。已有方案和失败历史保留。',
           'model_key_missing_or_invalid': '模型密钥尚未配置，请联系管理员。',
           'request_already_reserved': '已有模型请求记录，需要核对，未重复调用。',
           'model_transport_unknown': '调用状态未确认，保留记录且不自动重试。',
           'model_generation_failed': '模型未返回完整有效方案，原有记录已保留。',
           'candidate_validation_failed': '方案或资源检查未通过，原始模型回答已保留。',
           'preparation_failed': '文件准备未完成，记录已保留，请核对服务状态。'}
+
+
+def proposal_rounds(events):
+    """Count immutable request identities, including legacy saved proposals."""
+    ids = {event['payload']['request_id'] for event in events
+           if event['state'] in {'proposal_request', 'model_proposal'}
+           and event['payload'].get('request_id')}
+    unknown = not ids and any(event['state']=='prepared' for event in events)
+    return {'limit':MAX_PROPOSAL_ROUNDS, 'used':len(ids),
+            'remaining':0 if unknown else max(0,MAX_PROPOSAL_ROUNDS-len(ids)),
+            'historical_count_unknown':unknown}
 
 
 class CandidateHistory:
@@ -69,7 +82,27 @@ class CandidateHistory:
         significant = [e for e in events if e['state'] not in BOOKKEEPING] or events
         return {**job, 'state': significant[-1]['state'], 'label': significant[-1]['label'],
                 'updated_at': significant[-1]['at'], 'result': significant[-1]['payload'], 'events': events,
+                'proposal_rounds':proposal_rounds(events),
                 'execution_authorized': False}
+
+    def reserve_proposal(self, identifier, request_id, kind):
+        """Reserve before a model call; restart/rebaseline cannot reset the cap."""
+        with self.tasks.transaction() as db:
+            row=db.execute('SELECT id FROM candidate_jobs WHERE task_id=?',(identifier,)).fetchone()
+            if row is None:
+                raise CandidateError('Proposal request needs a saved preparation identity')
+            events=[{'state':r['state'],'payload':json.loads(r['payload'])} for r in
+                    db.execute('SELECT state,payload FROM candidate_events WHERE job_id=? ORDER BY sequence',(row['id'],))]
+            existing={e['payload'].get('request_id') for e in events
+                      if e['state'] in {'proposal_request','model_proposal'}}
+            budget=proposal_rounds(events)
+            if request_id in existing:
+                return budget
+            if budget['remaining']<=0:
+                raise PlanIterationLimit('方案已达到首版在内三轮上限，或历史轮次无法核验；不得继续追加。')
+            self._event(db,row['id'],'proposal_request',
+                        {'request_id':request_id,'kind':kind,'round':budget['used']+1,'limit':MAX_PROPOSAL_ROUNDS})
+            return {**budget,'used':budget['used']+1,'remaining':budget['remaining']-1}
 
     @contextmanager
     def lease(self, job):
@@ -94,7 +127,9 @@ class CandidateHistory:
             with self.lease(job['id']) as acquired:
                 if acquired:
                     with self.tasks.transaction() as db:
-                        latest = db.execute('SELECT state FROM candidate_events WHERE job_id=? ORDER BY sequence DESC LIMIT 1', (job['id'],)).fetchone()[0]
+                        latest = db.execute('SELECT state FROM candidate_events WHERE job_id=? AND state NOT IN ('+
+                                            ','.join('?' for _ in BOOKKEEPING)+') ORDER BY sequence DESC LIMIT 1',
+                                            (job['id'],*sorted(BOOKKEEPING))).fetchone()[0]
                         if latest in ACTIVE:
                             self._event(db, job['id'], 'interrupted', {'message': '后台准备进程已结束；模型请求和已有文件需核对，不会自动重发。'})
             job = self.get(identifier)
@@ -138,6 +173,7 @@ class CandidateService:
             # 触发一次新的、可记账的模型调用。冻结条件与既有事件、费用都不改写。
             if existing['state'] not in ('clarification', 'failed', 'interrupted', 'configuration_changed', 'prepared'):
                 raise CandidateError('当前状态不需要补充答复；请先查看已有准备记录。')
+            self.ensure_proposal_round(identifier)
             available = self.availability()
             if not available['enabled']:
                 raise CandidateError(available['reason'])
@@ -166,6 +202,11 @@ class CandidateService:
                 self.history._event(db, job, 'queued')
         self.pool.submit(self.run, identifier)
         return self.history.get(identifier)
+
+    def ensure_proposal_round(self, identifier):
+        job=self.history.get(identifier)
+        if job and job['proposal_rounds']['remaining']<=0:
+            raise PlanIterationLimit('方案已达到首版在内三轮上限，或历史轮次无法核验；已有完整方案仍可查看和批准，不能追加生成。')
 
     def rebaseline(self, identifier):
         """显式重启时把作业的有效基线更新到当前配置（追加事件，作业行不可改）。"""
@@ -288,6 +329,8 @@ class CandidateService:
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
                             output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan,
                             previous_proposal=self.previous_proposal(identifier), on_proposal=proposal_saved,
+                            before_proposal_request=lambda key,kind:self.history.reserve_proposal(identifier,key,kind),
+                            proposal_round_budget=self.history.get(identifier)['proposal_rounds'],
                             failure_context=failure)
                 if self.tasks.get(identifier)['revision']!=revision:
                     raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
@@ -305,6 +348,8 @@ class CandidateService:
                 code = 'preparation_failed'
                 if isinstance(error, ModelError):
                     code = str(error) if str(error) in ERRORS else 'model_generation_failed'
+                elif isinstance(error, PlanIterationLimit):
+                    code = 'plan_iteration_limit'
                 elif isinstance(error, (CandidateError, PotentialError, StructureError, TaskError, ManifestError)):
                     code = 'candidate_validation_failed'
                 # 具体原因必须可见：只说"检查未通过"用户无法定位。
@@ -324,6 +369,7 @@ class CandidateService:
                   'summary': result.get('summary'), 'geometry': result.get('geometry'),
                   'analysis': result.get('analysis'), 'questions': result.get('questions') or [],
                   'detail': result.get('detail'), 'snapshot_sha256': result.get('snapshot_sha256'),
+                  'proposal_rounds':job['proposal_rounds'],
                   'execution_authorized': result.get('execution_authorized', False), 'files': []}
         if job['state'] != 'prepared' or not result.get('snapshot_sha256'):
             return review

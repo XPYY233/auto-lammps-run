@@ -23,7 +23,7 @@ from .condition_generation import complete_condition_draft, generate_condition_d
 from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
-from .agent_candidates import CandidateError
+from .agent_candidates import CandidateError, PlanIterationLimit
 from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .model_connections import ModelConnections
@@ -304,6 +304,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             'reference_request_requires_attention': '已有整理请求尚无可恢复的完成回执，请核对记录；不会重复调用。',
         }
         return JSONResponse({'detail': explanations.get(str(exc), '模型整理未完成，未自动重试。请求记录已保留。')}, status_code=422)
+
+    @app.exception_handler(PlanIterationLimit)
+    async def plan_iteration_limit(request: Request, exc: PlanIterationLimit):
+        return JSONResponse({'detail': '方案已达到首版在内三轮上限，或历史轮次无法核验；已有完整方案仍可查看和批准，不能追加生成。',
+                             'code': 'plan_iteration_limit'}, status_code=422)
 
     @app.exception_handler(CandidateError)
     async def candidate_error(request: Request, exc: CandidateError):
@@ -977,6 +982,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         """用户对方案有意见：写入引导并立刻按意见重新组织一次方案。"""
         if candidate_service is None:
             return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        candidate_service.ensure_proposal_round(identifier)
         store.add_guidance(identifier, data.revision, data.note)
         current = store.get(identifier)
         return {'candidate': candidate_service.enqueue(identifier, current['revision'],

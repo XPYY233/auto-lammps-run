@@ -491,6 +491,7 @@ const candidateStatuses = {
   configuration_changed:{label:'配置已变化 · 待核对',tone:'attention'},
 };
 const candidateErrorLabels = {
+  plan_iteration_limit:'首版在内三轮已用完，不能追加生成',
   model_budget_exhausted:'模型额度已用完，未自动重试',
   model_key_missing_or_invalid:'模型密钥尚未配置',
   request_already_reserved:'已有模型请求记录，需要核对',
@@ -676,6 +677,16 @@ function ordinaryExecutionJob(){
     job_id:r.job_id,scheduler_state:r.state,accounted:r.accounted,dispatch_count:groups.reduce((n,x)=>n+x.dispatch_count,0),
     max_attempts:groups.reduce((n,x)=>n+x.max_attempts,0),events:r.history};
 }
+function proposalRoundsExhausted(record){
+  const budget=record?.proposal_rounds;
+  return Boolean(budget)&&(budget.historical_count_unknown||budget.remaining<=0);
+}
+function proposalRoundLabel(record){
+  const budget=record?.proposal_rounds;
+  if(!budget)return '首版在内最多三轮';
+  if(budget.historical_count_unknown)return '历史方案轮次待核验 · 禁止追加';
+  return `方案生成 ${budget.used} / ${budget.limit} 轮（含首版） · 剩余 ${budget.remaining} 轮`;
+}
 function renderCurrentActivity(){
   const title=$('#ai-current-title'),detail=$('#ai-current-detail'),meta=$('#ai-current-meta');
   if(!title)return;
@@ -815,7 +826,7 @@ async function refreshPlanReview(){
   const plan=review.workspace?.current;
   const prepared=review.state==='prepared'&&(!review.workspace||(plan&&!plan.historical));
   panel.hidden=!prepared&&!plan;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden)return;
-  $('#plan-version').textContent=plan?`第 ${plan.version} 版${plan.historical?' · 上一份已准备方案':''}`:'已准备';
+  $('#plan-version').textContent=(plan?`第 ${plan.version} 版${plan.historical?' · 上一份已准备方案':''}`:'已准备')+' · '+proposalRoundLabel(review);
   $('#plan-status').textContent=prepared?(review.approved?'当前方案已批准。':'方案已准备，等待你确认。'):'应用正在处理下一版；下方保留最近一版方案供查看，暂不能批准。';
   renderPlanSummary(review);renderPlanVersions(review);
   const files=$('#plan-files');const opened=new Set([...files.children].filter(x=>x.open).map(x=>x.dataset?.file));files.replaceChildren();
@@ -851,8 +862,9 @@ async function refreshPlanReview(){
     await refreshPlanReview();await refreshCandidate();
   });
   const revise=$('#plan-revise'),input=$('#plan-revision-note');
-  revise.disabled=!prepared||active||unresolved||blocked;input.disabled=active||unresolved||blocked;
-  $('#plan-revision-help').textContent=active?'本次计算已经提交，运行中的方案保持固定。计算结束后可讨论结果；不会修改正在运行的计算。':'写下具体修改意见；应用内 AI 将迭代当前方案，保留旧版和修改记录，新版需要重新确认。';
+  const limitReached=proposalRoundsExhausted(review);
+  revise.disabled=!prepared||active||unresolved||blocked||limitReached;input.disabled=active||unresolved||blocked||limitReached;
+  $('#plan-revision-help').textContent=limitReached?'三轮方案准备机会已用完或历史轮次无法核验；不能追加生成。已有完整方案仍可查看并批准提交。':active?'本次计算已经提交，运行中的方案保持固定。计算结束后可讨论结果；不会修改正在运行的计算。':'写下具体修改意见；首版在内最多三轮，应用内 AI 将修改当前方案，保留旧版和记录，新版需要重新确认。';
   revise.onclick=()=>action(async()=>{
     if(revise.disabled)return;
     const note=input.value.trim();if(!note){notice('请在方案旁的修改意见框填写要求。',true);input.focus();return;}
@@ -887,7 +899,7 @@ async function refreshCandidate() {
     if(detail) attention.append(node('p',detail,'attention-detail'));
     const questions=candidate?.result?.questions || [];
     if(questions.length){
-      // 像 harness 一样逐条提问：显示问题、原因与建议，并给出回答位置；提交后循环直到方案准备完毕。
+      // 逐条显示问题、原因、建议和答复位置；所有答复共用首版在内三轮上限。
       const form=node('div',undefined,'clarify-form');
       questions.forEach((question,index)=>{
         const item=node('div',undefined,'clarify-item');
@@ -906,7 +918,7 @@ async function refreshCandidate() {
         form.append(item);
       });
       attention.append(form);
-      const submit=node('button','提交答复并继续生成方案','primary');submit.type='button';
+      const submit=node('button','提交答复并继续生成方案','primary');submit.type='button';submit.disabled=proposalRoundsExhausted(candidate);
       submit.onclick=()=>action(async()=>{
         const inputs=[...document.querySelectorAll('#candidate-attention textarea[data-question-index]')];
         const values=inputs.map(input=>input.value);
@@ -925,10 +937,11 @@ async function refreshCandidate() {
   }
   $('#prepare-candidate').textContent=candidate?'重新准备计算方案':'生成计算方案';
   $('#prepare-candidate').hidden=current.mode!=='research'||(Boolean(candidate)&&!retriggerable);
-  $('#prepare-candidate').disabled=!available.enabled;
+  $('#prepare-candidate').disabled=!available.enabled||proposalRoundsExhausted(candidate);
   $('#candidate-stage').replaceChildren();
   if(candidate) {
     $('#candidate-stage').append(candidateStageChip(candidate));
+    $('#candidate-stage').append(node('span',proposalRoundLabel(candidate),'subtle'));
     if(!candidateStatuses[candidate.state]) $('#candidate-stage').append(node('span','服务端状态：'+(candidate.label||candidate.state)));
   } else $('#candidate-stage').textContent='尚未准备方案';
   $('#candidate-authorization').textContent=candidate ?

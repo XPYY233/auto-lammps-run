@@ -12,6 +12,18 @@ function setup(job,review={state:'prepared',approved:true,files:[]}){
  return {c,elements,calls};
 }
 test('approved fresh plan dispatches through execution without restarting generation',async()=>{const {c,elements,calls}=setup(null);await c.refreshPlanReview();await elements.get('#plan-approve').onclick();assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/execution']);});
+test('three-round limit disables rewrite but keeps a complete plan approvable',async()=>{
+ const review={state:'prepared',approved:true,files:[],proposal_rounds:{limit:3,used:3,remaining:0,historical_count_unknown:false}};
+ const {c,elements,calls}=setup(null,review);await c.refreshPlanReview();
+ assert.match(elements.get('#plan-version').textContent,/3 \/ 3/);
+ assert.equal(elements.get('#plan-revise').disabled,true);
+ assert.equal(elements.get('#plan-revision-note').disabled,true);
+ assert.match(elements.get('#plan-revision-help').textContent,/不能追加.*可查看并批准/);
+ assert.equal(elements.get('#plan-approve').disabled,false);
+ await elements.get('#plan-revise').onclick();assert.equal(calls.some(x=>x.body),false);
+ await elements.get('#plan-approve').onclick();
+ assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/execution']);
+});
 test('failed preparation of execution resumes through the accounted recheck endpoint',async()=>{const {c,elements,calls}=setup({state:'attention'});await c.refreshPlanReview();await elements.get('#plan-approve').onclick();assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/execution/recheck']);});
 test('known scheduler job or active dispatch cannot be submitted a second time',async()=>{for(const job of [{state:'waiting',job_id:'42'},{state:'running'}]){const {c,elements}=setup(job);await c.refreshPlanReview();assert.equal(elements.get('#plan-approve').disabled,true);}});
 test('running job receipt replaces stale submit instruction and locks plan editing',async()=>{
