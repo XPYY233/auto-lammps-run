@@ -54,3 +54,5 @@ jobs:
           timeout 120 gdb --batch -ex run -ex 'thread apply all bt 12' --args "$RUNNER_TEMP/auto-lammps-runtime/bin/python" -I -m auto_lammps.analysis_runtime --smoke
       - name: Verify retained-output analysis
         run: '"$RUNNER_TEMP/auto-lammps-runtime/bin/python" -m unittest discover -s tests -p test_retained_analysis.py -v'
+      - name: Verify installed structural statistics
+        run: '"$RUNNER_TEMP/auto-lammps-runtime/bin/python" -I -m unittest discover -s tests -p test_coordination_analysis.py -v'
