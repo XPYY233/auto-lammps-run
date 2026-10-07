@@ -826,3 +826,8 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 #task-view #plan-review-panel{scroll-margin-top:92px}
 #task-view .plan-objective{font-size:15px;color:#264569;margin:8px 0 16px}
 @media(min-width:1060px){#task-view .task-rail{position:sticky;top:92px;max-height:calc(100vh - 108px);overflow:auto}}
+
+/* Preserve rich scientific text in requests and plan descriptions. */
+.request-open #task-prompt .markdown-body{white-space:normal}
+.plan-objective p{margin:0}
+.discussion-question{font-weight:600}

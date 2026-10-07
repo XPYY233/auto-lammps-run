@@ -135,8 +135,8 @@ function render() {
   $('#welcome').hidden = true;
   $('#task-view').hidden = false;
   $('#papers-view').hidden = true;
-  $('#task-title').textContent = researchText(current.title);
-  $('#task-prompt').textContent = researchText(current.prompt);
+  $('#task-title').textContent = String(current.title||'');
+  $('#task-prompt').replaceChildren(researchContent(current.prompt));
   // 全局提示条是上一次动作留下的，打开任务时先清掉，避免用户以为那是当前状态。
   const banner = $('#message');
   if (banner) { banner.hidden = true; banner.textContent = ''; banner.className = ''; }
@@ -667,6 +667,13 @@ function researchText(value){
     .replace(/\^\{([^{}]*)\}/g,'^($1)').replace(/_\{([^{}]*)\}/g,'_($1)');
 }
 
+function researchContent(value,cls=''){
+  const source=String(value??'');
+  const body=typeof renderResearchMarkdown==='function'?renderResearchMarkdown(source):node('div',source,'markdown-body markdown-fallback');
+  if(cls)body.className=[body.className||'',cls].join(' ').trim();
+  return body;
+}
+
 function ordinaryExecutionJob(){
   if(typeof normalResult==='undefined')return null;
   const groups=normalResult?.evaluations||[],runs=groups.flatMap(g=>g.requests.filter(r=>r.dispatch_ordinal!==null).map(r=>({r,g})));
@@ -760,9 +767,9 @@ function renderPlanSummary(review){
   const opened=new Set([...box.children].filter(x=>x.open).map(x=>x.dataset?.key));box.replaceChildren();
   const detailsFor=(key,label,cls)=>{const d=node('details',undefined,cls);d.dataset.key=key;d.open=opened.has(key);d.append(node('summary',label));return d;};
   const plan=review.workspace?.current;
-  if(!plan){if(review.summary)box.append(node('p',researchText(review.summary)));return;}
+  if(!plan){if(review.summary)box.append(researchContent(review.summary));return;}
   const quantity=current.fields?.quantity;const target=quantity?.candidates?.find(c=>c.id===quantity.selected)?.value;
-  box.append(node('p','研究目标：'+researchText(target||plan.analysis?.quantity||current.title),'plan-objective'));
+  box.append(researchContent('研究目标：'+(target||plan.analysis?.quantity||current.title||''),'plan-objective'));
   const cards=node('div',undefined,'plan-facts');
   const fact=(title,text)=>{const card=node('div',undefined,'plan-fact');card.append(node('span',title),node('p',text));cards.append(card);};
   const structures=[plan.structure,...plan.additional_structures.map(item=>item.structure)];
@@ -792,12 +799,12 @@ function renderPlanSummary(review){
   outputs.append(node('p',files.join('、')));box.append(outputs);
   const check=plan.automatic_check||review.automatic_check;
   if(check){const details=detailsFor('checks','查看应用的需求与步骤核对结果','plan-checks');
-    for(const item of check.coverage||[])details.append(node('p',researchText(item.requirement+'：'+item.evidence)));box.append(details);}
+    for(const item of check.coverage||[])details.append(researchContent(item.requirement+'：'+item.evidence));box.append(details);}
   const recovery=plan.failure_recovery||review.failure_recovery;
   if(recovery){const details=detailsFor('recovery','查看应用内 AI 的失败诊断与本次修正','plan-checks');
-    details.append(node('p',recovery.summary),node('p','原因：'+recovery.cause),node('p','修改：'+recovery.repair));
+    details.append(researchContent(recovery.summary),researchContent('原因：'+recovery.cause),researchContent('修改：'+recovery.repair));
     for(const text of recovery.evidence||[])details.append(node('pre',text,'plan-code'));box.append(details);}
-  const explanation=detailsFor('explanation','查看模型完整方案说明','plan-checks');explanation.append(node('p',researchText(plan.summary)));box.append(explanation);
+  const explanation=detailsFor('explanation','查看模型完整方案说明','plan-checks');explanation.append(researchContent(plan.summary));box.append(explanation);
 }
 
 function renderPlanVersions(review){
@@ -810,7 +817,7 @@ function renderPlanVersions(review){
     item.dataset.version=String(version.number);item.open=opened.has(item.dataset.version);
     const changes=version.available?(version.number===1?'首版方案':version.changes.length?version.changes.join('、'):'科研设置与步骤未变化；重新封装并核验'):version.reason;
     item.append(node('summary',`第 ${version.number} 版 · ${changes}`));
-    item.append(node('p',new Date(version.at).toLocaleString('zh-CN'),'subtle'),node('p','修改依据：'+researchText(version.reason)));
+    item.append(node('p',new Date(version.at).toLocaleString('zh-CN'),'subtle'),researchContent('修改依据：'+version.reason));
     if(version.workflow_diff)item.append(node('pre',version.workflow_diff,'plan-code'));
     box.append(item);
   }
@@ -1899,7 +1906,7 @@ function renderPlotGallery(report,box){
  const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const [key,value] of Object.entries(options))select.append(new Option(value,key));select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
  const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
 }
-async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(node('strong',m.question),m.answer&&typeof renderResearchMarkdown==='function'?renderResearchMarkdown(m.answer):node('p',m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；发送后会保留问题、答复与模型用量。助手只解读已有结果，不能提交新的计算或执行任意分析代码。':'结果助手尚未启用：可以下载数据，或先在“设置 → 模型 API”配置连接，再由管理员启用。';const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;}
+async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；发送后会保留问题、答复与模型用量。助手只解读已有结果，不能提交新的计算或执行任意分析代码。':'结果助手尚未启用：可以下载数据，或先在“设置 → 模型 API”配置连接，再由管理员启用。';const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;}
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
 
