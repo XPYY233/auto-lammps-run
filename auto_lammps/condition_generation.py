@@ -16,13 +16,18 @@ class ModelOutputError(TaskError):
     """The model's answer failed validation; only this class is worth one repair call."""
 
 
-def condition_evidence_spans(sources):
+def condition_evidence_spans(sources, *, version=2):
     """Versioned, exact source locations; no inference or fuzzy correction.
 
     Offsets count Unicode characters in the canonical source_bundle text, not
     UTF-8 bytes. Only permitted user/paper inputs receive this locator tool;
     author code never receives generated span identifiers.
     """
+    if type(version) is not int or version not in (1, 2):
+        raise TaskError('原文定位工具版本无效')
+    # v1 identifiers remain valid for old, explicitly quoted-value receipts.
+    # Active v2 spans fit the candidate limit without model-written shortening.
+    limit = 6000 if version == 1 else 4000
     spans = []
     for source in source_bundle(sources):
         if source['origin'] not in {'user', 'paper'}:
@@ -32,8 +37,8 @@ def condition_evidence_spans(sources):
         start = 0
         for match in re.finditer(r'[。！？\n；;]|$', source['text']):
             stop = match.end()
-            while stop - start > 6000:
-                end = start + 6000
+            while stop - start > limit:
+                end = start + limit
                 spans.append(_evidence_span(source, start, end))
                 start = end
             if stop > start and (stop - start >= 512 or stop == len(source['text'])):
@@ -52,10 +57,16 @@ def _evidence_span(source, start, end):
 
 
 def condition_evidence_context(sources):
-    return dict(tool='condition_source_spans', version=1,
+    return dict(tool='condition_source_spans', version=2,
                 source_sha256=sha256(Path(__file__).read_bytes()),
                 offsets='unicode_character_offsets_in_canonical_source_text',
                 allowed_origins=['user', 'paper'], matching='exact_only',
+                preferred_condition_fields=['field', 'source_id', 'evidence_span_id'],
+                value_derivation='complete_source_span', unit_derivation='empty_preserve_units_in_value',
+                unit_system_derivation=dict(field='units', supported_tokens=['metal', 'real'],
+                    matching='case_sensitive_complete_token', required='one_distinct_explicit_token',
+                    value='original_token', quote='complete_source_span', otherwise='legacy_explicit_value_required'),
+                max_value_characters=4000,
                 semantic_verification='not_performed', spans=condition_evidence_spans(sources))
 
 
@@ -87,15 +98,20 @@ def condition_messages(sources, mode='research'):
         '不要写代码、调用工具、补默认条件、把待预测结果当输入或把作者目标脚本当任务描述。'
         '仅提取原文明确支持的输入。遇到冲突保留多个条目。缺项放入 questions，不要猜测。'
         '同一研究的多个尺寸、温度或其他扫描点是一个完整条件，不是互斥矛盾；使用包含整个列表的连续原文作为一个 value。'
-        '输出 JSON 对象，且仅含 conditions 和 questions 两个列表。conditions 每项仅含 '
-        'field,value,unit,source_id，以及 evidence_span_id 或 quote；优先从主动提供的原文定位 Adapter '
-        '中直接选用 evidence_span_id，可信端将按该 ID 的起止位置取得原文，不需要重打 quote。'
-        '不得改写 ID、来源或原文。仅当没有覆盖所需内容的片段时使用 quote。'
+        '输出 JSON 对象，且仅含 conditions 和 questions 两个列表。优先的 conditions 条目仅含 '
+        'field,source_id,evidence_span_id 三个键，从主动提供的原文定位 Adapter v2 选择固定片段，'
+        '不要重复写 value、unit 或 quote。可信端直接使用完整片段原文作为 value，unit 为空字符串，'
+        '原文里的单位完整保留在 value 中；片段最多4000字符，不需要模型改写或缩短。'
+        'units 字段例外：三键格式仅在所选片段含唯一一种明确的完整原词 metal 或 real 时可用，'
+        '可信端原样选择该词作 value，仍保留完整片段作依据；不改大小写、不推断或补默认单位制。'
+        '片段无这两个原词或同时包含两种时，units 必须使用下述旧格式给出原文明确支持的 value。'
+        '不得改写 ID、来源或原文。若必须选择较短连续原文，兼容旧格式仅含 '
+        'field,value,unit,source_id，以及 evidence_span_id 或 quote；此格式的 '
         'value 必须原样出现在该片段或 quote 内，非空 unit 也必须出现，'
         'quote 必须是所给 source_id 对应文本的连续原文。questions 每项仅含 field,question。'
         '不要确认条件。无法从原文得到任何输入时 conditions 为空。'
-        '示例 JSON：{"conditions":[{"field":"temperature","value":"300","unit":"K",'
-        '"source_id":"example","quote":"温度为 300 K"}],"questions":[]}。'
+        '示例格式：{"conditions":[{"field":"temperature","source_id":"example",'
+        '"evidence_span_id":"使用实际提供的定位ID"}],"questions":[]}。'
         '示例不是任务条件，不要复制。科研计算不要求用户提供论文。可用 field 如下：' + canonical(fields).decode()
     )
     # Source spans already contain every original character, in order. Sending
@@ -118,6 +134,7 @@ def validate_conditions(sources, result):
     sources = source_bundle(sources)
     by_id = {source['id']: source for source in sources}
     spans = {span['id']: span for span in condition_evidence_spans(sources)}
+    legacy_spans = None
     if not isinstance(result, dict):
         raise ModelOutputError('模型条件输出不是 JSON 对象，收到：' + type(result).__name__)
     keys = set(result)
@@ -136,8 +153,10 @@ def validate_conditions(sources, result):
     for index, item in enumerate(result['conditions']):
         if not isinstance(item, dict):
             raise ModelOutputError(f'模型条件第 {index} 条不是对象，收到：{type(item).__name__}')
+        source_only = set(item) == {'field', 'source_id', 'evidence_span_id'}
         extra = sorted(set(item) - {'field', 'value', 'unit', 'source_id', 'quote', 'evidence_span_id'})
-        missing = sorted({'field', 'value', 'unit', 'source_id'} - set(item))
+        missing = sorted(({'field', 'source_id', 'evidence_span_id'} if source_only else
+                          {'field', 'value', 'unit', 'source_id'}) - set(item))
         if not {'quote', 'evidence_span_id'} & set(item):
             missing.append('quote 或 evidence_span_id')
         if extra or missing:
@@ -153,6 +172,10 @@ def validate_conditions(sources, result):
         span = None
         if 'evidence_span_id' in item:
             span = spans.get(item['evidence_span_id']) if isinstance(item['evidence_span_id'], str) else None
+            if span is None and not source_only and isinstance(item['evidence_span_id'], str):
+                if legacy_spans is None:
+                    legacy_spans = {span['id']: span for span in condition_evidence_spans(sources, version=1)}
+                span = legacy_spans.get(item['evidence_span_id'])
             if span is None or span['source_id'] != source['id']:
                 raise ModelOutputError(f'模型条件第 {index} 条的原文定位 ID 或来源不匹配')
             quote = span['quote']
@@ -160,7 +183,19 @@ def validate_conditions(sources, result):
                 raise ModelOutputError(f'模型条件第 {index} 条的 quote 与原文定位片段不同')
         else:
             quote = text(item['quote'], 6000)
-        value, unit = text(item['value'], 4000), text(item['unit'], 80, required=False)
+        if source_only:
+            value, unit = text(quote, 4000), ''
+            if item['field'] == 'units':
+                # Downstream units are exact engine identifiers, not prose.
+                # Select only an unchanged, complete supported source token;
+                # this locator check still does not establish its scientific use.
+                tokens = set(re.findall(r'(?<![A-Za-z0-9_])(metal|real)(?![A-Za-z0-9_])', quote))
+                if len(tokens) != 1:
+                    raise ModelOutputError(f'模型条件第 {index} 条的 units 原文定位必须含唯一明确的 metal 或 real 原词；'
+                                           '请使用旧显式 value 格式，不得推断或补默认单位制')
+                value = tokens.pop()
+        else:
+            value, unit = text(item['value'], 4000), text(item['unit'], 80, required=False)
         if quote not in source['text']:
             raise ModelOutputError(f"模型条件第 {index} 条的 quote 不在 {item['source_id']} 原文中：{quote[:60]}")
         if value not in quote:

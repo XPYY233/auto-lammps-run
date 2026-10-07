@@ -47,6 +47,22 @@ class GenerationTests(unittest.TestCase):
         self.assertNotIn('reference', [item['field'] for item in doc['issues']])
         self.assertEqual(TaskStore(self.store.path).get(doc['id']), doc)
 
+    def test_source_only_generation_derives_value_and_remains_unconfirmed(self):
+        span = condition_evidence_spans(SOURCES)[0]
+        output = dict(conditions=[dict(field='temperature', source_id='user-request',
+                                       evidence_span_id=span['id'])], questions=OUTPUT['questions'])
+        self.transport.return_value = (200, response(output))
+        doc = self.generate()
+        choice = doc['fields']['temperature']['candidates'][0]
+        self.assertEqual(choice['value'], SOURCES[0]['text'])
+        self.assertEqual(choice['unit'], '')
+        self.assertEqual(choice['generated_evidence']['quote'], span['quote'])
+        self.assertEqual(choice['generated_evidence']['semantic_verification'], 'not_performed')
+        self.assertFalse(doc['fields']['temperature']['confirmed'])
+        self.assertEqual(doc['generated_batches']['a'*32]['questions'], OUTPUT['questions'])
+        self.assertEqual(self.calls.history()[0]['receipt']['structured_output'], output)
+        self.assertEqual(self.transport.call_count, 1)
+
     def test_invented_source_quote_unit_or_extra_authority_is_rejected(self):
         for changes in ({'source_id':'not-provided'}, {'quote':'400 K'}, {'value':'400'},
                         {'unit':'bar'}, {'field':'execute'}, {'confirmed':True}):
@@ -428,3 +444,174 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.store.condition_requests(self.doc['id']), [])
         self.assertEqual(self.store.get(self.doc['id']), self.doc)
         self.assertEqual(self.transport.call_count, 2)
+
+
+class SourceOnlyConditionTests(unittest.TestCase):
+    def output(self, source, *, field='sampling'):
+        span = condition_evidence_spans([source])[0]
+        return dict(conditions=[dict(field=field, source_id=source['id'], evidence_span_id=span['id'])],
+                    questions=[])
+
+    def test_exact_source_is_derived_without_unit_rewriting_or_semantic_clearance(self):
+        for origin in ('user', 'paper'):
+            source = dict(id='permitted-source', origin=origin, locator='合成来源',
+                          text='完整60000步，温度为300 K；这段原文可能包含待判断的结果。')
+            output = self.output(source)
+            output['questions'] = [dict(field='analysis', question='需要确认原文的科学用途。')]
+            before = deepcopy(output)
+            choices, questions, clean = validate_conditions([source], output)
+            choice = choices[0]['candidate']
+            self.assertEqual(choice['value'], source['text'])
+            self.assertEqual(choice['unit'], '')
+            self.assertEqual(choice['origin'], origin)
+            self.assertEqual(choice['generated_evidence']['semantic_verification'], 'not_performed')
+            self.assertNotIn('confirmed', choice)
+            self.assertEqual(questions, output['questions'])
+            self.assertEqual(clean, [source])
+            self.assertEqual(output, before)
+
+    def test_source_only_rejects_forged_ids_wrong_source_and_partial_legacy_fields(self):
+        source = {**SOURCES[0], 'text':'完整60000步，温度为300 K。'}
+        output = self.output(source)
+        other = dict(id='other', origin='user', locator='另一合成来源', text=source['text'])
+        changes = [dict(evidence_span_id='f'*24), dict(evidence_span_id=[]), dict(source_id='unknown'),
+                   dict(source_id='other'), dict(field='execute'), dict(value='完成60000'), dict(unit='K'),
+                   dict(quote=source['text']), dict(confirmed=True), dict(start=0), dict(end=len(source['text']))]
+        for change in changes:
+            value = deepcopy(output); value['conditions'][0].update(change)
+            with self.subTest(change=change), self.assertRaises(TaskError):
+                validate_conditions([source, other], value)
+
+    def test_old_explicit_values_are_never_corrected_by_source_only_derivation(self):
+        source = {**SOURCES[0], 'text':'完整60000步，温度为300 K。'}
+        output = self.output(source)
+        for value, unit in (('完成60000', ''), ('400', 'K')):
+            old = deepcopy(output); old['conditions'][0].update(value=value, unit=unit)
+            with self.subTest(value=value), self.assertRaisesRegex(TaskError, 'value 不在其 quote'):
+                validate_conditions([source], old)
+        old = deepcopy(output); old['conditions'][0].update(value='300', unit='K')
+        choice = validate_conditions([source], old)[0][0]['candidate']
+        self.assertEqual((choice['value'], choice['unit']), ('300', 'K'))
+
+    def test_units_source_token_reaches_research_and_potential_compatibility(self):
+        from auto_lammps.agent_candidates import research_inputs
+        from auto_lammps.potentials import PotentialAdapter, inspect_eam_alloy
+        from test_eam_potentials import METADATA, MODEL
+
+        source = dict(id='user-request', origin='user', locator='合成单位制来源',
+                      text='采用 metal 单位制。')
+        choice = validate_conditions([source], self.output(source, field='units'))[0][0]['candidate']
+        self.assertEqual((choice['value'], choice['unit']), ('metal', ''))
+        self.assertEqual(choice['generated_evidence']['quote'], source['text'])
+        self.assertEqual(choice['generated_evidence']['semantic_verification'], 'not_performed')
+        fields = {}
+        for field in FIELDS:
+            selected = {**(choice if field == 'units' else evidence('synthetic-'+field)), 'id':'a'*32}
+            fields[field] = dict(candidates=[selected], selected=selected['id'], confirmed=True, resolution='')
+        record = canonical(dict(schema_version=1, purpose='condition_review_record', mode='research',
+                                execution_authorized=False, conditions=fields))
+        tasks = Mock()
+        tasks.get.return_value = dict(revision=1, status='conditions_frozen', mode='research')
+        tasks.export.return_value = record
+        inputs = research_inputs(tasks, 'b'*32, 1)
+        self.assertEqual(inputs['units'], 'metal')
+        catalog = Mock()
+        catalog.read.return_value = (
+            dict(metadata=deepcopy(METADATA), inspection=inspect_eam_alloy(MODEL, METADATA['elements'])),
+            dict(model=MODEL, license=b'Synthetic fixture only'))
+        adapter = PotentialAdapter(catalog, allowed_pins=['c'*64], software_sha256='d'*64, packages=['MANYBODY'])
+        self.assertEqual([model['pin'] for model in adapter.compatible_models(units=inputs['units'])], ['c'*64])
+        self.assertEqual(adapter.compatible_models(units=source['text']), [])
+
+    def test_units_source_only_requires_one_supported_original_token(self):
+        for value in ('metal', 'real'):
+            source = dict(id='units-source', origin='user', locator='合成单位制来源',
+                          text=f'采用 {value} 单位制；所有阶段均采用 {value}。')
+            choice = validate_conditions([source], self.output(source, field='units'))[0][0]['candidate']
+            self.assertEqual(choice['value'], value)
+            self.assertEqual(choice['generated_evidence']['quote'], source['text'])
+        for prose in ('尚未决定单位制。', '采用金属单位制。', '建议以后明确单位制。',
+                      '采用 Metal 单位制。', '采用 REAL 单位制。', '采用 metal 或 real 单位制。',
+                      '使用 metallic 和 unreal 参数。', '参数名为 metal_mode。'):
+            source = dict(id='units-source', origin='user', locator='合成单位制来源', text=prose)
+            with self.subTest(prose=prose), self.assertRaisesRegex(TaskError, '唯一明确'):
+                validate_conditions([source], self.output(source, field='units'))
+
+    def test_units_legacy_explicit_value_is_not_changed_or_filled(self):
+        source = dict(id='units-source', origin='user', locator='合成单位制来源',
+                      text='讨论 metal 与 real；本需求明确使用 metal。')
+        output = self.output(source, field='units')
+        output['conditions'][0].update(value='metal', unit='')
+        before = deepcopy(output)
+        choice = validate_conditions([source], output)[0][0]['candidate']
+        self.assertEqual(choice['value'], 'metal')
+        self.assertEqual(output, before)
+        output['conditions'][0]['value'] = 'METAL'
+        with self.assertRaisesRegex(TaskError, 'value 不在其 quote'):
+            validate_conditions([source], output)
+
+    def test_source_changes_and_code_do_not_reuse_source_only_identity(self):
+        source = SOURCES[0]
+        output = self.output(source)
+        for change in (dict(text=source['text']+'新版本。'), dict(locator='新的合成位置'),
+                       dict(origin='paper'), dict(origin='code')):
+            with self.subTest(change=change), self.assertRaises(TaskError):
+                validate_conditions([{**source, **change}], output)
+        self.assertEqual(condition_evidence_spans([{**source, 'origin':'code'}]), [])
+        with self.assertRaises(TaskError):
+            validate_conditions([source, dict(source)], output)
+
+    def test_duplicate_references_are_deduplicated_without_claiming_classification(self):
+        source = {**SOURCES[0], 'text':'计算结果为300 K。'}
+        output = self.output(source, field='temperature')
+        output['conditions'] *= 2
+        choices = validate_conditions([source], output)[0]
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(choices[0]['candidate']['value'], source['text'])
+        self.assertEqual(choices[0]['candidate']['generated_evidence']['semantic_verification'], 'not_performed')
+
+    def test_active_span_boundaries_fit_full_candidate_values_and_keep_all_source_text(self):
+        for length in (3999, 4000, 4001, 6000, 24000):
+            source = {**SOURCES[0], 'text':'铜'*length}
+            spans = condition_evidence_spans([source])
+            self.assertEqual(''.join(span['quote'] for span in spans), source['text'])
+            self.assertTrue(all(0 < len(span['quote']) <= 4000 for span in spans))
+            output = dict(conditions=[dict(field='material', source_id=source['id'], evidence_span_id=span['id'])
+                                      for span in spans], questions=[])
+            choices = validate_conditions([source], output)[0]
+            self.assertTrue(all(len(choice['candidate']['value']) <= 4000 for choice in choices))
+        with self.assertRaises(TaskError):
+            condition_messages([{**SOURCES[0], 'text':'铜'*24001}])
+        for version in (0, 3, True):
+            with self.subTest(version=version), self.assertRaises(TaskError):
+                condition_evidence_spans(SOURCES, version=version)
+
+    def test_v1_long_locator_still_validates_legacy_receipt_but_not_source_only(self):
+        source = {**SOURCES[0], 'text':'铜'*3990+'300 K'+'铜'*2010}
+        old_span = condition_evidence_spans([source], version=1)[0]
+        self.assertEqual(len(old_span['quote']), 6000)
+        self.assertNotIn(old_span['id'], {span['id'] for span in condition_evidence_spans([source])})
+        output = dict(conditions=[dict(field='temperature', source_id=source['id'],
+                                       evidence_span_id=old_span['id'], value='300', unit='K',
+                                       quote=old_span['quote'])], questions=[])
+        before = deepcopy(output)
+        choice = validate_conditions([source], output)[0][0]['candidate']
+        self.assertEqual(choice['value'], '300')
+        self.assertEqual(choice['generated_evidence']['quote'], old_span['quote'])
+        self.assertEqual(output, before)
+        source_only = deepcopy(output)
+        for key in ('value', 'unit', 'quote'): source_only['conditions'][0].pop(key)
+        with self.assertRaises(TaskError): validate_conditions([source], source_only)
+
+    def test_active_context_advertises_source_only_v2_without_duplicate_source_text(self):
+        payload = json.loads(condition_messages(SOURCES)[1]['content'])
+        tool = payload['source_locator_adapter']
+        self.assertEqual(tool['version'], 2)
+        self.assertEqual(tool['preferred_condition_fields'], ['field', 'source_id', 'evidence_span_id'])
+        self.assertEqual(tool['value_derivation'], 'complete_source_span')
+        self.assertEqual(tool['unit_system_derivation'], dict(field='units', supported_tokens=['metal', 'real'],
+            matching='case_sensitive_complete_token', required='one_distinct_explicit_token',
+            value='original_token', quote='complete_source_span', otherwise='legacy_explicit_value_required'))
+        self.assertEqual(tool['max_value_characters'], 4000)
+        self.assertNotIn('text', payload['sources'][0])
+        self.assertEqual(''.join(span['quote'] for span in tool['spans']), SOURCES[0]['text'])

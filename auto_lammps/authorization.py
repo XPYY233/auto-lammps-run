@@ -14,7 +14,8 @@ import time
 import uuid
 
 from . import runtime_launcher as runtime
-from .agent_candidates import validate_proposal, RESERVED_OUTPUTS, render_candidate_script
+from .agent_candidates import (CandidateError, validate_proposal, RESERVED_OUTPUTS, render_candidate_script,
+    validate_initial_geometry, fixed_geometry_receipt, fixed_geometry_record, _geometry_context)
 from .analysis_v2 import plan_adapter
 from .execution import ExistingAuthorization
 from .hpc_transport import bind_request, transport_identity
@@ -34,8 +35,30 @@ def candidate_check(snapshot, *, max_atoms):
         generation=json.loads(load('generation.json'));context=generation['input']
         analysis_raw=load('analysis.json');analysis=json.loads(analysis_raw)
         proposal=generation['proposal'];layout=context.get('output_layout','isolated')
+        initial_geometry = context.get('initial_geometry')
+        if initial_geometry is not None:
+            try:
+                initial_geometry = validate_initial_geometry(initial_geometry, max_atoms=max_atoms,
+                    units=generation['potential_receipt']['units'])
+                receipt = fixed_geometry_receipt(initial_geometry, max_atoms=max_atoms,
+                    units=generation['potential_receipt']['units'])
+                record = fixed_geometry_record(initial_geometry, max_atoms=max_atoms)
+            except CandidateError as error:
+                raise Conflict('Frozen geometry choice is invalid: '+str(error)) from None
+            structures = [item for item in manifest['files'] if item['role']=='structure']
+            model_input = json.loads(context['messages'][1]['content'])
+            if (manifest['schema_version'] != 2 or structures != [record]
+                    or generation['geometry_receipt'] != receipt
+                    or generation.get('additional_geometry_receipts')
+                    or context['geometry_adapter'] != _geometry_context(max_atoms, initial_geometry)
+                    or model_input.get('initial_geometry') != initial_geometry
+                    or model_input.get('geometry_adapter') != context['geometry_adapter']
+                    or generation['potential_receipt']['atom_type_elements'] != receipt['type_elements']):
+                raise Conflict('Frozen geometry selection, model context, receipt and external input differ')
+        elif any('external_source' in item for item in manifest['files']):
+            raise Conflict('External geometry requires a frozen model input selection')
         screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout,require_analysis_plan=True,
-                                 packages=context.get('configured_engine_packages',()))
+                                 packages=context.get('configured_engine_packages',()),initial_geometry=initial_geometry)
         if screen is None or screen!=generation['script_screen']:
             raise Conflict('Frozen candidate does not pass the current static screen')
         if (sha256(canonical(context))!=manifest['provenance']['task_sha256'] or
@@ -48,7 +71,8 @@ def candidate_check(snapshot, *, max_atoms):
                 or context['resources']!=manifest['resources']
                 or generation['request_id']!=sha256(canonical(context))[:32]):
             raise Conflict('Frozen analysis, model identity or resources changed')
-        expected=render_candidate_script(proposal,generation['potential_receipt']['units'],generation['potential_receipt']['commands'],output_layout=layout)
+        expected=render_candidate_script(proposal,generation['potential_receipt']['units'],generation['potential_receipt']['commands'],output_layout=layout,
+            initial_geometry=initial_geometry)
         if load(manifest['entrypoint'])!=expected:
             raise Conflict('Input differs from the frozen adapter and model workflow')
     return dict(schema_version=1,manifest_sha256=snapshot.digest,condition_sha256=context['condition_record_sha256'],

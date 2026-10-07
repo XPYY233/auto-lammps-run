@@ -22,6 +22,7 @@ FIELDS = {
     'resources': '计算资源上限',
 }
 ESSENTIAL = {'scope', 'material', 'structure', 'potential', 'units', 'quantity', 'analysis', 'resources'}
+GEOMETRY_CONDITION_FIELDS = ('structure', 'size', 'boundary', 'material', 'units', 'initialization')
 ORIGINS = {'user', 'paper', 'code', 'proposed'}
 APP_ID = 0x414C5453
 
@@ -421,6 +422,15 @@ class TaskStore:
                 for row in rows for d in [json.loads(row['document'])]]
 
     def _write(self, db, document, event):
+        if document['status'] != 'conditions_frozen' and 'initial_geometry' in document:
+            previous = self._read(db, document['id'])
+            def geometry_conditions(doc):
+                return {field: {key: doc['fields'][field][key] for key in ('candidates', 'selected')}
+                        for field in GEOMETRY_CONDITION_FIELDS}
+            if geometry_conditions(previous) != geometry_conditions(document):
+                document.pop('initial_geometry')
+                document.pop('target_selection', None)
+                event += ':initial_geometry_invalidated'
         # A selection applies to the conditions inspected at that moment.
         # Invalidate it in the same revision if any condition evidence changes.
         # Already frozen records remain immutable and are never backfilled.
@@ -478,6 +488,23 @@ class TaskStore:
             reason = text(reason, 2000, required=len(values) > 1)
             condition.update(selected=candidate_id, confirmed=False, resolution=reason)
             return self._write(db, doc, 'condition_selected:'+field)
+
+    def select_initial_geometry(self, identifier, revision, selection):
+        """Save a trusted resource selection, without loading or evaluating atoms."""
+        from .geometry_selection import validate_initial_geometry
+        from .geometry_catalog import GeometryCatalogError
+        try:
+            clean = validate_initial_geometry(selection)
+        except GeometryCatalogError as exc:
+            raise TaskError('初始结构元数据无效；请选择已核对的固定结构') from exc
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            if doc.get('initial_geometry') != clean:
+                # Target selection predates this geometry; preserve its old
+                # revision, but require a new target review before freezing.
+                doc.pop('target_selection', None)
+            doc['initial_geometry'] = clean
+            return self._write(db, doc, 'initial_geometry_selected')
 
     def import_literature(self, identifier, revision, csv_text, **mapping):
         from .literature import input_from_csv
@@ -668,6 +695,13 @@ class TaskStore:
             contract = dict(schema_version=1, purpose='condition_review_record', task_id=doc['id'], mode=doc['mode'],
                             title=doc['title'], prompt=doc['prompt'], conditions=doc['fields'],
                             scientific_validation='not_performed', execution_authorized=False)
+            if 'initial_geometry' in doc:
+                from .geometry_selection import validate_initial_geometry
+                from .geometry_catalog import GeometryCatalogError
+                try:
+                    contract['initial_geometry'] = validate_initial_geometry(doc['initial_geometry'])
+                except GeometryCatalogError as exc:
+                    raise TaskError('初始结构记录未通过核对，不能冻结') from exc
             if doc['mode'] == 'reproduction':
                 from .target_planning import freeze_plan
                 contract['target_plan'] = freeze_plan(doc)

@@ -72,6 +72,13 @@ def split_condition_record(content: bytes):
                  input_semantics_verified=False, resources_verified=False,
                  runtime_isolation_verified=False, conditions=inputs,
                  task_text='\n'.join(lines), resources=[])
+    if 'initial_geometry' in record:
+        from .geometry_selection import validate_initial_geometry
+        from .geometry_catalog import GeometryCatalogError
+        try:
+            draft['initial_geometry'] = validate_initial_geometry(record['initial_geometry'])
+        except GeometryCatalogError as exc:
+            raise TaskError('冻结的初始结构元数据无效，不能导出') from exc
     draft_bytes = canonical(draft)
     reference = dict(schema_version=1, generator_version=GENERATOR_VERSION,
                      purpose='reference_preparation_record',
