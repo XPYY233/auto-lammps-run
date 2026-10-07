@@ -25,6 +25,20 @@
   instructions. Historical blockers must not override later resolved decisions.
 - Use docs/RELIABILITY.md when changing adapters, retrieval or failure recovery;
   distinguish proposed knowledge from verified experience and protect test answers.
+- The domain Adapter is an active part of AI orchestration, not only a passive
+  tool wrapper or a document the model must remember to load. At each relevant
+  stage, the application supplies versioned capabilities, rules and permitted
+  evidence before planning; checks tool inputs before execution; verifies actual
+  outputs and returns actionable feedback; and supports bounded revision of the
+  same task after failure. AI retains scientific decisions; authorization and
+  accounting remain independent. Record implemented/tested/installed/real-run
+  coverage separately; a prompt or module alone does not prove the full flow.
+- Three-paper PAB validation follows docs/GOALS.md and TARGET_PLANNING.md:
+  audit all figures/tables and conditions before selecting targets; extract P
+  with the existing literature workbench; run original author code for A; give
+  only permitted conditions/resources to B through the ordinary user pages and
+  configured runtime API. No private B controller, manual backend completion,
+  answer leakage, silent task reduction or reset of submission history.
 - Reuse verified existing HPC software and prior audit evidence before proposing
   downloads or builds. A missing package in one module is not evidence that the
   cluster lacks a compatible engine. The user has explicitly accepted the existing
