@@ -9,6 +9,7 @@ from pathlib import Path
 from . import analysis as legacy
 from . import scalar_analysis as scalar
 from . import coordination_analysis as coordination
+from . import site_thermodynamics as site
 from . import runtime_launcher as runtime
 from .manifest import canonical, sha256
 from .slurm_read import _write_new
@@ -18,6 +19,7 @@ MAX_TABLE_BYTES = legacy.MAX_TABLE_BYTES
 MAX_TABLES = legacy.MAX_TABLES
 MAX_V3_SOURCES = 29
 VERSION = 3
+SITE_VERSION = 4
 
 
 def adapter_identity():
@@ -26,22 +28,37 @@ def adapter_identity():
                 structural_statistics=coordination.adapter_identity())
 
 
+def site_adapter_identity():
+    """Distinct version: existing frozen identities are never relabeled as v4.
+
+    Legacy v1 dispatch stays unchanged. Frozen v2/v3 source mismatches still
+    require their original deployment; this is an explicit upgrade for new plans.
+    """
+    return dict(adapter_version=SITE_VERSION, mixed_tables=adapter_identity(),
+                site_thermodynamics=site.adapter_identity())
+
+
 def validate_plan(plan, files):
     if not isinstance(plan,dict) or set(plan) != {'tables','operations'}:
         raise AnalysisError('Explicit analysis tables and operations are required')
     if not isinstance(plan['tables'],list):
         raise AnalysisError('Declare explicit analysis sources')
     is_structural=any(isinstance(t,dict) and t.get('format')==coordination.FORMAT for t in plan['tables'])
-    limit=MAX_V3_SOURCES if is_structural else MAX_TABLES
+    is_site=any(isinstance(t,dict) and t.get('format')==site.FORMAT for t in plan['tables'])
+    limit=MAX_V3_SOURCES if is_structural or is_site else MAX_TABLES
     if not 1 <= len(plan['tables']) <= limit:
         raise AnalysisError('Declare at most sixteen numeric tables or twenty-nine combined numeric/trajectory sources')
     tables=[]
     structural={}
+    sites={}
     declared=set()
     for table in plan['tables']:
         if isinstance(table,dict) and table.get('format') == coordination.FORMAT:
             coordination.validate_table(table)
             structural[table['file']]=table
+        elif isinstance(table,dict) and table.get('format') == site.FORMAT:
+            site.validate_table(table)
+            sites[table['file']]=table
         elif isinstance(table,dict) and 'format' in table:
             scalar.validate_table(table)
             tables.append(scalar.numeric_table(table))
@@ -53,7 +70,7 @@ def validate_plan(plan, files):
         declared.add(table['file'])
     if not isinstance(plan['operations'],list) or not 1 <= len(plan['operations']) <= legacy.MAX_OPERATIONS:
         raise AnalysisError('Declare one to thirty-two analysis operations')
-    operations=[];ids=set();used_structural=set()
+    operations=[];ids=set();used_structural=set();used_sites=set()
     for operation in plan['operations']:
         if not isinstance(operation,dict):
             raise AnalysisError('Explicit analysis operation is required')
@@ -63,18 +80,28 @@ def validate_plan(plan, files):
         if identifier in ids:
             raise AnalysisError('Duplicate analysis operation')
         ids.add(identifier)
-        if operation.get('method') == coordination.METHOD:
+        if operation.get('method') == site.METHOD:
+            table=sites.get(operation.get('file'))
+            if table is None:
+                raise AnalysisError('Site thermodynamics requires a declared complete array source')
+            site.validate_operation(operation,table)
+            used_sites.add(table['file'])
+        elif operation.get('method') == coordination.METHOD:
             table=structural.get(operation.get('file'))
             if table is None:
                 raise AnalysisError('Warren-Cowley requires a declared LAMMPS dump source')
             coordination.validate_operation(operation,table)
             used_structural.add(table['file'])
         else:
-            if operation.get('file') in structural:
+            if operation.get('file') in structural or operation.get('file') in sites:
                 raise AnalysisError('Numeric-table operations cannot read a trajectory as a scalar table')
             operations.append(operation)
     if set(structural) != used_structural:
         raise AnalysisError('Each structural source requires an explicit frozen structural operation')
+    if set(sites) != used_sites:
+        raise AnalysisError('Each complete site-array source requires a frozen thermodynamics operation')
+    if site.reservation_bytes(plan)>site.MAX_DERIVED_BYTES:
+        raise AnalysisError('Complete derived-table reservation exceeds the version-four storage limit')
     if len(tables)>MAX_TABLES or len(structural)>MAX_TABLES:
         raise AnalysisError('Version-three analysis supports at most sixteen numeric and sixteen trajectory sources')
     if tables:
@@ -88,6 +115,8 @@ def validate_plan(plan, files):
 
 def plan_adapter(plan):
     """Called by the trusted freezer, never selected by model authority."""
+    if any(table.get('format') == site.FORMAT for table in plan['tables']):
+        return 'numeric_tables_v4', site_adapter_identity()
     if any(table.get('format') == coordination.FORMAT for table in plan['tables']):
         return 'numeric_tables_v3', adapter_identity()
     if any('format' in table for table in plan['tables']):
@@ -95,7 +124,7 @@ def plan_adapter(plan):
     return 'numeric_tables_v1', legacy.adapter_identity()
 
 
-def analyze_collected(snapshot, collection):
+def analyze_collected(snapshot, collection, *, derived_directory=None):
     """Trusted adapter core; service obtains collection through OutputCollector."""
     manifest=snapshot.verify()
     context=collection['context']
@@ -112,9 +141,11 @@ def analyze_collected(snapshot, collection):
     if sha256(raw)!=specs[0]['sha256']:
         raise AnalysisError('Frozen analysis changed')
     spec=json.loads(raw)
-    if spec.get('implementation_status') not in {'numeric_tables_v2','numeric_tables_v3'} or 'plan' not in spec.get('proposal',{}):
+    status=spec.get('implementation_status')
+    if status not in {'numeric_tables_v2','numeric_tables_v3','numeric_tables_v4'} or 'plan' not in spec.get('proposal',{}):
         raise AnalysisError('This candidate has no executable frozen analysis plan')
-    if spec.get('adapter_identity')!=adapter_identity():
+    implementation=site_adapter_identity() if status=='numeric_tables_v4' else adapter_identity()
+    if spec.get('adapter_identity')!=implementation:
         raise AnalysisError('Analysis implementation differs from the frozen plan')
     plan=validate_plan(spec['proposal']['plan'],spec['proposal']['files'])
     inventory={item['path']:item for item in header['files']}
@@ -122,16 +153,31 @@ def analyze_collected(snapshot, collection):
     payload=Path(collection['directory'])/'payload'
     verify_payload(payload,header,context)
     provenance=[]
-    results=[];structural_results=[]
-    is_structural=spec['implementation_status']=='numeric_tables_v3'
+    results=[];structural_results=[];site_results=[]
+    is_structural=status in {'numeric_tables_v3','numeric_tables_v4'}
     total,cells=0,0
     for table in plan['tables']:
         name='output/'+table['file']
         if name not in inventory:
             raise AnalysisError('Required analysis table was not collected')
         item=inventory[name]
+        if table.get('format') == site.FORMAT:
+            if status!='numeric_tables_v4' or derived_directory is None:
+                raise AnalysisError('Complete site arrays require a reserved version-four derived directory')
+            if item['size']>site.MAX_ARRAY_BYTES:
+                raise AnalysisError('Complete site array exceeds the explicit byte limit')
+            data=runtime.read_regular(payload/name,item['size'])
+            if sha256(data)!=item['sha256']:
+                raise AnalysisError('Site array changed after collection')
+            source=dict(table,sha256=item['sha256'],size=item['size'])
+            provenance.append(source)
+            for op in plan['operations']:
+                if op['file']==table['file']:
+                    site_results.append(site.analyze(data,table,op,source,derived_directory))
+            del data
+            continue
         if table.get('format') == coordination.FORMAT:
-            if spec['implementation_status'] != 'numeric_tables_v3':
+            if status not in {'numeric_tables_v3','numeric_tables_v4'}:
                 raise AnalysisError('Structural sources require the frozen version-three adapter')
             if item['size'] > coordination.MAX_TRAJECTORY_BYTES:
                 raise AnalysisError('Structural trajectory exceeds the explicit byte limit')
@@ -168,8 +214,9 @@ def analyze_collected(snapshot, collection):
     positions={op['id']:index for index,op in enumerate(plan['operations'])}
     results.sort(key=lambda result:positions[result['id']])
     structural_results.sort(key=lambda result:positions[result['id']])
-    report=dict(schema_version=1,adapter_version=VERSION,status='analyzed',scientific_status='not_evaluated',
-                adapter_identity=adapter_identity(),
+    site_results.sort(key=lambda result:positions[result['id']])
+    report=dict(schema_version=1,adapter_version=SITE_VERSION if status=='numeric_tables_v4' else VERSION,status='analyzed',scientific_status='not_evaluated',
+                adapter_identity=implementation,
                 manifest_sha256=snapshot.digest,analysis_sha256=sha256(raw),sources=provenance,results=results,
                 declared_quantity=spec['proposal']['quantity'],declared_method=spec['proposal']['method'],
                 limitations=['Native scalar units are declarations only; labeled-table units match headers, not an independent physical verification.',
@@ -177,6 +224,8 @@ def analyze_collected(snapshot, collection):
                              'No reference answers, scientific thresholds or automatic fit-window selection are used.'])
     if structural_results:
         report['structural_results']=structural_results
+    if site_results:
+        report['site_thermodynamic_results']=site_results
     if len(canonical(report))>60000:
         raise AnalysisError('Analysis report exceeds retained artifact limit')
     return report
@@ -185,30 +234,40 @@ def analyze_collected(snapshot, collection):
 class VersionedAnalysisService(legacy.AnalysisService):
     @staticmethod
     def identity():
-        return adapter_identity()
+        return site_adapter_identity()
 
     def _run(self, request_id, snapshot):
         snapshot.verify()
         spec=json.loads(runtime.read_regular(snapshot.path/'analysis.json',65536))
-        if spec.get('implementation_status') not in {'numeric_tables_v2','numeric_tables_v3'}:
+        if spec.get('implementation_status') not in {'numeric_tables_v2','numeric_tables_v3','numeric_tables_v4'}:
             return super()._run(request_id,snapshot)
         collection=self.collector.fetch(request_id)
         if collection['state']!='collected':
             raise AnalysisError('Outputs must be collected before analysis')
         collection_sha256=sha256(canonical({k:v for k,v in collection.items() if k!='directory'}))
-        adapter_sha256=sha256(canonical(adapter_identity()))
+        is_site=spec['implementation_status']=='numeric_tables_v4'
+        implementation=site_adapter_identity() if is_site else adapter_identity()
+        adapter_sha256=sha256(canonical(implementation))
+        extra={}
+        if is_site:
+            plan=validate_plan(spec['proposal']['plan'],spec['proposal']['files'])
+            extra['storage_bytes']=site.reservation_bytes(plan)
         context=self.collector.ledger.begin_output_analysis(request_id, snapshot.digest,
-            collection_sha256, adapter_sha256, sha256(str(self.directory).encode()))
+            collection_sha256, adapter_sha256, sha256(str(self.directory).encode()),**extra)
         path=self.directory/(context['analysis_id']+'.json')
         if path.exists():
             raw=runtime.read_regular(path,65536,private=True)
             saved=json.loads(raw)
             if saved['context']!=context:
                 raise AnalysisError('Analysis report identity mismatch')
+            for result in saved.get('report',{}).get('site_thermodynamic_results',[]):
+                for receipt in result['derived_files']:
+                    site.read_derived(self.directory/context['analysis_id'],receipt)
             self.collector.ledger.finish_output_analysis(request_id,context['analysis_id'],sha256(raw))
             return saved
         try:
-            report=analyze_collected(snapshot,collection)
+            report=analyze_collected(snapshot,collection,
+                derived_directory=self.directory/context['analysis_id'] if is_site else None)
         except (ValueError,KeyError,TypeError,OSError,runtime.ExecutionDenied) as exc:
             report=dict(status='analysis_failed',scientific_status='not_evaluated',error_type=type(exc).__name__,
                         reason=str(exc) if isinstance(exc,AnalysisError) else 'Analysis data or filesystem validation failed')

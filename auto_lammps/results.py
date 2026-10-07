@@ -1,6 +1,8 @@
 """Task-scoped, read-only browser projection; never fetches or analyzes data."""
 import json
 import math
+import csv
+import io
 from pathlib import Path
 import re
 from datetime import datetime, timezone
@@ -133,6 +135,142 @@ def structural_projection(item, source):
                     '数值处理不包含论文答案、科学通过阈值或事后改选采样区间。'])
 
 
+SITE_COLUMNS={
+    'differences': [('state','1'),('site','1'),('variant','1'),('host','1'),
+        ('delta_E','eV'),('delta_V','angstrom^3'),('delta_H','eV'),('delta_N_0','1'),
+        ('delta_N_1','1'),('baseline_source_line','1'),('variant_source_line','1')],
+    'sites': [('state','1'),('site','1'),('host','1'),('model','1'),('temperature','K'),
+        ('beta','1/eV'),('p_0','1'),('p_1','1'),('p_vacancy','1'),('vacancy_enthalpy','eV'),
+        ('vacancy_volume','angstrom^3'),('baseline_source_line','1'),('vacancy_source_line','1')],
+    'curves': [('grid','1'),('index','1'),('model','1'),('beta','1/eV'),('temperature','K'),
+        ('mu_0','eV'),('mu_1','eV'),('partial_volume_0','angstrom^3'),
+        ('partial_volume_1','angstrom^3'),('vacancy_fraction','1'),
+        ('mean_vacancy_enthalpy','eV'),('mean_vacancy_volume','angstrom^3'),
+        ('composition_residual','1'),('solver_iterations','1')]}
+SITE_SUMMARY_FIELDS={'model','beta_eV_inverse','temperature_K','mu_0_eV','mu_1_eV',
+    'partial_volume_0_A3','partial_volume_1_A3','vacancy_fraction',
+    'mean_vacancy_enthalpy_eV','mean_vacancy_volume_A3','composition_residual','solver_iterations'}
+
+
+def site_projection(item, source):
+    """Check a saved complete-array proof; never rerun thermodynamics on GET."""
+    from . import site_thermodynamics as site
+    proof=runtime.hash_value(item['derived_sha256'])
+    if sha256(canonical({k:v for k,v in item.items() if k!='derived_sha256'}))!=proof:
+        raise ResultUnavailable('Derived site result changed')
+    table={k:source[k] for k in ('file','format','columns')}
+    operation=item['parameters'];site.validate_operation(operation,table)
+    if (item['id']!=operation['id'] or item['method']!=site.METHOD
+            or item['file']!=source['file'] or item['source']!=source
+            or item['scientific_status']!='not_evaluated' or item['physics_simulation'] is not False
+            or item['equations']!=site.EQUATIONS):
+        raise ResultUnavailable('Site result differs from its frozen method or source')
+    ns=len(site._domain(operation['states'],'state'));nl=len(site._domain(operation['sites'],'site'));n=ns*nl
+    coverage=dict(states=ns,sites=nl,variants=3,rows=4*n,baseline_rows=n,complete=True)
+    if (item['coverage']!=coverage or any(type(item['coverage'][k]) is not int
+            for k in coverage if k!='complete') or item['coverage']['complete'] is not True):
+        raise ResultUnavailable('Incomplete site-array coverage')
+    summaries=item['temperature_summaries']
+    expected=[(model,t) for model in operation['models'] for t in operation['temperatures_K']]
+    if not isinstance(summaries,list) or len(summaries)!=len(expected):
+        raise ResultUnavailable('Incomplete temperature summaries')
+    for summary,(model,t) in zip(summaries,expected):
+        if (not isinstance(summary,dict) or set(summary)!=SITE_SUMMARY_FIELDS
+                or summary['model']!=model or any(type(v) not in (int,float) or not math.isfinite(v)
+                    for k,v in summary.items() if k!='model')
+                or not math.isclose(summary['temperature_K'],t,rel_tol=1e-12)
+                or not math.isclose(summary['beta_eV_inverse'],1/(site.KB_EV_K*t),rel_tol=1e-12)
+                or not 0<=summary['vacancy_fraction']<=1
+                or type(summary['solver_iterations']) is not int
+                or not 1<=summary['solver_iterations']<=operation['solver']['max_iterations']):
+            raise ResultUnavailable('Invalid saved thermodynamic summary')
+    receipts=item['derived_files']
+    if not isinstance(receipts,list) or len(receipts)!=3:
+        raise ResultUnavailable('Incomplete derived CSV inventory')
+    expected_rows=dict(differences=3*n,sites=len(expected)*n,
+        curves=(len(operation['temperatures_K'])+operation['beta_grid']['count'])*len(operation['models']))
+    limits=dict(differences=8192+3*n*512,sites=8192+len(operation['temperatures_K'])*2*n*768,
+        curves=8192+(len(operation['temperatures_K'])+operation['beta_grid']['count'])*2*768)
+    for receipt,(kind,pairs) in zip(receipts,SITE_COLUMNS.items()):
+        if (not isinstance(receipt,dict) or set(receipt)!={'name','size','sha256','rows','columns',
+                'source_sha256','parameters_sha256'} or receipt['name']!=operation['id']+'-'+kind+'.csv'
+                or type(receipt['size']) is not int or not 1<=receipt['size']<=limits[kind]
+                or type(receipt['rows']) is not int or receipt['rows']!=expected_rows[kind]
+                or receipt['columns']!=[dict(name=k,unit=u) for k,u in pairs]
+                or receipt['source_sha256']!=source['sha256']
+                or receipt['parameters_sha256']!=sha256(canonical(operation))):
+            raise ResultUnavailable('Derived CSV differs from its complete frozen domain')
+        runtime.hash_value(receipt['sha256'])
+    # The free-text reservoir provenance remains in the saved private report.
+    # The browser receives declared numeric choices and fixed method labels only.
+    parameters={k:v for k,v in operation.items() if k!='reservoir_anchor'}
+    parameters['reservoir_anchor']={k:v for k,v in operation['reservoir_anchor'].items() if k!='source'}
+    return dict(id=item['id'],method=site.METHOD,file=item['file'],source=source,
+        parameters=parameters,coverage=coverage,equations=site.EQUATIONS,
+        temperature_summaries=summaries,derived_files=receipts,derived_sha256=proof,
+        scientific_status='not_evaluated',physics_simulation=False,
+        limitations=['独立无相互作用位点近似；弛豫焓代替含振动的自由能。',
+            '化学势绝对基准来自预先选择的储库假设；成分只约束化学势差。',
+            '全部状态与位点等权；未估计独立重复的不确定度或科学评分。',
+            '收敛标记来自冻结的力与压力诊断；迭代数不证明最小化终止原因。'])
+
+
+def site_source_preview(data, source):
+    """Validate every source token within the site limits, retaining at most 128 rows."""
+    from . import site_thermodynamics as site
+    table={k:source[k] for k in ('file','format','columns')};site.validate_table(table)
+    if len(data)>site.MAX_ARRAY_BYTES or not data.endswith(b'\n'):
+        raise ResultUnavailable('Site source exceeds its byte bound or is truncated')
+    count=data.count(b'\n')-2
+    if count<1 or count*len(table['columns'])>site.MAX_ARRAY_CELLS:
+        raise ResultUnavailable('Site source exceeds its full cell bound')
+    selected={round(i*(count-1)/127) for i in range(min(128,count))} if count>128 else set(range(count))
+    stream=io.BytesIO(data)
+    expected=[('# columns: '+' '.join(c['name'] for c in table['columns'])).encode(),
+              ('# units: '+' '.join(c['unit'] for c in table['columns'])).encode()]
+    if [stream.readline().rstrip(b'\r\n'),stream.readline().rstrip(b'\r\n')]!=expected:
+        raise ResultUnavailable('Site source headers changed')
+    rows=[];lines=[]
+    for index,raw in enumerate(stream):
+        tokens=raw.split()
+        if len(raw)>4098 or len(tokens)!=len(table['columns']) or any(
+                not re.fullmatch(rb'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',t)
+                for t in tokens):
+            raise ResultUnavailable('Invalid site source row')
+        values=[float(t) for t in tokens]
+        if any(not math.isfinite(v) for v in values):raise ResultUnavailable('Nonfinite site source row')
+        if index in selected:rows.append(values);lines.append(index+3)
+    return dict(file=source['file'],format=site.FORMAT,sha256=source['sha256'],columns=source['columns'],
+        total_rows=count,sampled=count>128,rows=rows,source_lines=lines)
+
+
+def site_curve_preview(data, receipt, operation):
+    """Read the saved curve CSV, not solve or interpolate new thermodynamic values."""
+    columns=receipt['columns'];reader=csv.reader(io.StringIO(data.decode('ascii'),newline=''))
+    if next(reader)!=[c['name'] for c in columns]:raise ResultUnavailable('Derived CSV header changed')
+    total=receipt['rows'];rows=[]
+    # Preserve each model/grid independently, including the first and last beta.
+    per_grid={kind:len(operation['temperatures_K']) if kind=='temperature' else operation['beta_grid']['count']
+              for kind in ('temperature','beta')}
+    selected={kind:{round(i*(length-1)/127) for i in range(min(128,length))}
+              if length>128 else range(length) for kind,length in per_grid.items()}
+    seen={};count=0
+    for raw in reader:
+        if len(raw)!=len(columns) or raw[0] not in per_grid or raw[2] not in operation['models']:
+            raise ResultUnavailable('Invalid saved curve row')
+        values=[raw[0],int(raw[1]),raw[2],*[float(v) for v in raw[3:]]]
+        key=(values[2],values[0]);index=seen.get(key,0);length=per_grid[values[0]]
+        if values[1]!=index or index>=length or any(not math.isfinite(v) for v in values[3:]):
+            raise ResultUnavailable('Incomplete saved curve domain')
+        if index in selected[values[0]]:rows.append(values)
+        seen[key]=index+1;count+=1
+    if count!=total or any(seen.get((model,grid))!=length
+            for model in operation['models'] for grid,length in per_grid.items()):
+        raise ResultUnavailable('Incomplete saved curve CSV')
+    return dict(name=receipt['name'],sha256=receipt['sha256'],columns=columns,total_rows=total,
+        sampled=len(rows)<total,rows=rows,preview_policy='up_to_128_per_model_and_grid_including_endpoints')
+
+
 class ResultsReader:
     def __init__(self, tasks, ledger, collections, reports):
         self.tasks,self.ledger=tasks,ledger
@@ -179,7 +317,7 @@ class ResultsReader:
             results.append({key:item[key] for key in ('id','method','file','x','y','window','sample_count',
                                                        'source_line_ranges','values','value_units','units_origin')})
         inventory={item['path']:item for item in source['header']['files']}
-        sources=[];structural_sources={}
+        sources=[];structural_sources={};site_sources={}
         for item in report['sources']:
             name=item['file']
             if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',name):
@@ -193,6 +331,13 @@ class ResultsReader:
                 public_source={key:item[key] for key in (*TABLE_FIELDS,'sha256','size')}
                 structural_sources[name]=public_source
                 sources.append(public_source)
+            elif item.get('format')=='site_scan_array_v1':
+                from .site_thermodynamics import validate_table,MAX_ARRAY_BYTES
+                validate_table({key:item[key] for key in ('file','format','columns')})
+                if type(item['size']) is not int or not 1<=item['size']<=MAX_ARRAY_BYTES:
+                    raise ResultUnavailable('Invalid complete site source size')
+                public_source={key:item[key] for key in ('file','format','columns','sha256','size')}
+                site_sources[name]=public_source;sources.append(public_source)
             else:
                 sources.append({key:item[key] for key in ('file','sha256','columns')})
         if len({s['file'] for s in sources})!=len(sources):
@@ -202,9 +347,24 @@ class ResultsReader:
             if item['file'] not in structural_sources:
                 raise ResultUnavailable('Structural result has no matching dump source')
             structural_results.append(structural_projection(item,structural_sources[item['file']]))
-        if structural_sources and (report.get('adapter_version')!=3
+        if structural_sources and (report.get('adapter_version') not in (3,4)
                 or {s['file'] for s in structural_results}!=set(structural_sources)):
             raise ResultUnavailable('Structural source lacks versioned analysis')
+        site_results=[]
+        for item in report.get('site_thermodynamic_results',[]):
+            if item['file'] not in site_sources:
+                raise ResultUnavailable('Site result has no matching complete source')
+            if item['adapter_identity']!=report['adapter_identity']['site_thermodynamics']:
+                raise ResultUnavailable('Site result differs from the saved adapter identity')
+            site_results.append(site_projection(item,site_sources[item['file']]))
+        if site_sources:
+            from . import site_thermodynamics as site
+            operations=[item['parameters'] for item in report['site_thermodynamic_results']]
+            if (report.get('adapter_version')!=4 or {s['file'] for s in site_results}!=set(site_sources)
+                    or context.get('storage_bytes')!=site.reservation_bytes(dict(operations=operations))
+                    or sum(r['size'] for s in site_results for r in s['derived_files'])+65536>context['storage_bytes']
+                    or len({s['id'] for s in site_results})!=len(site_results)):
+                raise ResultUnavailable('Site result lacks its complete reserved version-four storage')
         projection=dict(id=identifier,status='analyzed',label='数值分析已完成',at=public_time(event['at']),
                     quantity=report['declared_quantity'],results=results,
                     sources=sources,
@@ -215,6 +375,7 @@ class ResultsReader:
                             else '结构分析参数或数值表头已核对，仍需核验物理定义和脚本中的单位处理。'),
                            '样本标准差描述数据波动，不代表独立重复实验的不确定度。'])
         if structural_results:projection.update(structural_results=structural_results,analysis_format='numeric_tables_v3')
+        if site_results:projection.update(site_thermodynamic_results=site_results,analysis_format='numeric_tables_v4')
         return projection
 
     def task(self, identifier):
@@ -273,8 +434,8 @@ class ResultsReader:
                     max_submissions=sum(g['max_attempts'] for g in groups),
                     scientific_status='not_evaluated')
 
-    def tables(self, identifier, analysis_id):
-        """Bounded previews of verified source bytes, never new analysis or fetching."""
+    def _verified_sources(self, identifier, analysis_id):
+        """Bind a second read to the task, immutable ledger event and collection proof."""
         verified=self.report(identifier,analysis_id)
         raw=runtime.read_regular(self.reports/(analysis_id+'.json'),65536,private=True)
         saved=json.loads(raw);context=saved['context'];report=saved['report']
@@ -295,10 +456,15 @@ class ResultsReader:
         receipt=runtime.read_regular(self.collections/ticket/'receipt.json',262144,private=True)
         if sha256(receipt)!=context['collection_sha256']:raise ResultUnavailable('Source receipt changed')
         inventory={i['path']:i for i in json.loads(receipt)['header']['files']}
+        return verified,report,ticket,inventory
+
+    def tables(self, identifier, analysis_id):
+        """Bounded previews of verified source bytes, never new analysis or fetching."""
+        verified,report,ticket,inventory=self._verified_sources(identifier,analysis_id)
         from .analysis import parse_table, MAX_TABLE_BYTES
         from .scalar_analysis import parse_scalar
         tables=[];total=0
-        is_structural=verified.get('analysis_format')=='numeric_tables_v3'
+        is_structural=verified.get('analysis_format') in ('numeric_tables_v3','numeric_tables_v4')
         if not 1<=len(report['sources'])<=(29 if is_structural else 16):
             raise ResultUnavailable('Preview source limit exceeded')
         public_sources={s['file']:s for s in verified['sources']}
@@ -312,6 +478,13 @@ class ResultsReader:
             if source.get('format')=='lammps_dump':
                 from .coordination_analysis import _source_digest
                 _source_digest(self.collections/ticket/'payload'/'output'/name,source)
+                continue
+            if source.get('format')=='site_scan_array_v1':
+                from .site_thermodynamics import MAX_ARRAY_BYTES
+                data=runtime.read_regular(self.collections/ticket/'payload'/'output'/name,MAX_ARRAY_BYTES)
+                if len(data)!=source['size'] or sha256(data)!=source['sha256']:
+                    raise ResultUnavailable('Complete site source changed')
+                tables.append(site_source_preview(data,public_sources[name]));del data
                 continue
             total+=item['size']
             if item['size']>MAX_TABLE_BYTES or (not is_structural and total>MAX_TABLE_BYTES):
@@ -331,8 +504,34 @@ class ResultsReader:
                                rows=[values for _,values in selected],source_lines=[line for line,_ in selected]))
             del rows,data
         value=dict(analysis_id=analysis_id,tables=tables,scientific_status='not_evaluated')
-        if is_structural:value['structural_results']=verified['structural_results']
+        if verified.get('structural_results'):value['structural_results']=verified['structural_results']
+        if verified.get('site_thermodynamic_results'):
+            from . import site_thermodynamics as site
+            previews=[]
+            for item,original in zip(verified['site_thermodynamic_results'],report['site_thermodynamic_results']):
+                receipt=next(r for r in item['derived_files'] if r['name'].endswith('-curves.csv'))
+                raw=site.read_derived(self.reports/analysis_id,receipt)
+                previews.append(dict(id=item['id'],curves=site_curve_preview(raw,receipt,original['parameters'])))
+            value.update(site_thermodynamic_results=verified['site_thermodynamic_results'],site_previews=previews)
         return value
+
+    def derived(self, identifier, analysis_id, name):
+        """Complete task-scoped CSV bytes from one saved, accounted receipt only."""
+        from . import site_thermodynamics as site
+        if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}-(differences|sites|curves)\.csv',name):
+            raise ResultUnavailable('Unsupported derived download label')
+        verified,report,ticket,inventory=self._verified_sources(identifier,analysis_id)
+        matches=[(item,r) for item in verified.get('site_thermodynamic_results',[])
+                 for r in item['derived_files'] if r['name']==name]
+        if len(matches)!=1:raise ResultUnavailable('This task has no declared derived CSV')
+        item,receipt=matches[0];source=item['source'];collected=inventory.get('output/'+source['file'])
+        if not collected or any(source[k]!=collected[k] for k in ('sha256','size')):
+            raise ResultUnavailable('Derived source differs from collection')
+        raw=runtime.read_regular(self.collections/ticket/'payload'/'output'/source['file'],site.MAX_ARRAY_BYTES)
+        if len(raw)!=source['size'] or sha256(raw)!=receipt['source_sha256']:
+            raise ResultUnavailable('Derived source bytes changed')
+        del raw
+        return site.read_derived(self.reports/analysis_id,receipt)
 
     def report(self, identifier, analysis_id):
         runtime.hash_value(analysis_id)

@@ -783,6 +783,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return Response(canonical(report),media_type='application/json',
                         headers={'Content-Disposition':'attachment; filename="analysis-report.json"'})
 
+    @app.get('/api/tasks/{identifier}/results/{analysis_id}/derived/{name}')
+    def task_derived_csv(identifier: str, analysis_id: str, name: str):
+        store.get(identifier)
+        if results_reader is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:data=results_reader.derived(identifier,analysis_id,name)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'完整数据或关联来源未通过核验，未提供下载。'},status_code=409)
+        return Response(data,media_type='text/csv',
+                        headers={'Content-Disposition':'attachment; filename="'+name+'"'})
+
     @app.post('/api/literature/preview')
     def preview(data: LiteraturePreview):
         return preview_csv(data.csv_text)
@@ -1108,14 +1118,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         # The completion must know which potentials are actually installed, otherwise it
         # invents a format the cluster cannot run (for example EAM for a W task while the
         # only available W resource is MEAM) and the later preparation has to refuse it.
-        resources = None
-        if candidate_service is not None:
-            try:
-                resources = [{'elements': model['elements'], 'format': model['format'],
-                              'units': model['units'], 'applicability': model.get('applicability')}
-                             for model in candidate_service.adapter.compatible_models()]
-            except (ValueError, KeyError, TypeError, OSError):
-                resources = None
+        if candidate_service is None:
+            raise TaskError('势函数资源适配器尚未配置，未发送条件补全请求。')
+        try:
+            resources = [{'pin':model['pin'], 'elements': model['elements'], 'format': model['format'],
+                          'units': model['units'], 'applicability': model.get('applicability')}
+                         for model in candidate_service.adapter.compatible_models()]
+        except (ValueError, KeyError, TypeError, OSError):
+            raise TaskError('已有势函数目录核验失败，未发送条件补全请求。请核对资源连接。') from None
+        if not resources:
+            raise TaskError('现有登记势函数未找到可用资源，未发送条件补全请求。')
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision,
                                            operation='complete-conditions-v2', refine=data.refine,
                                            attempt=getattr(data, 'attempt', 0))))[:32]
@@ -1267,9 +1279,13 @@ def main():
         config_path = Path(args.candidate_config).expanduser()
         with root_descriptor(config_path.parent) as root:
             config = json.loads(read_file(root, config_path.name, 100000))
-        if set(config) - {'legacy_snap_pins', 'output_layout'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
+        if set(config) - {'legacy_snap_pins', 'output_layout', 'remote_potential_catalog'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
             parser.error('Invalid candidate configuration fields')
-        adapter = PotentialAdapter(PotentialCatalog(config['potential_catalog']), allowed_pins=config['allowed_pins'],
+        catalog = PotentialCatalog(config['potential_catalog'])
+        if config.get('remote_potential_catalog'):
+            from .remote_potentials import RemotePotentialCatalog, CombinedPotentialCatalog
+            catalog = CombinedPotentialCatalog(catalog, RemotePotentialCatalog(config['remote_potential_catalog']))
+        adapter = PotentialAdapter(catalog, allowed_pins=config['allowed_pins'],
                     software_sha256=config['software_sha256'], packages=config['packages'],
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),

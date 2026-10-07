@@ -39,6 +39,17 @@
   same task after failure. AI retains scientific decisions; authorization and
   accounting remain independent. Record implemented/tested/installed/real-run
   coverage separately; a prompt or module alone does not prove the full flow.
+- Mandatory runtime participation (2026-10-08): the application must attach the
+  applicable versioned Adapter contract to every scientific AI request, including
+  preparation, revision, review, recovery and analysis. The model cannot opt out;
+  generated actions pass the same trusted checks before execution, and actual
+  results are verified before reuse. Missing required capabilities stop that stage
+  with a specific gap rather than invoking an unrestricted fallback. Adapters are
+  generic, parameterized tools, never a paper- or job-specific solution.
+- Potential lookup is catalog-first: reuse registered resources, verify complete
+  files, provenance, element/type mapping and applicability, then bind a fixed
+  identity. Search public repositories only for a genuine catalog gap; retain
+  original potential bytes on the configured HPC. Discovery alone is not fitness.
 - Three-paper PAB validation follows docs/GOALS.md and TARGET_PLANNING.md:
   audit all figures/tables and conditions before selecting targets; extract P
   with the existing literature workbench; run original author code for A; give

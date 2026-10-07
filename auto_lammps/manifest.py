@@ -119,11 +119,15 @@ def validate_file_record(record, schema_version):
     name = relative_name(record['path'])
     if external:
         source = record['external_source']
-        if (schema_version != 2 or record['role'] != 'structure' or not isinstance(source, dict)
-                or set(source) != {'catalog_sha256', 'pin'}
-                or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
-                       for value in source.values())):
-            raise ManifestError('Invalid external structure source')
+        potential = isinstance(source, dict) and source.get('kind') == 'potential'
+        if (schema_version != 2 or not isinstance(source, dict)
+                or set(source) != ({'kind', 'catalog_sha256', 'pin', 'role'} if potential else {'catalog_sha256', 'pin'})
+                or record['role'] != ('potential' if potential else 'structure')
+                or any(not isinstance(source[key], str) or not re.fullmatch(r'[a-f0-9]{64}', source[key])
+                       for key in ('catalog_sha256', 'pin'))
+                or (potential and (not isinstance(source['role'], str)
+                    or source['role'] not in {'library', 'parameters', 'coefficients', 'model', 'license'}))):
+            raise ManifestError('Invalid external resource source')
     return name
 
 
@@ -212,7 +216,7 @@ def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources,
     names = set(files)
     for name, record in external_files.items():
         if (validate_file_record(record, 2) != name or 'external_source' not in record or name in names):
-            raise ManifestError('External structure record differs from its named input')
+            raise ManifestError('External resource record differs from its named input')
         # Detach mutable caller objects before calculating the manifest identity.
         external_records.append(json.loads(canonical(record)))
         names.add(name)

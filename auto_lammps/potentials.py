@@ -1,5 +1,5 @@
 """Private pinned resources; explicit binding conversions never alter the catalog."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fcntl
 import json
 import math
@@ -57,13 +57,14 @@ def _metadata(document):
         raise PotentialError('Unsupported potential metadata fields')
     for key in ('name', 'license', 'applicability', 'usage_evidence'):
         _text(document[key])
-    if document['format'] not in {'snap', 'meam', 'eam/alloy'} or document['units'] not in {'metal', 'real'}:
+    if (not isinstance(document['format'], str) or not isinstance(document['units'], str)
+            or document['format'] not in {'snap', 'meam', 'eam/alloy'} or document['units'] not in {'metal', 'real'}):
         raise PotentialError('Unsupported model format or units')
     if document['format'] == 'meam' and document['units'] != 'metal':
         raise PotentialError('MEAM binding currently requires source-verified metal units')
     if document['format'] == 'eam/alloy' and document['units'] != 'metal':
         raise PotentialError('EAM/alloy binding requires source-verified metal units')
-    if document['interaction'] not in {'standalone', 'hybrid', 'unresolved'}:
+    if not isinstance(document['interaction'], str) or document['interaction'] not in {'standalone', 'hybrid', 'unresolved'}:
         raise PotentialError('Declare standalone, hybrid or unresolved interaction')
     elements = document['elements']
     if (not isinstance(elements, list) or not 1 <= len(elements) <= 118
@@ -471,6 +472,7 @@ class PotentialBinding:
     files: dict
     commands: tuple
     receipt: dict
+    remote_files: dict = field(default_factory=dict)
 
 
 class PotentialAdapter:
@@ -556,6 +558,16 @@ class PotentialAdapter:
             raise PotentialError('Task and potential units differ; no automatic conversion')
         if meta['interaction'] != 'standalone':
             raise PotentialError('Hybrid or unresolved interactions need another adapter')
+        if (getattr(self.catalog, 'hpc_only', False)
+                or (hasattr(self.catalog, 'is_remote') and self.catalog.is_remote(pin))):
+            if pin in self.legacy_snap_pins:
+                raise PotentialError('Remote resources cannot use unregistered compatibility conversions')
+            if record['inspection']['blockers']:
+                raise PotentialError('Potential compatibility blocked: ' + ', '.join(record['inspection']['blockers']))
+            package = {'meam': 'MEAM', 'snap': 'ML-SNAP', 'eam/alloy': 'MANYBODY'}[meta['format']]
+            if package not in self.packages:
+                raise PotentialError('Declared software environment lacks ' + package)
+            return self.catalog.binding(pin, type_elements=type_elements, software_sha256=self.software_sha256)
         if meta['format'] in {'meam', 'eam/alloy'}:
             if pin in self.legacy_snap_pins:
                 raise PotentialError('Only SNAP can use a legacy SNAP conversion policy')

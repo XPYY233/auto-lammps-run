@@ -652,6 +652,14 @@ def complete_condition_draft(client, store, identifier, revision, request_id, re
         chosen=next((v for v in field['candidates'] if v['id']==field['selected']),None)
         if chosen:extracted.append(dict(field=key,value=chosen['value'],unit=chosen['unit'],origin=chosen['origin']))
     messages = completion_messages(missing, extracted, current['mode'], current.get('prompt', ''), resources, guidance)
+    from .scientific_adapters import ScientificAdapterError, prepare_stage_messages
+    try:
+        messages, adapter_proof = prepare_stage_messages('condition_completion', messages,
+            {'task_id': identifier, 'revision': revision, 'mode': current['mode'],
+             'request': current.get('prompt', ''), 'missing': missing, 'selected_conditions': extracted,
+             'available_resources': resources, 'guidance': guidance or []})
+    except ScientificAdapterError as error:
+        raise TaskError(str(error)) from None
     completion = client.complete_json(request_id, messages)
     if completion['receipt']['state'] != 'completed':
         raise ModelError('condition_completion_not_completed')
@@ -675,4 +683,5 @@ def complete_condition_draft(client, store, identifier, revision, request_id, re
                          '模型重新完善的待确认建议；旧建议保留，尚未由用户确认')
         accepted.append(proposal['field'])
     return {'revision': store.get(identifier)['revision'], 'proposed_fields': accepted,
-            'skipped_fields': skipped}
+            'skipped_fields': skipped, 'scientific_adapter': {**adapter_proof,
+                'output_check': 'unconfirmed_proposal_contract_checked'}}

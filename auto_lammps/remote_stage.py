@@ -186,11 +186,14 @@ def validate_manifest(data, expected):
             hash_value(item['sha256'])
             if external:
                 source = item['external_source']
-                if (value['schema_version'] != 2 or item['role'] != 'structure'
-                        or not isinstance(source, dict) or set(source) != {'catalog_sha256', 'pin'}):
-                    raise StageError('Invalid external structure source')
-                for checksum in source.values():
-                    hash_value(checksum)
+                potential = isinstance(source, dict) and source.get('kind') == 'potential'
+                if (value['schema_version'] != 2 or not isinstance(source, dict)
+                        or item['role'] != ('potential' if potential else 'structure')
+                        or set(source) != ({'kind', 'catalog_sha256', 'pin', 'role'} if potential else {'catalog_sha256', 'pin'})
+                        or (potential and source['role'] not in {'library', 'parameters', 'coefficients', 'model', 'license'})):
+                    raise StageError('Invalid external resource source')
+                for key in ('catalog_sha256', 'pin'):
+                    hash_value(source[key])
             if item['role'] == 'lammps_input':
                 entries.append(name)
         if entries != [value['entrypoint']] or total > resources['storage_bytes']:
@@ -343,6 +346,72 @@ def inspect_geometry_catalog(*, _geometry_catalog=None):
                              for item in catalog['entries']])
 
 
+def validate_potential_catalog(raw):
+    """Registered original files only; no scientific compatibility inference."""
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or set(value) != {'schema_version', 'entries'}
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or not isinstance(value['entries'], list) or len(value['entries']) > 128):
+        raise StageError('Invalid HPC potential catalog')
+    pins, paths = set(), set()
+    roles = {'meam': {'library', 'parameters', 'license'},
+             'eam/alloy': {'model', 'license'}, 'snap': {'coefficients', 'parameters', 'license'}}
+    for entry in value['entries']:
+        if not isinstance(entry, dict) or set(entry) != {'pin', 'record', 'paths'}:
+            raise StageError('Invalid potential entry')
+        pin = hash_value(entry['pin']); record = entry['record']
+        if (pin in pins or not isinstance(record, dict)
+                or set(record) != {'schema_version', 'status', 'metadata', 'files', 'inspection'}
+                or type(record['schema_version']) is not int or record['schema_version'] != 1
+                or not isinstance(record['metadata'], dict) or not isinstance(record['files'], dict)
+                or record['status'] != 'collected'
+                or digest(encoded(record)) != pin):
+            raise StageError('Registered potential record changed')
+        pins.add(pin)
+        fmt = record['metadata'].get('format')
+        if (not isinstance(fmt, str) or fmt not in roles or not isinstance(entry['paths'], dict)
+                or set(record['files']) != roles[fmt] or set(entry['paths']) != roles[fmt]):
+            raise StageError('Incomplete potential and license bundle')
+        for role, item in record['files'].items():
+            if (not isinstance(item, dict) or set(item) != {'name', 'size', 'sha256'}
+                    or type(item['size']) is not int or not 1 <= item['size'] <= 16 * 1024 * 1024):
+                raise StageError('Invalid potential source file')
+            hash_value(item['sha256'])
+            if (not isinstance(item['name'], str) or '/' in item['name']
+                    or entry['paths'][role] != pin + '/' + item['name']):
+                raise StageError('Potential source path differs from its registered role')
+            path = safe_name(entry['paths'][role])
+            if path in paths:
+                raise StageError('Overlapping potential source')
+            paths.add(path)
+    return value
+
+
+def potential_catalog_path(_potential_catalog):
+    return Path(_potential_catalog) if _potential_catalog is not None else Path(__file__).resolve().parent/'potential-catalog'
+
+
+@contextmanager
+def potential_catalog(*, _potential_catalog=None, _catalog_sha256=None):
+    path = potential_catalog_path(_potential_catalog)
+    with approved_root(str(path)) as directory:
+        if _catalog_sha256 is None:
+            raw = regular_read(directory, 'catalog.json', HEADER_LIMIT, private=True)
+            checksum = digest(raw)
+            if catalog_version_bytes(directory, checksum) != raw:
+                raise StageError('Current potential catalog differs from its fixed version')
+        else:
+            checksum = hash_value(_catalog_sha256)
+            raw = catalog_version_bytes(directory, checksum)
+        yield directory, checksum, validate_potential_catalog(raw)
+
+
+def inspect_potential_catalog(*, _potential_catalog=None):
+    with potential_catalog(_potential_catalog=_potential_catalog) as (_, checksum, catalog):
+        return dict(schema_version=1, catalog_sha256=checksum,
+            entries=[{key: item[key] for key in ('pin', 'record')} for item in catalog['entries']])
+
+
 def copy_geometry_source(catalog_directory, item, output_fd):
     folder = os.dup(catalog_directory)
     try:
@@ -378,7 +447,7 @@ def copy_geometry_source(catalog_directory, item, output_fd):
         os.close(folder)
 
 
-def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog=None):
+def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog=None, _potential_catalog=None):
     if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
         raise StageError('Invalid request identity')
     size = struct.unpack('!I', read_exact(stream, 4))[0]
@@ -388,8 +457,10 @@ def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog
     manifest = validate_manifest(manifest_bytes, manifest_sha256)
     allocation = manifest['resources']['storage_bytes']
     with approved_root(root_path) as root, ExitStack() as catalogs:
-        external_files = [item for item in manifest['files'] if 'external_source' in item]
+        external_files = [item for item in manifest['files'] if 'external_source' in item and item['role']=='structure']
+        external_potentials = [item for item in manifest['files'] if 'external_source' in item and item['role']=='potential']
         catalog_directory, catalog_sha256, selected = None, None, {}
+        potential_directory, potential_sha256, potential_selected = None, None, {}
         if external_files:
             source_root, request_root = geometry_catalog_path(_geometry_catalog), Path(root_path)
             if source_root == request_root or source_root in request_root.parents or request_root in source_root.parents:
@@ -404,6 +475,32 @@ def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog
                         or entry['size'] != item['size'] or entry['sha256'] != item['sha256']):
                     raise StageError('External structure differs from the fixed HPC catalog')
                 selected[item['path']] = entry
+        if external_potentials:
+            source_root, request_root = potential_catalog_path(_potential_catalog), Path(root_path)
+            if source_root == request_root or source_root in request_root.parents or request_root in source_root.parents:
+                raise StageError('Potential catalog must be outside the request root')
+            pinned = external_potentials[0]['external_source']['catalog_sha256']
+            potential_directory, potential_sha256, catalog = catalogs.enter_context(potential_catalog(
+                _potential_catalog=_potential_catalog, _catalog_sha256=pinned))
+            inventory = {item['pin']: item for item in catalog['entries']}
+            names = dict(library='library.meam', coefficients='model.snapcoeff', parameters=None,
+                         model='model.eam.alloy', license='LICENSE.txt')
+            requested = {}
+            for item in external_potentials:
+                source = item['external_source']; entry = inventory.get(source['pin'])
+                if source['catalog_sha256'] != potential_sha256 or entry is None:
+                    raise StageError('External potential differs from the fixed HPC catalog')
+                role = source['role']; rec = entry['record']['files'].get(role)
+                if rec is None or rec['size'] != item['size'] or rec['sha256'] != item['sha256']:
+                    raise StageError('External potential file differs from its registered role')
+                name = names[role] if role != 'parameters' else ('model.meam' if entry['record']['metadata']['format']=='meam' else 'model.snapparam')
+                if item['path'] != 'potentials/'+source['pin']+'/'+name:
+                    raise StageError('External potential destination is not its fixed binding name')
+                requested.setdefault(source['pin'], set()).add(role)
+                potential_selected[item['path']] = dict(path=entry['paths'][role], size=rec['size'], sha256=rec['sha256'])
+            for pin, role_set in requested.items():
+                if role_set != set(inventory[pin]['record']['files']):
+                    raise StageError('All potential roles and license must be staged together')
         # Exclusive creation avoids racing O_CREAT/O_NOFOLLOW path resolution on
         # some filesystems. Existing locks are opened without creation semantics.
         try:
@@ -462,7 +559,10 @@ def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog
                                      0o400, dir_fd=folder)
                         try:
                             if 'external_source' in item:
-                                copy_geometry_source(catalog_directory, selected[item['path']], fd)
+                                if item['role']=='potential':
+                                    copy_geometry_source(potential_directory, potential_selected[item['path']], fd)
+                                else:
+                                    copy_geometry_source(catalog_directory, selected[item['path']], fd)
                             else:
                                 remaining, checksum = item['size'], hashlib.sha256()
                                 with os.fdopen(fd, 'wb', closefd=False) as output:
@@ -484,6 +584,8 @@ def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog
                     raise StageError('Trailing undeclared upload content')
                 if catalog_directory is not None:
                     catalog_version_bytes(catalog_directory, catalog_sha256)
+                if potential_directory is not None:
+                    catalog_version_bytes(potential_directory, potential_sha256)
                 receipt = dict(schema_version=1, state='staged', request_id=request_id,
                                manifest_sha256=manifest_sha256, input_bytes=sum(x['size'] for x in manifest['files']),
                                storage_bytes=allocation, policy_sha256=digest(policy_bytes))
@@ -499,17 +601,20 @@ def main():
     parser.add_argument('--request-id')
     parser.add_argument('--manifest-sha256')
     parser.add_argument('--list-geometry', action='store_true', help='Read fixed geometry metadata only; never stage or execute')
+    parser.add_argument('--list-potentials', action='store_true', help='Read fixed potential metadata only; never stage or execute')
     args = parser.parse_args()
-    if args.list_geometry:
+    if args.list_geometry or args.list_potentials:
+        if args.list_geometry and args.list_potentials:
+            parser.error('Choose one fixed metadata inventory')
         if any(value is not None for value in (args.root, args.request_id, args.manifest_sha256)):
-            parser.error('--list-geometry cannot be combined with request arguments')
+            parser.error('Metadata inspection cannot be combined with request arguments')
     elif any(value is None for value in (args.root, args.request_id, args.manifest_sha256)):
         parser.error('--root, --request-id and --manifest-sha256 are required for staging')
     # A stalled client cannot hold the service lock indefinitely. Termination
     # leaves partial files/reservations for inspection; never implies rejection.
     signal.alarm(60)
     try:
-        result = (inspect_geometry_catalog() if args.list_geometry else
+        result = (inspect_geometry_catalog() if args.list_geometry else inspect_potential_catalog() if args.list_potentials else
                   receive(args.root, args.request_id, args.manifest_sha256, sys.stdin.buffer))
     except (StageError, OSError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({'state': 'stage_failed', 'error_type': type(exc).__name__}))

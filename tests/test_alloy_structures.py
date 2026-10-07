@@ -181,9 +181,10 @@ class AlloyCandidateFlowTests(unittest.TestCase):
     def repaired(self, bad, good, task_text):
         """The same accounted path must turn actual tool errors into AI feedback."""
         calls=ModelCalls(self.root/'repair-models.sqlite',DeepSeekConfig('synthetic-model'),max_requests=3)
-        review={'issues':[], 'coverage':[{'requirement':'Synthetic composition',
-                                        'evidence':'Declared geometry and synthetic output'}],
-                'summary':'Static consistency only'}
+        from auto_lammps.plan_review import requirements
+        review={'issues':[], 'coverage':[{'requirement':item['id'],
+                   'evidence':[{'source':'rendered_script','quote':'units metal'}]}
+                   for item in requirements(task_text)], 'summary':'Static consistency only'}
         transport=Mock(side_effect=[(200,response(bad)),(200,response(good)),(200,response(review))])
         client=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
         with patch('subprocess.Popen',side_effect=AssertionError('no physical engine or SSH')):

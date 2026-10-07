@@ -73,7 +73,7 @@ class CycleScreenTests(unittest.TestCase):
         self.assertIn('warren_cowley_first_shell',messages[0]['content'])
         self.assertIn('structural_contract',json.loads(messages[1]['content'])['analysis_adapter'])
         tool=json.loads(messages[1]['content'])['workflow_adapter']
-        self.assertEqual(tool['version'],3)
+        self.assertEqual(tool['version'],4)
         self.assertIn('sample_swap_types',tool['operations'])
         self.assertFalse(tool['limits_grant_resources'])
 
@@ -106,7 +106,7 @@ class CycleFrozenCandidateTests(unittest.TestCase):
         self.assertNotIn('sample_swap_types',script)
         self.assertEqual(len(record['script_screen']['bounded_cycles']),9)
         self.assertEqual(self.transport.call_count,1)
-        self.assertEqual(record['input']['workflow_adapter']['version'],3)
+        self.assertEqual(record['input']['workflow_adapter']['version'],4)
 
     def test_mixed_eighteen_sources_bind_structural_plan_to_the_same_grant(self):
         self.configure()

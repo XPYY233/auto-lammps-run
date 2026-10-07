@@ -529,6 +529,7 @@ function resultReport(report,taskId) {
     if(file) source.append(node('p',file.columns.map(c=>`${c.name} [${c.unit}]`).join(' · ')),node('p','SHA-256：'+file.sha256,'source-hash'));
     box.append(source);
   }
+  for(const result of report.site_thermodynamic_results||[])box.append(siteDetails(result,taskId,report.id,{data:true}));
   for(const note of report.notes) box.append(node('p',note,'form-note'));
   const link=node('a','下载数值分析报告 ↓','quiet');
   link.href=`/api/tasks/${taskId}/results/${report.id}/download`;box.append(link);

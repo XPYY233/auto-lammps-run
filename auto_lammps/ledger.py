@@ -899,7 +899,9 @@ class Ledger:
                 raise Conflict('Scheduler evidence changed during collection')
             self._event(db, request_id, 'output_fetch_finished', payload)
 
-    def begin_output_analysis(self, request_id, manifest_sha256, collection_sha256, adapter_sha256, storage_scope_sha256):
+    def begin_output_analysis(self, request_id, manifest_sha256, collection_sha256, adapter_sha256, storage_scope_sha256, *, storage_bytes=65536):
+        if type(storage_bytes) is not int or not 65536 <= storage_bytes <= 2 * 1024**3:
+            raise ValueError('Bounded report and derived-data storage is required')
         for value in (manifest_sha256,collection_sha256,adapter_sha256,storage_scope_sha256):_digest(value)
         with self._transaction() as db:
             row=self._request(db,request_id)
@@ -912,6 +914,8 @@ class Ledger:
             base=dict(request_id=request_id,job_id=row['job_id'],manifest_sha256=manifest_sha256,
                       collection_sha256=collection_sha256,adapter_sha256=adapter_sha256,
                       storage_scope_sha256=storage_scope_sha256)
+            if storage_bytes != 65536:
+                base['derived_storage_bytes'] = storage_bytes
             analysis_id=hashlib.sha256(_json(base).encode()).hexdigest()
             previous=[json.loads(r[0]) for r in db.execute(
                 "SELECT payload FROM events WHERE request_id=? AND kind='analysis_reserved'",(request_id,))]
@@ -923,10 +927,10 @@ class Ledger:
                             (campaign,)).fetchall()
             if any(r['state']=='reconcile_required' for r in rows):
                 raise Conflict('Campaign contains an unresolved scheduler conflict')
-            if sum(r['charge_storage_bytes'] for r in rows)+65536>policy['total_storage_bytes']:
+            if sum(r['charge_storage_bytes'] for r in rows)+storage_bytes>policy['total_storage_bytes']:
                 raise LimitExceeded('Campaign storage cannot hold an analysis report')
-            context=dict(base,analysis_id=analysis_id,storage_bytes=65536)
-            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+65536 WHERE id=?',(request_id,))
+            context=dict(base,analysis_id=analysis_id,storage_bytes=storage_bytes)
+            db.execute('UPDATE requests SET charge_storage_bytes=charge_storage_bytes+? WHERE id=?',(storage_bytes,request_id))
             self._event(db,request_id,'analysis_reserved',context)
             return context
 

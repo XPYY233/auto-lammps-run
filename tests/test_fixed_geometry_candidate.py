@@ -151,7 +151,10 @@ class FixedGeometryCandidateTests(unittest.TestCase):
         candidate_check(result['snapshot'],max_atoms=100)
 
     def test_static_review_receives_the_fixed_metadata_and_actual_id_policy(self):
-        review=dict(issues=[],coverage=[dict(requirement='synthetic fixed input',evidence='read_data structure.data')],
+        from auto_lammps.plan_review import requirements
+        review=dict(issues=[],coverage=[dict(requirement=item['id'],
+                    evidence=[dict(source='rendered_script',quote='read_data structure.data')])
+                    for item in requirements('Synthetic allowed conditions; no reference answer.')],
                     summary='Static synthetic check, not physical verification')
         self.calls=ModelCalls(self.root/'review.sqlite',DeepSeekConfig('synthetic-model'),max_requests=2)
         self.transport=Mock(side_effect=[(200,response(self.value)),(200,response(review))])

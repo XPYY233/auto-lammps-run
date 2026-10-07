@@ -144,7 +144,9 @@ class AdapterPlanningTests(unittest.TestCase):
                 self.assertIn('pair_style',audit['rendered_script'])
                 self.assertTrue(audit['resource_metadata'])
                 issues=['Missing requested synthetic stage'] if len(seen)==2 else []
-                answer={'issues':issues,'coverage':[{'requirement':'synthetic stage','evidence':'run 0 and result.dat'}],'summary':'Static check only'}
+                answer={'issues':issues,'coverage':[{'requirement':item['id'],
+                    'evidence':[{'source':'rendered_script','quote':'run 0'}]}
+                    for item in audit['requirement_references']], 'summary':'Static check only'}
             else:
                 answer=deepcopy(value)
                 if len(seen)==3: answer['workflow']='run 0\n'+answer['workflow']

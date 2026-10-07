@@ -54,6 +54,11 @@ def diagnose(client, evidence, proposal, *, on_stage=None):
          'Every field except evidence is a nonempty string. Cite the exact failing command when available. '+GUIDE},
         {'role':'user','content':canonical(dict(failure=evidence,existing_proposal=evidence.get('failed_proposal',proposal))).decode()}]
     identifier=sha256(canonical(dict(kind='failure_diagnosis_v2',messages=messages)))[:32]
+    # Keep the existing diagnosis identity: a changed adapter must not create a
+    # hidden retry for the same failure. Its contract is bound in the call body.
+    from .scientific_adapters import prepare_stage_messages
+    messages, adapter_proof = prepare_stage_messages('failure_diagnosis', messages,
+        {'failure': evidence, 'existing_proposal': evidence.get('failed_proposal', proposal)})
     completion=client.complete_json(identifier,messages)
     value=completion['value'];receipt=completion['receipt']
     if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
@@ -66,4 +71,5 @@ def diagnose(client, evidence, proposal, *, on_stage=None):
                    or not any(x in log['tail'] for log in evidence['logs']) for x in value['evidence'])):
         raise ValueError('Failure diagnosis must cite actual supplied log excerpts')
     return dict(**value,receipt=receipt,request_id=identifier,failure_request_id=evidence['request_id'],
-        evidence_sha256=sha256(canonical(evidence)),validation_status='proposed_not_verified')
+        evidence_sha256=sha256(canonical(evidence)),validation_status='proposed_not_verified',
+        scientific_adapter={**adapter_proof,'output_check':'schema_receipt_and_literal_log_evidence_checked'})

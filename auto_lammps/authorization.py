@@ -55,8 +55,29 @@ def candidate_check(snapshot, *, max_atoms):
                     or model_input.get('geometry_adapter') != context['geometry_adapter']
                     or generation['potential_receipt']['atom_type_elements'] != receipt['type_elements']):
                 raise Conflict('Frozen geometry selection, model context, receipt and external input differ')
-        elif any('external_source' in item for item in manifest['files']):
+        elif any('external_source' in item and item['role']=='structure' for item in manifest['files']):
             raise Conflict('External geometry requires a frozen model input selection')
+        potential_receipt = generation['potential_receipt']
+        external_potentials = [item for item in manifest['files']
+                               if item['role']=='potential' and 'external_source' in item]
+        if 'remote_potential' in potential_receipt:
+            from .remote_potentials import fixed_binding
+            source = potential_receipt['remote_potential']
+            try:
+                if not isinstance(source, dict) or set(source) != {'catalog_sha256', 'entry'}:
+                    raise ValueError('Invalid remote potential receipt')
+                binding = fixed_binding(source['entry'], source['catalog_sha256'],
+                    type_elements=potential_receipt['atom_type_elements'],
+                    software_sha256=manifest['provenance']['software_sha256'])
+            except (ValueError, KeyError, TypeError) as error:
+                raise Conflict('Frozen HPC potential metadata is invalid') from error
+            expected_potentials = sorted(binding.remote_files.values(), key=lambda item:item['path'])
+            if (manifest['schema_version'] != 2 or potential_receipt != binding.receipt
+                    or [item for item in manifest['files'] if item['role']=='potential'] != expected_potentials
+                    or proposal['potential_pin'] != binding.pin):
+                raise Conflict('Frozen HPC potential resource, receipt and script binding differ')
+        elif external_potentials:
+            raise Conflict('External potential requires a frozen registered binding')
         screen=validate_proposal(proposal,max_atoms=max_atoms,output_layout=layout,require_analysis_plan=True,
                                  packages=context.get('configured_engine_packages',()),initial_geometry=initial_geometry)
         if screen is None or screen!=generation['script_screen']:

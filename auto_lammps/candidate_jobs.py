@@ -152,7 +152,9 @@ class CandidateService:
                   'potential_compatibility': adapter.compatibility_policy(),
                   'packages': sorted(adapter.packages), 'snapshots': str(self.snapshots),
                   'geometry': geometry_runtime(), 'sources': {name: sha256((Path(__file__).parent / name).read_bytes())
-                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'candidate_tools.py', 'failure_recovery.py', 'analysis.py', 'structures.py', 'potentials.py')}}
+                    for name in ('candidate_jobs.py', 'agent_candidates.py', 'candidate_tools.py', 'plan_review.py',
+                                 'failure_recovery.py', 'scientific_adapters.py', 'analysis.py', 'analysis_v2.py',
+                                 'site_thermodynamics.py', 'structures.py', 'potentials.py', 'remote_potentials.py')}}
         if output_layout != 'isolated': config['output_layout'] = output_layout
         self.config_sha256 = sha256(canonical(config))
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candidate-preparation')

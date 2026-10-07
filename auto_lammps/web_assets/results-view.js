@@ -17,7 +17,7 @@ function numericalPlot(table,operation){
   const names=table.columns.map(c=>c.name),xi=names.indexOf(operation.x),yi=names.indexOf(operation.y);
   const points=table.rows.filter(r=>r[xi]>=operation.window[0]&&r[xi]<=operation.window[1]).map(r=>[r[xi],r[yi]]);
   if(!points.length)return node('p','预览中没有此区间的数据。完整选取范围见分析报告。');
-  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('class','plot-svg');svg.setAttribute('viewBox','0 0 620 355');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${operation.y} 随 ${operation.x} 变化，真实数据与冻结拟合`);
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('class','plot-svg');svg.setAttribute('viewBox','0 0 620 355');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${operation.y} 随 ${operation.x} 变化，${operation.method==='saved_curve'?'已保存统计值':'真实数据与冻结拟合'}`);
   const add=(tag,attrs,text)=>{const el=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,v);if(text!==undefined)el.textContent=text;svg.append(el);return el;};
   let xmin=Math.min(...points.map(p=>p[0])),xmax=Math.max(...points.map(p=>p[0])),ymin=Math.min(...points.map(p=>p[1])),ymax=Math.max(...points.map(p=>p[1]));
   const fit=operation.method==='linear_fit'&&Number.isFinite(operation.values.slope)&&Number.isFinite(operation.values.intercept);
@@ -32,7 +32,7 @@ function numericalPlot(table,operation){
   if(fit)add('line',{x1:X(xmin),y1:Y(operation.values.slope*xmin+operation.values.intercept),x2:X(xmax),y2:Y(operation.values.slope*xmax+operation.values.intercept),stroke:'#952459','stroke-width':2,'stroke-dasharray':'7 5'});
   if(!fit)add('polyline',{points:points.map(p=>`${X(p[0])},${Y(p[1])}`).join(' '),fill:'none',stroke:'#245dc8','stroke-width':2});
   for(const p of points)add('circle',{cx:X(p[0]),cy:Y(p[1]),r:4,fill:'#245dc8',stroke:'white','stroke-width':1});
-  add('text',{x:82,y:27,fill:'#245dc8','font-size':12},'● 原始数据');if(fit)add('text',{x:215,y:27,fill:'#952459','font-size':12},'– – 冻结区间拟合（含外推）');
+  add('text',{x:82,y:27,fill:'#245dc8','font-size':12},operation.method==='saved_curve'?'● 保存的统计值':'● 原始数据');if(fit)add('text',{x:215,y:27,fill:'#952459','font-size':12},'– – 冻结区间拟合（含外推）');
   return svg;
 }
 function structuralPlot(result){
@@ -77,6 +77,38 @@ function structuralDetails(result,{plot=false,data=false}={}){
   for(const frame of result.frames){const diagnostic=frame.neighbor_diagnostics;if(diagnostic)source.append(node('p',`帧 ${frame.frame}：第 k 邻居距离 ${numberText(diagnostic.kth_distance_min)}–${numberText(diagnostic.kth_distance_max)} Å；最小相邻距离差 ${numberText(diagnostic.minimum_gap)} Å；${diagnostic.reciprocal?'邻接关系互反':`有 ${diagnostic.missing_reverse_edges} 条非互反邻接，两个方向的结果均已保留`}。`,'plot-caption'));}
   for(const note of result.limitations)source.append(node('p',note,'form-note'));article.append(source);return article;
 }
+const siteModelLabels={two_state_host_vacancy:'原宿主–空位两态',three_state_competing_species:'元素–元素–空位三态'};
+const siteQuantityLabels={vacancy_fraction:'空位比例',mean_vacancy_enthalpy:'平均空位焓',mean_vacancy_volume:'平均空位体积',mu_0:'元素 0 化学势',mu_1:'元素 1 化学势',partial_volume_0:'元素 0 偏体积',partial_volume_1:'元素 1 偏体积'};
+function siteDownloads(result,taskId,analysisId){
+  const box=node('div',undefined,'result-downloads');
+  for(const receipt of result.derived_files){const link=node('a',`下载完整 ${receipt.name} · ${receipt.rows} 行 ↓`,'quiet');link.href=`/api/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(analysisId)}/derived/${encodeURIComponent(receipt.name)}`;box.append(link,node('p','SHA-256：'+receipt.sha256,'source-hash'));}
+  return box;
+}
+function siteDetails(result,taskId,analysisId,{data=false,preview}={}){
+  const box=node('article',undefined,'result-widget'),c=result.coverage,p=result.parameters;
+  box.append(node('h4',`逐位点统计热力学 · ${result.id}`),node('p',`${c.states} 个状态 × ${c.sites} 个位点 × ${c.variants} 个变体；${c.baseline_rows} 行独立基线，共 ${c.rows} 行完整原始数据。`,'plot-caption'),
+    node('p',`${Object.entries(p.elements).map(([kind,symbol])=>`${kind}=${symbol}`).join('，')}；储库基准：${p.reservoir_anchor.method}；全部状态与位点等权。科学结论尚待核验。`,'form-note'));
+  if(data){const fields=[['model','模型','1'],['temperature_K','温度','K'],['beta_eV_inverse','β','1/eV'],['mu_0_eV','元素 0 化学势','eV'],['mu_1_eV','元素 1 化学势','eV'],['vacancy_fraction','空位比例','1'],['mean_vacancy_enthalpy_eV','平均空位焓','eV'],['mean_vacancy_volume_A3','平均空位体积','angstrom^3']];
+    box.append(node('h5','指定温度的全部统计值'),sourceTable({columns:fields.map(([,name,unit])=>({name,unit})),rows:result.temperature_summaries.map(s=>fields.map(([key])=>key==='model'?(siteModelLabels[s[key]]||s[key]):s[key]))}));
+    if(preview){const detail=node('details');detail.append(node('summary','查看保存曲线的数值预览'),sourceTable(preview),node('p',`${preview.total_rows} 行完整曲线；${preview.sampled?'每个模型与网格最多预览 128 行，保留端点':'展示全部曲线值'}。完整曲线见 CSV 下载。`,'plot-caption'));box.append(detail);}
+  }
+  box.append(siteDownloads(result,taskId,analysisId));
+  const detail=node('details',undefined,'result-source');detail.append(node('summary','查看统计假设、来源与完整范围'),node('p',`原始数组：${result.file}；SHA-256：${result.source.sha256}`,'source-hash'),node('p',`状态 ${p.states.first}–${p.states.last}，步距 ${p.states.stride}；位点 ${p.sites.first}–${p.sites.last}，步距 ${p.sites.stride}；β 网格 ${p.beta_grid.first}–${p.beta_grid.last}，${p.beta_grid.count} 点。`));
+  for(const note of result.limitations)detail.append(node('p',note,'form-note'));box.append(detail);return box;
+}
+function siteCurvePlot(result,preview){
+  if(!preview)return node('p','保存曲线未通过来源核验，未展示图表。','form-note');
+  const box=node('article',undefined,'result-widget'),names=preview.columns.map(c=>c.name),label=node('label','选择热力学量'),select=node('select');select.setAttribute('aria-label','选择逐位点热力学量');
+  for(const c of preview.columns)if(Object.hasOwn(siteQuantityLabels,c.name))select.append(new Option(`${siteQuantityLabels[c.name]} (${c.unit})`,c.name));
+  select.value='vacancy_fraction';label.append(select);box.append(label);
+  const gridLabel=node('label','选择保存网格'),grid=node('select');grid.setAttribute('aria-label','选择保存热力学网格');grid.append(new Option('完整 β 网格预览','beta'),new Option('指定温度','temperature'));grid.value='beta';gridLabel.append(grid);box.append(gridLabel);
+  const area=node('div',undefined,'chart-area');box.append(area);
+  const draw=()=>{area.replaceChildren();const y=select.value,x=grid.value==='beta'?'beta':'temperature',xi=names.indexOf(x),yi=names.indexOf(y);
+    for(const model of result.parameters.models){const rows=preview.rows.filter(r=>r[0]===grid.value&&r[2]===model).map(r=>[r[xi],r[yi]]).sort((a,b)=>a[0]-b[0]);
+      if(!rows.length)continue;const table={columns:[{name:x,unit:preview.columns[xi].unit},{name:y,unit:preview.columns[yi].unit}],rows};
+      area.append(node('h5',siteModelLabels[model]||model),numericalPlot(table,{method:'saved_curve',x,y,window:[rows[0][0],rows.at(-1)[0]],values:{}}));}
+    area.append(node('p',`曲线来自已保存的完整 CSV；${preview.sampled?'图中是每个模型/网格最多 128 点的预览':'展示该网格全部保存点'}。连线帮助阅读，不代表新增计算；完整 ${preview.total_rows} 行可下载。`,'plot-caption'));};select.onchange=draw;grid.onchange=draw;draw();return box;
+}
 function renderOrdinaryResults(box){
   const valid=[];
   for(const group of normalResult.evaluations)for(const request of group.requests)for(const report of request.reports)if(report.status==='analyzed')valid.push({request,report});
@@ -87,7 +119,7 @@ function renderOrdinaryResults(box){
   if(!valid.length){box.append(emptyState('尚无可核验的数值结果','计算、回收与分析状态分别保存；请查看历史记录与右侧原始下载。'));return;}
   for(const {request,report} of valid){
     box.append(node('h3',`${equationText(report.quantity)} · 作业 ${request.job_id}`),node('p','数值处理完成 · 科学结论尚待核验','badge pending'));
-    if(resultTab==='report'){box.append(resultReport(report,current.id));if(!(report.structural_results||[]).length)continue;}
+    if(resultTab==='report'){box.append(resultReport(report,current.id));if(!(report.structural_results||[]).length&&!(report.site_thermodynamic_results||[]).length)continue;}
     const area=node('div',undefined,'numeric-result-area');box.append(area);
     const key=current.id+':'+report.id+':'+workspaceState.updated;
     let cached=sourceTableCache.get(key);
@@ -96,14 +128,16 @@ function renderOrdinaryResults(box){
     if(cached.state!=='ready'){area.append(node('p',cached.state==='error'?'数据来源核验未通过，未展示图表；可查看报告与历史。':'正在核对原始数据…','form-note'));continue;}
     const tables=cached.value.tables;
     const structures=cached.value.structural_results||[];
-    if(resultTab==='report'){for(const result of structures)area.append(structuralDetails(result,{plot:true,data:true}));continue;}
+    const sites=cached.value.site_thermodynamic_results||[],sitePreviews=cached.value.site_previews||[];
+    if(resultTab==='report'){for(const result of structures)area.append(structuralDetails(result,{plot:true,data:true}));for(const result of sites)area.append(siteCurvePlot(result,sitePreviews.find(p=>p.id===result.id)?.curves));continue;}
     if(resultTab==='data'||resultTab==='overview')for(const table of tables){area.append(node('h4',`原始数值 · ${table.file}`),sourceTable(table),node('p',`${table.total_rows} 行；${table.sampled?'等间隔预览 128 行，包含首尾；完整数据在右侧下载':'展示全部数据'}。单位来自冻结分析计划。`,'plot-caption'));}
     if(resultTab==='data'||resultTab==='overview')for(const result of structures)area.append(structuralDetails(result,{data:true}));
+    if(resultTab==='data'||resultTab==='overview')for(const result of sites)area.append(siteDetails(result,current.id,report.id,{data:true,preview:sitePreviews.find(p=>p.id===result.id)?.curves}));
     if(resultTab==='plots'||resultTab==='overview'){
-      const options=[...report.results.map((op,i)=>({value:`numeric:${i}`,label:`${op.y} 对 ${op.x} · ${analysisMethods[op.method]||op.method}`,op})),...structures.map((result,i)=>({value:`structural:${i}`,label:`短程有序 · ${result.id}`,result}))];
+      const options=[...report.results.map((op,i)=>({value:`numeric:${i}`,label:`${op.y} 对 ${op.x} · ${analysisMethods[op.method]||op.method}`,op})),...structures.map((result,i)=>({value:`structural:${i}`,label:`短程有序 · ${result.id}`,result})),...sites.map((site,i)=>({value:`site:${i}`,label:`逐位点统计热力学 · ${site.id}`,site}))];
       if(!options.length){area.append(node('p','当前报告没有可核验的图表。'));continue;}
       const label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择计算结果图表');options.forEach(option=>select.append(new Option(option.label,option.value)));label.append(select);area.append(label);const chart=node('article',undefined,'result-widget');area.append(chart);
-      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};select.onchange=draw;draw();
+      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.site){chart.append(siteCurvePlot(selected.site,sitePreviews.find(p=>p.id===selected.site.id)?.curves),siteDownloads(selected.site,current.id,report.id));return;}if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};select.onchange=draw;draw();
     }
   }
 }

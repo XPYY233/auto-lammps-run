@@ -187,16 +187,12 @@ class ModelConnections:
             raise TaskError('请先在模型设置中连接 API。')
         if not MODEL_ID.fullmatch(value['model']):
             raise TaskError('密钥已保存，请先读取模型目录并选定模型 ID。')
-        context_hash = sha256(canonical(context))
         with self.tasks.transaction() as db:
             prior = db.execute('SELECT * FROM result_questions WHERE id=?', (request_id,)).fetchone()
             if prior:
                 if prior['task_id'] != identifier or prior['question'] != question or prior['provider'] != provider:
                     raise TaskError('请求标识已用于其他内容。')
                 # Never resend after a crash, timeout, or changed connection.
-            else:
-                db.execute('INSERT INTO result_questions VALUES (?,?,?,?,?,?,?)',
-                    (request_id, identifier, provider, value['model'], question, context_hash, datetime.now(timezone.utc).isoformat()))
         if prior:
             return next(item for item in self.history(identifier) if item['id'] == request_id)
         system = ('You are the researcher-facing result assistant, NOT the evaluation generator. '
@@ -212,12 +208,33 @@ class ModelConnections:
         previous = [{'role': role, 'content': text} for item in self.history(identifier)[-9:]
                     if item['id'] != request_id and item['state'] == 'completed'
                     for role, text in [('user', item['question']), ('assistant', item['answer'])]]
-        messages = previous + [{'role': 'user', 'content': canonical({'question': question, 'verified_results': context}).decode()}]
+        messages = [{'role': 'system', 'content': system}] + previous + [
+            {'role': 'user', 'content': canonical({'question': question, 'verified_results': context}).decode()}]
+        from .scientific_adapters import ScientificAdapterError, prepare_stage_messages
+        try:
+            messages, adapter_proof = prepare_stage_messages('result_discussion', messages,
+                {'task_id': identifier, 'question': question, 'verified_results': context,
+                 'conversation': previous})
+        except ScientificAdapterError as error:
+            raise TaskError(str(error)) from None
+        context_hash = sha256(canonical({'verified_results': context, 'scientific_adapter': adapter_proof}))
+        with self.tasks.transaction() as db:
+            # A concurrent request may have reserved this identity while the
+            # adapter was assembled. It is still never sent twice.
+            concurrent = db.execute('SELECT * FROM result_questions WHERE id=?', (request_id,)).fetchone()
+            if concurrent:
+                if (concurrent['task_id'] != identifier or concurrent['question'] != question
+                        or concurrent['provider'] != provider):
+                    raise TaskError('请求标识已用于其他内容。')
+            else:
+                db.execute('INSERT INTO result_questions VALUES (?,?,?,?,?,?,?)',
+                    (request_id, identifier, provider, value['model'], question, context_hash, datetime.now(timezone.utc).isoformat()))
+        if concurrent:
+            return next(item for item in self.history(identifier) if item['id'] == request_id)
         payload = dict(model=value['model'], messages=messages, stream=False)
         if provider == 'anthropic':
-            payload.update(system=system, max_tokens=4096)
+            payload.update(system=messages[0]['content'], messages=messages[1:], max_tokens=4096)
         else:
-            payload['messages'] = [{'role': 'system', 'content': system}] + messages
             payload['max_completion_tokens' if provider == 'openai' else 'max_tokens'] = 4096
             if provider in {'deepseek-official', 'glm'}: payload['thinking'] = {'type': 'disabled'}
         reserved=False;sent=False
@@ -240,7 +257,8 @@ class ModelConnections:
             state, answer, usage = ('failed_or_unknown' if sent else 'not_sent'), ('请求未完成，未自动重试。请核对模型连接与账户记录。' if sent else '请求未发送；请核对已批准的模型调用额度及请求记录。'), {}
         if reserved:
             self.calls.record(request_id,dict(provider=provider,requested_model=value['model'],state=state,
-                request_sha256=sha256(canonical(payload)),usage=usage,purpose='result_discussion',transport_attempts=1))
+                request_sha256=sha256(canonical(payload)),usage=usage,purpose='result_discussion',transport_attempts=1,
+                scientific_adapter={**adapter_proof,'output_check':'text_shape_only_prose_claims_not_verified'}))
         with self.tasks.transaction() as db:
             db.execute('INSERT INTO result_answers VALUES (?,?,?,?)', (request_id, state, answer, json.dumps(usage)))
         return next(item for item in self.history(identifier) if item['id'] == request_id)
