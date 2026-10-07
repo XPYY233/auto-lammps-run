@@ -69,3 +69,77 @@ test('switching to a new draft never promises a free recovery from another task'
  c.activityData={task_id:'new',steps:[]};c.renderCurrentActivity();
  assert.equal(elements.get('#generate-conditions').textContent,'根据需求整理条件');
 });
+
+function conditionEntry(api){
+ const c=vm.createContext({current:{id:'task',revision:1},$:()=>({}),notice(){},api,
+  afterChange:async()=>{},refreshModelStatus:async()=>{},render(){},refreshActivity:async()=>{}});
+ vm.runInContext(source.slice(source.indexOf('async function generateConditions()'),
+  source.indexOf("$('#generate-conditions').onclick=")),c);
+ return c;
+}
+
+test('an explicit condition retry names the latest failed request after a read-only reconciliation',async()=>{
+ const requests=[],failed='a'.repeat(32);
+ const c=conditionEntry(async(path,payload)=>{
+  requests.push({path,payload});
+  if(path.endsWith('/ai-activity'))return {task_id:'task',condition_preparation:{state:'failed',request_id:failed}};
+  return {id:'task',revision:2};
+ });
+ await c.generateConditions();
+ assert.equal(requests.length,2);
+ assert.equal(requests[0].path,'/api/tasks/task/ai-activity');
+ assert.equal(requests[0].payload,undefined);
+ assert.equal(requests[1].path,'/api/tasks/task/generate-conditions');
+ assert.deepEqual(JSON.parse(JSON.stringify(requests[1].payload)),{revision:1,retry_of:failed});
+ assert.equal(c.current.revision,2);
+});
+
+test('active or completed-receipt condition requests use recovery without selecting a retry',async()=>{
+ for(const state of ['generating','awaiting_import']){
+  let payload;
+  const c=conditionEntry(async(path,data)=>{
+   if(path.endsWith('/ai-activity'))return {task_id:'task',condition_preparation:{state,request_id:'b'.repeat(32)}};
+   payload=data;return {id:'task',revision:2};
+  });
+  await c.generateConditions();
+  assert.deepEqual(JSON.parse(JSON.stringify(payload)),{revision:1});
+ }
+});
+
+test('an interrupted condition POST is not automatically resent with a fresh identity',async()=>{
+ let posts=0;
+ const c=conditionEntry(async(path)=>{
+  if(path.endsWith('/ai-activity'))return {task_id:'task',condition_preparation:{state:'failed',request_id:'a'.repeat(32)}};
+  posts++;throw Error('synthetic network disconnect');
+ });
+ await assert.rejects(c.generateConditions(),/synthetic network disconnect/);
+ assert.equal(posts,1);assert.equal(c.current.revision,1);
+});
+
+test('unavailable or mismatched condition progress cannot dispatch a model request',async()=>{
+ for(const progress of [null,{task_id:'other'},
+  {task_id:'task',condition_preparation:{state:'failed'}}]){
+  let posts=0;
+  const c=conditionEntry(async(path)=>{
+   if(path.endsWith('/ai-activity')){
+    if(progress===null)throw Error('synthetic progress unavailable');
+    return progress;
+   }
+   posts++;return {};
+  });
+  await assert.rejects(c.generateConditions());
+  assert.equal(posts,0);
+ }
+});
+
+test('switching tasks while reconciling condition history cannot submit the old task',async()=>{
+ let release,posts=0;
+ const c=conditionEntry(async(path)=>{
+  if(path.endsWith('/ai-activity'))return new Promise(resolve=>{release=resolve});
+  posts++;return {};
+ });
+ const pending=c.generateConditions();c.current={id:'new',revision:1};
+ release({task_id:'task',condition_preparation:{state:'failed',request_id:'a'.repeat(32)}});
+ await pending;
+ assert.equal(posts,0);assert.equal(c.current.id,'new');
+});

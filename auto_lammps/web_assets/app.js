@@ -481,7 +481,20 @@ async function generateConditions() {
   $('#generate-conditions').disabled=true;
   notice('正在整理需求中的条件，尚未提交计算。');
   try {
-    current=await api(`/api/tasks/${id}/generate-conditions`,{revision});
+    // Reconcile the saved request before selecting an explicit retry token.
+    // An interrupted POST resumes the active identity on the server.
+    const activity=await api(`/api/tasks/${id}/ai-activity`);
+    if(current?.id!==id)return;
+    if(activity.task_id!==id)throw Error('条件整理记录不属于当前任务，请重新核对。');
+    const condition=activity.condition_preparation;
+    const payload={revision};
+    if(condition?.state==='failed'){
+      if(!/^[a-f0-9]{32}$/.test(condition.request_id))throw Error('失败请求身份缺失，请先核对已有记录。');
+      payload.retry_of=condition.request_id;
+    }
+    const updated=await api(`/api/tasks/${id}/generate-conditions`,payload);
+    if(current?.id!==id)return;
+    current=updated;
     await afterChange('条件草稿已整理。请核对摘要中的条件与待明确事项。');
   } finally {
     await refreshModelStatus();

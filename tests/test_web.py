@@ -171,6 +171,38 @@ class WebTests(unittest.TestCase):
             self.assertEqual(client.post(url,json={'revision':2},headers=HEADERS).status_code,422)
             self.assertEqual(transport.call_count,1)
 
+    def test_condition_retry_route_keeps_failed_identity_and_uses_explicit_predecessor(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+        from auto_lammps.condition_generation import condition_messages
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = 'fabricated-source-fragment'
+        calls = ModelCalls(Path(self.tmp.name)/'retry-models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=3)
+        transport = Mock(return_value=(200, response(bad)))
+        model = DeepSeekClient(calls, transport=transport, key_reader=lambda:'synthetic-key')
+        doc = self.store.create('普通入口失败后恢复', SOURCES[0]['text'], 'research')
+        url = f"/api/tasks/{doc['id']}/generate-conditions"
+        with TestClient(create_app(self.store, model_client=model), base_url=ORIGIN) as client:
+            self.assertEqual(client.post(url, json={'revision':1}, headers=HEADERS).status_code, 422)
+            failed = self.store.condition_requests(doc['id'])[0]
+            saved_calls = calls.history()
+            messages = condition_messages(SOURCES)
+            messages[0]['content'] += ' synthetic installed adapter version change'
+            transport.return_value = (200, response(OUTPUT))
+            with patch('auto_lammps.condition_generation.condition_messages', return_value=messages):
+                invalid = client.post(url, json={'revision':1, 'retry_of':'bad'}, headers=HEADERS)
+                self.assertEqual(invalid.status_code, 422)
+                reply = client.post(url, json={'revision':1, 'retry_of':failed['request_id']}, headers=HEADERS)
+            self.assertEqual(reply.status_code, 200, reply.text)
+            rows = self.store.condition_requests(doc['id'])
+            self.assertEqual(rows[0], failed)
+            self.assertEqual(rows[1]['state'], 'imported')
+            self.assertNotEqual(rows[1]['request_id'], failed['request_id'])
+            self.assertEqual(calls.history()[:2], saved_calls)
+            self.assertEqual(transport.call_count, 3)
+            self.assertEqual(client.post(url, json={'revision':1, 'retry_of':failed['request_id']}, headers=HEADERS).status_code, 422)
+            self.assertEqual(transport.call_count, 3)
+
 class ActivityFeedTests(unittest.TestCase):
     """AI 活动必须是"给用户看的进度播报"，不能是内部事件名。"""
 

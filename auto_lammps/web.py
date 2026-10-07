@@ -159,6 +159,7 @@ class TargetSelection(Revision):
 class ConditionInput(Revision):
     refine: bool = False
     attempt: int = Field(default=0, ge=0, le=20)
+    retry_of: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
 class ApprovalInput(Revision):
@@ -1191,7 +1192,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         sources = [dict(id='user-request', origin='user', locator='用户原始任务描述', text=doc['prompt'])]
         request_id = sha256(canonical(dict(task_id=identifier, revision=data.revision, sources=sources,
                                            operation='generate-conditions-v2')))[:32]
-        return generate_condition_draft(model_client, store, identifier, data.revision, sources, request_id)
+        return generate_condition_draft(model_client, store, identifier, data.revision, sources, request_id,
+                                        retry_of=data.retry_of)
 
     @app.get('/api/tasks/{identifier}/export')
     def export(identifier: str):

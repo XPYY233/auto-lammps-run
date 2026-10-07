@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 import json
 import sqlite3
 
 from auto_lammps.condition_generation import (condition_evidence_context, condition_evidence_spans,
-    condition_messages, generate_condition_draft, legacy_condition_request_status,
+    condition_messages, condition_request_identity, generate_condition_draft, legacy_condition_request_status,
     recover_condition_request, validate_conditions)
 from auto_lammps.deepseek import DeepSeekClient, DeepSeekConfig, ModelCalls, ModelError, request_body
 from auto_lammps.manifest import canonical, sha256
@@ -218,6 +219,257 @@ class GenerationTests(unittest.TestCase):
             self.generate()
         self.assertEqual(self.transport.call_count, 2)
         self.assertEqual(len(self.calls.history()), 2)
+
+    def completed_failure(self, request_id='a'*32):
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], request_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'call_started', call_id=request_id)
+        completion = self.client.complete_json(request_id, messages)
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'model_completed',
+                                                 call_id=request_id, receipt=completion['receipt'])
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'failed',
+                                                 call_id=request_id, error_code='import_rejected',
+                                                 receipt=completion['receipt'])
+        return request_id
+
+    def test_explicit_retry_after_adapter_change_preserves_failure_and_accounting(self):
+        old_id = self.completed_failure()
+        old_requests = self.store.condition_requests(self.doc['id'])
+        old_calls = self.calls.history()
+        old_history = self.store.history(self.doc['id'])
+        changed_messages = condition_messages(SOURCES)
+        changed_messages[0]['content'] += ' synthetic adapter contract change'
+        with patch('auto_lammps.condition_generation.condition_messages', return_value=changed_messages):
+            result = generate_condition_draft(self.client, TaskStore(self.store.path), self.doc['id'],
+                self.doc['revision'], SOURCES, old_id, retry_of=old_id)
+            selected = condition_request_identity(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                                  SOURCES, old_id, retry_of=old_id)
+        requests = self.store.condition_requests(self.doc['id'])
+        self.assertEqual(requests[0], old_requests[0])
+        self.assertEqual(requests[1]['request_id'], selected)
+        self.assertNotEqual(selected, old_id)
+        self.assertEqual(requests[1]['messages_sha256'], sha256(canonical(changed_messages)))
+        self.assertEqual(requests[1]['revision'], self.doc['revision'])
+        self.assertEqual(requests[1]['state'], 'imported')
+        self.assertEqual(self.calls.history()[:1], old_calls)
+        self.assertEqual(self.store.history(self.doc['id'])[:1], old_history)
+        self.assertEqual(len(self.calls.history()), 2)
+        self.assertEqual(result['revision'], self.doc['revision'] + 1)
+
+    def test_explicit_retry_with_same_adapter_and_duplicate_token_never_resends(self):
+        old_id = self.completed_failure()
+        self.transport.side_effect = RuntimeError('synthetic interrupted model call')
+        with self.assertRaises(ModelError):
+            generate_condition_draft(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                     SOURCES, old_id, retry_of=old_id)
+        before = self.store.condition_requests(self.doc['id'])
+        for changed in (False, True):
+            messages = condition_messages(SOURCES)
+            if changed:
+                messages[0]['content'] += ' another synthetic contract version'
+            with self.subTest(changed=changed), patch('auto_lammps.condition_generation.condition_messages',
+                                                    return_value=messages), self.assertRaises(TaskError):
+                generate_condition_draft(self.client, TaskStore(self.store.path), self.doc['id'],
+                    self.doc['revision'], SOURCES, old_id, retry_of=old_id)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), before)
+        self.assertEqual(len(self.calls.history()), 2)
+        self.assertEqual(self.transport.call_count, 2)
+
+    def test_completed_failed_retry_requires_its_own_token_for_another_explicit_attempt(self):
+        parent = 'a'*32
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], parent,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], parent, 'failed', error_code='import_rejected')
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = 'synthetic quote absent from source'
+        self.transport.return_value = (200, response(bad))
+        with self.assertRaises(TaskError):
+            generate_condition_draft(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                     SOURCES, parent, retry_of=parent)
+        saved = self.store.condition_requests(self.doc['id'])
+        child = saved[-1]['request_id']
+        self.assertEqual(saved[-1]['state'], 'failed')
+        self.assertEqual([call['state'] for call in saved[-1]['calls']], ['completed', 'completed'])
+        with self.assertRaisesRegex(TaskError, '原调用'):
+            generate_condition_draft(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                     SOURCES, parent, retry_of=parent)
+        next_id = condition_request_identity(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                             SOURCES, parent, retry_of=child)
+        self.assertNotIn(next_id, {parent, child})
+        self.assertEqual(self.store.condition_requests(self.doc['id']), saved)
+        self.assertEqual(self.transport.call_count, 2)
+        self.assertEqual(len(self.calls.history()), 2)
+
+    def test_uncertain_failed_call_blocks_retry_and_new_identity(self):
+        self.transport.side_effect = RuntimeError('synthetic network disconnect')
+        with self.assertRaises(ModelError):
+            self.generate()
+        before = self.store.condition_requests(self.doc['id'])
+        for request_id, retry_of in [('a'*32, 'a'*32), ('b'*32, None)]:
+            with self.subTest(retry_of=retry_of), self.assertRaisesRegex(TaskError, '状态未知'):
+                generate_condition_draft(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                         SOURCES, request_id, retry_of=retry_of)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), before)
+        self.assertEqual(len(self.calls.history()), 1)
+        self.assertEqual(self.transport.call_count, 1)
+
+    def test_uncertain_ledger_without_call_event_cannot_enable_retry(self):
+        request_id = 'a'*32
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], request_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.calls.reserve(request_id, request_body(self.calls.config, messages))
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'failed', error_code='import_rejected')
+        before = self.store.condition_requests(self.doc['id'])
+        with self.assertRaisesRegex(TaskError, '状态未知'):
+            generate_condition_draft(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                     SOURCES, request_id, retry_of=request_id)
+        self.assertEqual(self.store.condition_requests(self.doc['id']), before)
+        self.assertEqual(len(self.calls.history()), 1)
+        self.transport.assert_not_called()
+
+    def test_retry_receipt_after_process_restart_is_recovered_from_same_identity(self):
+        old_id = self.completed_failure()
+        retry_id = condition_request_identity(self.client, self.store, self.doc['id'], self.doc['revision'],
+                                              SOURCES, old_id, retry_of=old_id)
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], retry_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], retry_id, 'call_started', call_id=retry_id)
+        self.client.complete_json(retry_id, messages)
+        result = generate_condition_draft(self.client, TaskStore(self.store.path), self.doc['id'],
+            self.doc['revision'], SOURCES, old_id)
+        self.assertEqual(self.store.condition_requests(self.doc['id'])[-1]['request_id'], retry_id)
+        self.assertEqual(self.store.condition_requests(self.doc['id'])[-1]['state'], 'imported')
+        self.assertEqual(result['fields']['temperature']['candidates'][0]['value'], '300')
+        self.assertEqual(len(self.calls.history()), 2)
+        self.assertEqual(self.transport.call_count, 2)
+
+    def test_concurrent_same_retry_token_uses_one_reserved_model_call(self):
+        old_id = self.completed_failure()
+        started, release = Event(), Event()
+        def transport(*args):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError('synthetic test synchronization timeout')
+            return 200, response(OUTPUT)
+        self.client.transport = transport
+        def retry():
+            return generate_condition_draft(self.client, TaskStore(self.store.path), self.doc['id'],
+                self.doc['revision'], SOURCES, old_id, retry_of=old_id)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(retry)
+            try:
+                self.assertTrue(started.wait(5))
+                second = pool.submit(retry)
+                with self.assertRaisesRegex(TaskError, '尚无完整回执'):
+                    second.result(timeout=5)
+            finally:
+                release.set()
+            result = first.result(timeout=5)
+        self.assertEqual(len(self.store.condition_requests(self.doc['id'])), 2)
+        self.assertEqual(len(self.calls.history()), 2)
+        self.assertEqual(len(result['generated_batches']), 1)
+
+    def test_recovery_before_repair_reservation_cannot_fail_or_start_another_request(self):
+        for paused_event in ('validation_failed', 'repair_started'):
+            with self.subTest(paused_event=paused_event), tempfile.TemporaryDirectory() as folder:
+                store = TaskStore(Path(folder)/'tasks.sqlite')
+                document = store.create('合成修复并发', SOURCES[0]['text'], 'research')
+                calls = ModelCalls(Path(folder)/'models.sqlite', DeepSeekConfig('synthetic-model'), max_requests=4)
+                bad = deepcopy(OUTPUT)
+                bad['conditions'][0]['quote'] = 'synthetic absent quote'
+                transport = Mock(side_effect=[(200, response(bad)), (200, response(OUTPUT))])
+                client = DeepSeekClient(calls, transport=transport, key_reader=lambda: 'synthetic-key')
+                reached, release = Event(), Event()
+                record = store.record_condition_request_event
+                def paused_record(identifier, request_id, kind, **data):
+                    record(identifier, request_id, kind, **data)
+                    if kind == paused_event:
+                        reached.set()
+                        if not release.wait(5):
+                            raise RuntimeError('synthetic test synchronization timeout')
+                store.record_condition_request_event = paused_record
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    worker = pool.submit(generate_condition_draft, client, store, document['id'],
+                                         document['revision'], SOURCES, 'a'*32)
+                    try:
+                        self.assertTrue(reached.wait(5))
+                        before = store.condition_requests(document['id'])
+                        with self.assertRaisesRegex(TaskError, '尚无完整回执|修复进度'):
+                            recover_condition_request(client, TaskStore(store.path), document['id'], 'a'*32, SOURCES)
+                        self.assertEqual(store.condition_requests(document['id']), before)
+                        with self.assertRaisesRegex(TaskError, '已有的失败请求'):
+                            generate_condition_draft(client, store, document['id'], document['revision'],
+                                                     SOURCES, 'a'*32, retry_of='a'*32)
+                        self.assertEqual(len(calls.history()), 1)
+                        self.assertEqual(transport.call_count, 1)
+                    finally:
+                        release.set()
+                    result = worker.result(timeout=5)
+                self.assertEqual(store.condition_requests(document['id'])[-1]['state'], 'imported')
+                self.assertEqual(len(store.condition_requests(document['id'])), 1)
+                self.assertEqual(len(calls.history()), 2)
+                self.assertEqual(transport.call_count, 2)
+                self.assertEqual(len(result['generated_batches']), 1)
+
+    def test_recovery_with_stale_first_snapshot_cannot_terminate_declared_repair(self):
+        request_id = 'a'*32
+        repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+        messages = condition_messages(SOURCES)
+        self.store.begin_condition_request(self.doc['id'], self.doc['revision'], request_id,
+                                          sha256(canonical(SOURCES)), sha256(canonical(messages)))
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'call_started', call_id=request_id)
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = 'synthetic absent quote'
+        self.transport.return_value = (200, response(bad))
+        completion = self.client.complete_json(request_id, messages)
+        self.store.record_condition_request_event(self.doc['id'], request_id, 'model_completed',
+                                                 call_id=request_id, receipt=completion['receipt'])
+        lookup = self.calls.lookup
+        def declare_repair_during_lookup(call_id):
+            found = lookup(call_id)
+            if call_id == request_id:
+                self.store.record_condition_request_event(self.doc['id'], request_id, 'validation_failed',
+                                                         call_id=request_id, error_code='source_quote_mismatch')
+                self.store.record_condition_request_event(self.doc['id'], request_id, 'repair_started', call_id=repair_id)
+            return found
+        self.calls.lookup = declare_repair_during_lookup
+        with self.assertRaisesRegex(TaskError, '修复进度'):
+            recover_condition_request(self.client, self.store, self.doc['id'], request_id, SOURCES)
+        self.assertEqual(self.store.condition_requests(self.doc['id'])[0]['state'], 'repairing')
+        self.assertFalse(any(event['kind'] == 'failed' for event in self.store.condition_requests(self.doc['id'])[0]['events']))
+        self.assertEqual(len(self.calls.history()), 1)
+
+    def test_terminal_request_is_checked_before_sending_a_declared_repair(self):
+        bad = deepcopy(OUTPUT)
+        bad['conditions'][0]['quote'] = 'synthetic absent quote'
+        self.transport.return_value = (200, response(bad))
+        record = self.store.record_condition_request_event
+        def terminate_after_declaration(identifier, request_id, kind, **data):
+            record(identifier, request_id, kind, **data)
+            if kind == 'repair_started':
+                record(identifier, request_id, 'failed', call_id=data['call_id'],
+                       error_code='import_rejected', reserved=False)
+        self.store.record_condition_request_event = terminate_after_declaration
+        with self.assertRaisesRegex(TaskError, '请求已结束'):
+            self.generate()
+        latest = self.store.condition_requests(self.doc['id'])[0]
+        self.assertEqual(latest['state'], 'failed')
+        self.assertEqual(len(self.calls.history()), 1)
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertFalse(latest['calls'][-1]['reserved'])
+
+    def test_retry_token_must_name_this_tasks_failed_request(self):
+        other = self.store.create('另一个合成任务', SOURCES[0]['text'], 'research')
+        old_id = self.completed_failure()
+        for identifier, retry_of in [(self.doc['id'], 'b'*32), (other['id'], old_id)]:
+            with self.subTest(identifier=identifier), self.assertRaisesRegex(TaskError, '此任务已有的失败请求'):
+                generate_condition_draft(self.client, self.store, identifier, 1, SOURCES, 'c'*32,
+                                         retry_of=retry_of)
+        self.assertEqual(len(self.calls.history()), 1)
 
     def test_preparation_blocks_concurrent_request_before_spending_and_is_immutable(self):
         def begin(identifier):

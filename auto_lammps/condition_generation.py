@@ -8,7 +8,7 @@ import re
 
 from .deepseek import ModelError
 from .manifest import canonical, sha256
-from .tasks import ESSENTIAL, FIELDS, TaskError, StaleTask, FrozenTask, candidate, text
+from .tasks import ESSENTIAL, FIELDS, TaskError, StaleTask, FrozenTask, candidate, task_id, text
 from .resource_limits import description as resource_policy_description
 
 
@@ -265,7 +265,61 @@ def _imported_condition_document(store, identifier, request_id):
     return store.get(identifier) if request and request['state'] == 'imported' else None
 
 
-def generate_condition_draft(client, store, identifier, revision, sources, request_id):
+def condition_request_identity(client, store, identifier, revision, sources, request_id, *, retry_of=None):
+    """Select a durable identity for an explicit request, without model I/O.
+
+    A retry names its failed predecessor. Replaying that same token always
+    selects the same successor, including after restart or a changed adapter.
+    The store binds the successor's source/messages at reservation time. No
+    terminal record is rewritten and an uncertain call never enables a retry.
+    """
+    task_id(request_id)
+    if retry_of is not None:
+        task_id(retry_of)
+    records = legacy_condition_request_status(client, store, identifier, sources)
+    by_id = {item['request_id']: item for item in records}
+    if retry_of is not None:
+        predecessor = by_id.get(retry_of)
+        if predecessor is None or predecessor['state'] != 'failed':
+            raise TaskError('重新整理必须关联此任务已有的失败请求；未发送新调用')
+        selected = sha256(canonical(dict(operation='generate-condition-retry-v1', task_id=identifier,
+                                         revision=revision, retry_of=retry_of)))[:32]
+        # Concurrent/replayed POSTs retain the exact same successor, even if
+        # that successor has since failed. A further retry must name it.
+        if selected in by_id:
+            return selected
+        if records[-1]['request_id'] != retry_of:
+            raise TaskError('条件整理记录已更新，请先核对最新请求；未发送新调用')
+    else:
+        active = [item for item in records if item['state'] not in {'failed', 'imported'}]
+        if len(active) == 1 and not active[0]['reconstructed']:
+            return active[0]['request_id']
+        if request_id in by_id and not by_id[request_id]['reconstructed']:
+            return request_id
+        selected = request_id
+
+    for record in records:
+        if record['state'] not in {'failed', 'imported'}:
+            raise TaskError('已有条件整理请求尚未核对，未发送新的模型调用')
+        # Read both possible ledger identities even when the task event was
+        # interrupted before recording call_started or a receipt.
+        for call_id in (record['request_id'], sha256(canonical({'base': record['request_id'], 'repair': 1}))[:32]):
+            found = client.calls.lookup(call_id)
+            if found is not None and _public_model_state(found.get('receipt')) == 'unknown':
+                raise TaskError('已有模型请求尚未完成或状态未知，不能重发；请先核对原调用')
+    return selected
+
+
+def _check_condition_dispatch(store, identifier, request_id, call_id):
+    """Only the current declared call of a nonterminal request may send."""
+    request = next(item for item in store.condition_requests(identifier) if item['request_id'] == request_id)
+    declared = [event['call_id'] for event in request['events']
+                if event['kind'] in {'call_started', 'repair_started'}]
+    if request['state'] in {'failed', 'imported'} or not declared or declared[-1] != call_id:
+        raise TaskError('条件整理请求已结束或调用身份已更新，未发送后续调用')
+
+
+def generate_condition_draft(client, store, identifier, revision, sources, request_id, *, retry_of=None):
     """One accounted model call plus at most one repair call, then all-or-nothing import.
 
     The provenance rules are not relaxed: a quote must still be a contiguous piece of the
@@ -278,12 +332,15 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
         raise TaskError('任务已更新或冻结，请先核对当前版本')
     bundle = source_bundle(sources)
     messages = condition_messages(bundle, current['mode'])
+    request_id = condition_request_identity(client, store, identifier, revision, bundle, request_id,
+                                            retry_of=retry_of)
     if not store.begin_condition_request(identifier, revision, request_id, sha256(canonical(bundle)),
                                          sha256(canonical(messages))):
         return recover_condition_request(client, store, identifier, request_id, bundle)
     call_id = request_id
     try:
         store.record_condition_request_event(identifier, request_id, 'call_started', call_id=request_id)
+        _check_condition_dispatch(store, identifier, request_id, request_id)
         completion = client.complete_json(request_id, messages)
         store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=request_id,
                                              receipt=completion['receipt'])
@@ -305,6 +362,7 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
                     'failure': str(error)[:400]}).decode()}]
             store.record_condition_request_event(identifier, request_id, 'repair_started', call_id=repair_id)
             call_id = repair_id
+            _check_condition_dispatch(store, identifier, request_id, repair_id)
             repair = client.complete_json(repair_id, repair_messages)
             store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=repair_id,
                                                  receipt=repair['receipt'])
@@ -348,12 +406,15 @@ def recover_condition_request(client, store, identifier, request_id, sources):
     if (request['revision'] != current['revision'] or request['source_sha256'] != sha256(canonical(bundle))
             or request['messages_sha256'] != sha256(canonical(condition_messages(bundle, current['mode'])))):
         raise TaskError('任务或定位工具已改变，不能将旧结果导入新条件；未发送新调用')
-    ids = [request_id, sha256(canonical({'base': request_id, 'repair': 1}))[:32]]
-    found = [(call_id, client.calls.lookup(call_id)) for call_id in ids]
-    found = [(call_id, call) for call_id, call in found if call is not None]
-    if not found or not isinstance(found[-1][1].get('receipt'), dict):
+    repair_id = sha256(canonical({'base': request_id, 'repair': 1}))[:32]
+    repair_call = client.calls.lookup(repair_id)
+    # A declared repair is already in flight even before its model ledger
+    # reservation. Never fall back to an earlier, known-invalid first reply.
+    repair_declared = any(call['call_id'] == repair_id for call in request['calls'])
+    call_id = repair_id if repair_declared or repair_call is not None else request_id
+    call = repair_call if call_id == repair_id else client.calls.lookup(request_id)
+    if call is None or not isinstance(call.get('receipt'), dict):
         raise TaskError('已有模型请求尚无完整回执，请核对状态；未发送新调用')
-    call_id, call = found[-1]
     receipt = call['receipt']
     if receipt.get('state') != 'completed':
         raise TaskError('已有模型请求尚未完成或状态未知，不能导入或重发')
@@ -361,6 +422,14 @@ def recover_condition_request(client, store, identifier, request_id, sources):
     if receipt.get('output_sha256') != sha256(canonical(value)):
         raise TaskError('已有模型输出摘要不一致，不能恢复')
     clean_receipt = {key: val for key, val in receipt.items() if key != 'structured_output'}
+    if call_id == request_id:
+        try:
+            validate_conditions(bundle, value)
+        except ModelOutputError:
+            # The originating worker may still declare/reserve its one repair
+            # after this read. A recovery POST cannot terminate that worker's
+            # request merely because it observed the invalid first response.
+            raise TaskError('初版条件答复未通过校验，请核对原修复进度；未发送新调用') from None
     try:
         store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=call_id,
                                              receipt=clean_receipt)
