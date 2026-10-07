@@ -9,6 +9,7 @@ let paperFilter='all';
 let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
 let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:null};
 let referenceProgress=null;
+let initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryRead=0, initialGeometryLoading=false;
 let candidateState=null, candidateTask=null, candidatePolling=false;
 let candidateRecord=null, candidateAnswers=[], candidateOutcome='';
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
@@ -91,6 +92,7 @@ async function openTask(id) {
   const task = await api('/api/tasks/'+id);
   if(pendingRoute!==null)return;
   current=task;
+  initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
   $('#advanced-task').open=task.status!=='conditions_frozen';
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;
   $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
@@ -131,6 +133,79 @@ function conditionStatus(field) {
   if (!field.selected) return field.candidates.length > 1 ? 'conflict' : 'unselected';
   return field.confirmed ? 'confirmed' : 'pending';
 }
+function geometryLabel(entry) {
+  const summary=entry.summary;
+  return `${summary.type_elements.join('–')} · ${summary.atom_count} 原子 · ${summary.units} · ${entry.pin.slice(0,12)}`;
+}
+function geometryMetadata(entry, catalog) {
+  const box=node('div',undefined,'source-context'), summary=entry.summary;
+  box.append(node('p',`${summary.atom_count} 个原子 · ${summary.size} 字节 · ${summary.units} 单位制`));
+  box.append(node('p','原子类型顺序：'+summary.type_elements.map((element,index)=>`${index+1} → ${element}`).join('，')));
+  box.append(node('p','组成：'+Object.entries(summary.composition).map(([element,count])=>`${element} ${count}`).join('，')+' · 边界：'+summary.boundary.join(' ')));
+  const identity=node('details');identity.append(node('summary','查看固定结构身份'),
+    node('p','结构标识：'+entry.pin),node('p','文件摘要：'+entry.sha256),node('p','目录摘要：'+catalog));
+  box.append(identity);
+  return box;
+}
+async function readInitialGeometryCatalog() {
+  if(!current || current.status==='conditions_frozen')return;
+  const id=current.id, request=++initialGeometryRead;
+  initialGeometryLoading=true;renderInitialGeometry();
+  try {
+    const view=await api('/api/geometry-catalog');
+    if(current?.id!==id || request!==initialGeometryRead)return;
+    initialGeometryCatalog=view;initialGeometryCatalogTask=id;
+  } catch(error) {
+    if(current?.id!==id || request!==initialGeometryRead)return;
+    initialGeometryCatalog=null;initialGeometryCatalogTask=null;
+    notice(error.message,true);
+  } finally {
+    if(current?.id===id && request===initialGeometryRead){initialGeometryLoading=false;renderInitialGeometry();}
+  }
+}
+function renderInitialGeometry() {
+  const anchor=$('#execution-flow');
+  if(!anchor || !current)return;
+  let panel=document.getElementById('initial-geometry-panel');
+  if(!panel){panel=node('section',undefined,'panel');panel.id='initial-geometry-panel';panel.setAttribute('aria-label','选择固定初始结构');anchor.before(panel);}
+  const frozen=current.status==='conditions_frozen', selected=current.initial_geometry;
+  panel.replaceChildren(node('h2','初始结构文件（可选）'));
+  if(selected){panel.append(node('p',frozen?'已随研究条件冻结的结构':'已选择的固定结构'),geometryMetadata(selected.entry,selected.catalog_sha256));}
+  else panel.append(node('p',frozen?'此版本未选择固定结构文件。':'已有结构文件时，可从受信资源目录选择。也可按已确认条件由应用准备结构。','subtle'));
+  panel.append(node('p','此处仅核对文件格式、原子数量与固定身份；物理稳定性和科学适用性仍需核验。','form-note'));
+  if(frozen)return;
+  if(selected)panel.append(node('p','更改材料、结构、尺寸、边界、单位或初始化条件后，需要重新选择结构。','form-note'));
+  const actions=node('div',undefined,'actions'), read=node('button',initialGeometryLoading?'正在读取结构目录…':'读取可用结构','quiet');
+  read.type='button';read.disabled=initialGeometryLoading;read.onclick=()=>action(readInitialGeometryCatalog);actions.append(read);
+  if(selected){
+    const clear=node('button','清除文件选择','quiet');clear.type='button';
+    clear.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/initial-geometry/clear`,{revision:current.revision});await afterChange('结构选择已清除，旧版本仍保留。');});
+    actions.append(clear);
+  }
+  panel.append(actions);
+  if(initialGeometryLoading)panel.append(node('p','只读取已核对的结构摘要，不导入坐标或发起计算。','form-note'));
+  const catalog=initialGeometryCatalogTask===current.id?initialGeometryCatalog:null;
+  if(!catalog || initialGeometryLoading)return;
+  if(!catalog.configured || !catalog.entries.length){panel.append(node('p',catalog.reason,'subtle'));return;}
+  const form=node('form'), label=node('label','选择初始结构'), choices=node('select'), preview=node('div');
+  choices.id='initial-geometry-choice';label.setAttribute('for',choices.id);
+  const placeholder=node('option','请选择一份结构');placeholder.value='';choices.append(placeholder);
+  for(const entry of catalog.entries){const option=node('option',geometryLabel(entry));option.value=entry.pin;choices.append(option);}
+  choices.value=selected?.catalog_sha256===catalog.catalog_sha256 && catalog.entries.some(entry=>entry.pin===selected.entry.pin)?selected.entry.pin:'';
+  const save=node('button','采用所选结构','primary');save.type='submit';
+  const update=()=>{
+    const entry=catalog.entries.find(item=>item.pin===choices.value);
+    preview.replaceChildren();save.disabled=!entry;
+    if(entry)preview.append(geometryMetadata(entry,catalog.catalog_sha256));
+  };
+  choices.onchange=update;label.append(choices);form.append(label,preview,save);update();
+  form.onsubmit=event=>{event.preventDefault();action(async()=>{
+    if(!catalog.entries.some(entry=>entry.pin===choices.value))return;
+    current=await api(`/api/tasks/${current.id}/initial-geometry`,{revision:current.revision,catalog_sha256:catalog.catalog_sha256,pin:choices.value});
+    await afterChange('固定初始结构已保存；条件确认、方案审批与计算次数分别保留。');
+  });};
+  panel.append(form);
+}
 function render() {
   hideViews('task-view');
   selectNavigation('tasks');
@@ -143,6 +218,7 @@ function render() {
   const banner = $('#message');
   if (banner) { banner.hidden = true; banner.textContent = ''; banner.className = ''; }
   const frozen = current.status === 'conditions_frozen';
+  renderInitialGeometry();
   $('#candidate-panel').hidden = !frozen;
   $('#prepare-candidate').disabled = true;
   $('#candidate-stage').textContent='正在读取准备记录…';
@@ -262,12 +338,13 @@ async function renderHistory() {
   const id=current.id;
   const {events,preparation_events=[],lifecycle_events=[]} = await api(`/api/tasks/${id}/history`);
   if(current?.id!==id) return;
-  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'};
+  const labels = {created:'建立任务',candidate_added:'补充条件证据',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据',initial_geometry_selected:'选择固定初始结构',initial_geometry_cleared:'清除初始结构选择'};
   $('#history-list').replaceChildren();
   for(const event of lifecycle_events)$('#history-list').append(node('li',new Date(event.at).toLocaleString('zh-CN')+' · '+(event.action==='finish'?'用户确认任务结束':'用户删除列表记录')));
   for (const item of events) {
-    const [kind,fields] = item.event.split(':');
-    const details = fields ? ' · '+fields.split(',').map(key=>schema.fields[key]||key).join('、') : '';
+    const [kind,...parts] = item.event.split(':');
+    const fields=parts.filter(part=>part!=='initial_geometry_invalidated').join(',');
+    const details = (fields ? ' · '+fields.split(',').map(key=>schema.fields[key]||key).join('、') : '')+(item.event.includes(':initial_geometry_invalidated')?' · 原结构选择已撤销，需重新核对':'');
     $('#history-list').append(node('li',`版本 ${item.revision} · ${labels[kind] || kind}${details} · ${new Date(item.at).toLocaleString('zh-CN')}`));
   }
   for(const item of preparation_events) {
@@ -289,6 +366,7 @@ $('#create-form').onsubmit=(event)=>{
     if(supplements.length)data.prompt+='\n\n补充条件：\n'+supplements.join('\n');
     data.title=data.title.trim() || data.prompt.trim().slice(0,36);
     current=await api('/api/tasks',data);
+    initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
     normalResult=null;workspaceReport=null;resultTab='overview';
     recordRoute('#'+current.id);
     await afterChange('研究需求已保存。可在这里继续查看进度和结果。');
@@ -1221,9 +1299,10 @@ function paperCard(p,statuses,availableTasks) {
     const button=node('button','打开研究任务：'+task.title,'quiet'); button.onclick=()=>requestRoute('#'+task.id); details.append(button);
     const revisions=node('ol');
     for (const e of task.history) {
-      const [kind,field]=e.event.split(':');
-      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据'}[kind]||kind;
-      revisions.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · 条件版本 ${e.revision} · ${label}${field?' · '+field.split(',').map(k=>schema.fields[k]||k).join('、'):''}`));
+      const [kind,...parts]=e.event.split(':');
+      const field=parts.filter(part=>part!=='initial_geometry_invalidated').join(',');
+      const label={created:'建立任务',candidate_added:'补充条件',condition_selected:'选择条件',user_confirmed:'确认条件',targets_selected:'选择复现目标',target_inventory_assessed:'整理图表工况与资源',conditions_frozen:'冻结条件',literature_imported:'导入文献条件',conditions_generated:'模型整理条件',reference_evidence_generated:'整理文献证据',initial_geometry_selected:'选择固定初始结构',initial_geometry_cleared:'清除初始结构选择'}[kind]||kind;
+      revisions.append(node('li',`${new Date(e.at).toLocaleString('zh-CN')} · 条件版本 ${e.revision} · ${label}${field?' · '+field.split(',').map(k=>schema.fields[k]||k).join('、'):''}${e.event.includes(':initial_geometry_invalidated')?' · 原结构选择已撤销，需重新核对':''}`));
     }
     details.append(revisions);
   }

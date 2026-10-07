@@ -122,6 +122,11 @@ class ConfirmConditions(Revision):
     fields: list[str]
 
 
+class InitialGeometrySelection(Revision):
+    catalog_sha256: str = Field(pattern=r'^[a-f0-9]{64}$', min_length=64, max_length=64)
+    pin: str = Field(pattern=r'^[a-f0-9]{64}$', min_length=64, max_length=64)
+
+
 class LiteraturePreview(Input):
     csv_text: str
 
@@ -229,7 +234,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None):
+               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -264,6 +269,28 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
+    from .geometry_catalog import GeometryCatalogClient, validate_view
+    # TaskStore's fixed-geometry save/freeze protocol currently supports at most
+    # 100000 atoms. Larger generated-structure candidate limits do not extend it.
+    fixed_geometry_max_atoms = min(candidate_service.max_atoms if candidate_service is not None else 100000, 100000)
+    # Reuse the deployment's fixed helper, identity and audit trail. The browser
+    # cannot supply another endpoint, resource path or structure bytes.
+    if geometry_catalog_client is None and execution_jobs is not None:
+        geometry_catalog_client = GeometryCatalogClient(execution_jobs.controller.staging.client,
+            max_atoms=fixed_geometry_max_atoms)
+
+    def geometry_catalog_view():
+        if geometry_catalog_client is None:
+            return {'configured': False, 'entries': [], 'reason': '尚未配置固定初始结构目录。可继续保存研究需求；已有文件需先由资源服务核对。'}
+        try:
+            view = validate_view(geometry_catalog_client.list(),
+                max_atoms=fixed_geometry_max_atoms)
+        except (ValueError, TypeError, KeyError, OSError):
+            # Resource errors may contain a remote path or private diagnostics.
+            # Reject the entire view and keep these outside browser responses.
+            raise TaskError('初始结构目录暂未通过核对；未选择结构，请稍后重新读取') from None
+        return {**view, 'configured': True,
+                'reason': '' if view['entries'] else '目录已配置，目前没有已核对的初始结构。可继续保存研究需求。'}
     from .research_workflow import ResearchWorkflow
     workflow = ResearchWorkflow(candidate_service, execution_jobs) if candidate_service and execution_jobs else None
     @asynccontextmanager
@@ -1105,6 +1132,37 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.post('/api/tasks/{identifier}/confirm')
     def confirm(identifier: str, data: ConfirmConditions):
         return store.confirm(identifier, data.revision, data.fields)
+
+    @app.get('/api/geometry-catalog')
+    def initial_geometries():
+        # Metadata read only: no import, model request, staging or job action.
+        return geometry_catalog_view()
+
+    @app.post('/api/tasks/{identifier}/initial-geometry')
+    @serialized_task_action
+    def select_initial_geometry(identifier: str, data: InitialGeometrySelection):
+        require_open_task(identifier)
+        document = store.get(identifier)
+        if document['revision'] != data.revision:
+            raise StaleTask('任务已更新，请刷新后选择初始结构')
+        if document['status'] == 'conditions_frozen':
+            raise FrozenTask('已冻结的初始结构不可覆盖')
+        view = geometry_catalog_view()
+        if not view['configured']:
+            raise TaskError(view['reason'])
+        if view['catalog_sha256'] != data.catalog_sha256:
+            raise StaleTask('初始结构目录已更新，请重新读取并核对选择')
+        entry = next((item for item in view['entries'] if item['pin'] == data.pin), None)
+        if entry is None:
+            raise TaskError('所选初始结构不在当前受信目录内；未修改任务')
+        return store.select_initial_geometry(identifier, data.revision,
+            {'catalog_sha256': view['catalog_sha256'], 'entry': entry})
+
+    @app.post('/api/tasks/{identifier}/initial-geometry/clear')
+    @serialized_task_action
+    def clear_initial_geometry(identifier: str, data: Revision):
+        require_open_task(identifier)
+        return store.clear_initial_geometry(identifier, data.revision)
 
     @app.post('/api/tasks/{identifier}/targets/preview')
     def preview_targets(identifier: str, data: TargetPreview):

@@ -506,6 +506,16 @@ class TaskStore:
             doc['initial_geometry'] = clean
             return self._write(db, doc, 'initial_geometry_selected')
 
+    def clear_initial_geometry(self, identifier, revision):
+        """Clear an editable resource selection while retaining every old version."""
+        with self.transaction() as db:
+            doc = self._editable(db, identifier, revision)
+            if 'initial_geometry' not in doc:
+                return {**doc, 'issues': issues(doc)}
+            doc.pop('initial_geometry')
+            doc.pop('target_selection', None)
+            return self._write(db, doc, 'initial_geometry_cleared')
+
     def import_literature(self, identifier, revision, csv_text, **mapping):
         from .literature import input_from_csv
         choice, snapshot = input_from_csv(csv_text, **mapping)
