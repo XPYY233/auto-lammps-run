@@ -74,7 +74,7 @@ def root_descriptor(root):
         os.close(fd)
 
 
-def read_file(root_fd, name, max_bytes):
+def read_file(root_fd, name, max_bytes, *, missing_ok=False):
     """Walk every component using no-follow descriptors, then read a regular file."""
     parts = name.split('/')
     directory = os.dup(root_fd)
@@ -98,10 +98,33 @@ def read_file(root_fd, name, max_bytes):
             return data
         finally:
             os.close(fd)
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return None
+        raise ManifestError('Input path cannot be safely opened') from exc
     except OSError as exc:
         raise ManifestError('Input path cannot be safely opened') from exc
     finally:
         os.close(directory)
+
+
+def validate_file_record(record, schema_version):
+    keys = {'path', 'role', 'size', 'sha256'}
+    external = isinstance(record, dict) and 'external_source' in record
+    if (not isinstance(record, dict) or set(record) != keys | ({'external_source'} if external else set())
+            or not isinstance(record['role'], str) or record['role'] not in ROLES
+            or type(record['size']) is not int or record['size'] < 0
+            or not isinstance(record['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', record['sha256'])):
+        raise ManifestError('Invalid file record')
+    name = relative_name(record['path'])
+    if external:
+        source = record['external_source']
+        if (schema_version != 2 or record['role'] != 'structure' or not isinstance(source, dict)
+                or set(source) != {'catalog_sha256', 'pin'}
+                or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
+                       for value in source.values())):
+            raise ManifestError('Invalid external structure source')
+    return name
 
 
 @dataclass(frozen=True)
@@ -120,7 +143,8 @@ class Snapshot:
                 document = json.loads(encoded)
             except (ValueError, UnicodeDecodeError) as exc:
                 raise ManifestError('Invalid manifest JSON') from exc
-            if (not isinstance(document, dict) or document.get('schema_version') != 1
+            if (not isinstance(document, dict) or type(document.get('schema_version')) is not int
+                    or document['schema_version'] not in {1, 2}
                     or not isinstance(document.get('files'), list)
                     or not 1 <= len(document['files']) <= 128):
                 raise ManifestError('Unsupported manifest')
@@ -130,22 +154,25 @@ class Snapshot:
             except (KeyError, TypeError, ValueError) as exc:
                 raise ManifestError('Invalid manifest resources') from exc
             expected, total = {'manifest.json'}, len(encoded)
+            declared = set(expected)
             if total > resources.storage_bytes:
                 raise ManifestError('Manifest exceeds storage reservation')
             for record in document['files']:
-                if not isinstance(record, dict) or set(record) != {'path', 'role', 'size', 'sha256'}:
-                    raise ManifestError('Invalid file record')
-                name = relative_name(record['path'])
-                if (name in expected or not isinstance(record['role'], str) or record['role'] not in ROLES
-                        or type(record['size']) is not int or record['size'] < 0):
+                name = validate_file_record(record, document['schema_version'])
+                if name in declared or any(name.startswith(old + '/') or old.startswith(name + '/') for old in declared):
                     raise ManifestError('Invalid file manifest')
+                declared.add(name)
                 expected.add(name)
                 if record['size'] > resources.storage_bytes - total:
                     raise ManifestError('Inputs exceed storage reservation')
-                data = read_file(root, name, record['size'])
-                if len(data) != record['size'] or sha256(data) != record['sha256']:
+                data = read_file(root, name, record['size'], missing_ok='external_source' in record)
+                if data is not None and (len(data) != record['size'] or sha256(data) != record['sha256']):
                     raise ManifestError('Input hash mismatch')
-                total += len(data)
+                # External bytes remain reserved even when only their fixed identity
+                # is stored locally. Their content is checked by the HPC receiver.
+                total += record['size']
+                if data is None:
+                    expected.remove(name)
         observed = set()
         for directory, dirs, files in os.walk(self.path, followlinks=False):
             for name in dirs:
@@ -162,14 +189,18 @@ class Snapshot:
         return document
 
 
-def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources, provenance: dict):
+def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources, provenance: dict,
+           external_files: dict | None = None):
     """Freeze named inputs and provenance; suggestions and scientific checks are separate.
 
     Files are never overwritten. Integrity is rechecked before later staging.
     Ownership permissions do not substitute for separate Agent/service identities.
     """
     entrypoint = relative_name(entrypoint)
-    if not files or len(files) > 128 or files.get(entrypoint) != 'lammps_input':
+    if not isinstance(files, dict) or (external_files is not None and not isinstance(external_files, dict)):
+        raise ManifestError('Named input mappings are required')
+    external_files = external_files or {}
+    if not files or len(files) + len(external_files) > 128 or files.get(entrypoint) != 'lammps_input':
         raise ManifestError('Missing entrypoint or excessive input count')
     if sum(role == 'lammps_input' for role in files.values()) != 1:
         raise ManifestError('Exactly one LAMMPS script is supported')
@@ -177,11 +208,24 @@ def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources,
         relative_name(name)
         if role not in ROLES:
             raise ManifestError('Unsupported input role')
+    external_records = []
+    names = set(files)
+    for name, record in external_files.items():
+        if (validate_file_record(record, 2) != name or 'external_source' not in record or name in names):
+            raise ManifestError('External structure record differs from its named input')
+        # Detach mutable caller objects before calculating the manifest identity.
+        external_records.append(json.loads(canonical(record)))
+        names.add(name)
+    for name in names:
+        if any(name.startswith(old + '/') for old in names if old != name):
+            raise ManifestError('Overlapping input paths')
     validate_provenance(provenance)
     store = private_directory(store)
     staging = Path(tempfile.mkdtemp(prefix='.freeze-', dir=store))
     try:
-        records, total = [], 0
+        records, total = list(external_records), sum(record['size'] for record in external_records)
+        if total > resources.storage_bytes:
+            raise ManifestError('External inputs exceed storage reservation')
         with root_descriptor(source) as root:
             for name, role in sorted(files.items()):
                 data = read_file(root, name, resources.storage_bytes - total)
@@ -194,7 +238,8 @@ def freeze(source, store, *, files: dict, entrypoint: str, resources: Resources,
                     os.fsync(output.fileno())
                 path.chmod(0o400)
                 records.append(dict(path=name, role=role, size=len(data), sha256=sha256(data)))
-        document = dict(schema_version=1, files=records, entrypoint=entrypoint,
+        document = dict(schema_version=2 if external_records else 1,
+                        files=sorted(records, key=lambda item: item['path']), entrypoint=entrypoint,
                         resources=asdict(resources), provenance=provenance)
         encoded = canonical(document)
         if len(encoded) > 1_000_000:

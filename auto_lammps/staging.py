@@ -104,6 +104,8 @@ def upload_chunks(snapshot):
         for offset in range(0, len(manifest), 65536):
             yield manifest[offset:offset+65536]
         for item in document['files']:
+            if 'external_source' in item:
+                continue  # The fixed HPC catalog supplies these reserved bytes.
             data = read_file(root, item['path'], item['size'])
             if sha256(data) != item['sha256'] or len(data) != item['size']:
                 raise ValueError('Input changed before upload')

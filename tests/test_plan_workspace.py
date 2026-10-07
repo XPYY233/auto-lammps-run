@@ -63,3 +63,25 @@ class PlanWorkspaceTests(unittest.TestCase):
         self.assertFalse(view['versions'][-1]['available'])
         self.assertEqual(view['current']['version'],1)
         self.assertTrue(view['current']['historical'])
+
+    def test_sparse_geometry_keeps_small_structure_preview_available_without_reading_local_bytes(self):
+        old = Snapshot(self.service.snapshots/self.first['result']['snapshot_sha256'],
+                       self.first['result']['snapshot_sha256'])
+        record = old.verify()
+        source = self.f.fixture.root/'sparse-view-source'
+        shutil.copytree(old.path, source)
+        geometry = next(item for item in record['files'] if item['path']=='structure.data')
+        (source/'structure.data').unlink()
+        external = {**geometry, 'external_source': dict(catalog_sha256='a'*64, pin='b'*64)}
+        sparse = freeze(source, self.service.snapshots,
+            files={item['path']:item['role'] for item in record['files'] if item['path']!='structure.data'},
+            external_files={'structure.data':external}, entrypoint=record['entrypoint'],
+            resources=self.service.resources, provenance=record['provenance'])
+        with self.f.tasks.transaction() as db:
+            self.f.history._event(db, self.first['id'], 'prepared', {'snapshot_sha256':sparse.digest})
+        view = workspace(self.service, self.f.doc['id'])
+        self.assertTrue(view['versions'][-1]['available'])
+        shown = next(item for item in view['current']['files'] if item['name']=='structure.data')
+        self.assertIsNone(shown['content'])
+        self.assertEqual(shown['external_source'], external['external_source'])
+        self.assertIn('HPC', shown['source_label'])

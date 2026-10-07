@@ -31,6 +31,8 @@ class ManifestTests(unittest.TestCase):
         first = self.freeze()
         second = self.freeze()
         self.assertEqual(first, second)
+        self.assertEqual(first.verify()['schema_version'], 1)
+        self.assertEqual(first, self.freeze(external_files={}))
         self.assertEqual(first.verify()['resources']['cores'], 1)
         (self.source / 'input.in').write_text('changed source')
         self.assertEqual(len(first.verify()['files']), 2)
@@ -121,6 +123,90 @@ class ManifestTests(unittest.TestCase):
             path.write_bytes(encoded)
             with self.subTest(encoded=encoded), self.assertRaises(ManifestError):
                 Snapshot(snapshot.path, sha256(encoded)).verify()
+
+    def external_record(self, *, size=37):
+        return dict(path='structure.data', role='structure', size=size, sha256='d'*64,
+                    external_source=dict(catalog_sha256='e'*64, pin='f'*64))
+
+    def test_external_structure_freezes_identity_without_local_geometry(self):
+        record = self.external_record()
+        snapshot = self.freeze(external_files={record['path']: record})
+        document = snapshot.verify()
+        self.assertEqual(document['schema_version'], 2)
+        self.assertIn(record, document['files'])
+        self.assertFalse((snapshot.path/'structure.data').exists())
+        self.assertEqual(snapshot, self.freeze(external_files={record['path']: record}))
+        record['external_source']['pin'] = '0'*64
+        self.assertEqual(snapshot.verify(), document)
+        self.assertNotEqual(snapshot.digest, self.freeze(external_files={record['path']: record}).digest)
+
+    def test_materialized_external_structure_is_verified_and_optional(self):
+        data = b'Synthetic inert geometry bytes; never executed.\n'
+        record = self.external_record(size=len(data)); record['sha256'] = sha256(data)
+        snapshot = self.freeze(external_files={record['path']: record})
+        path = snapshot.path/'structure.data'; path.write_bytes(data)
+        snapshot.verify()
+        path.write_bytes(data[:-1])
+        with self.assertRaises(ManifestError):
+            snapshot.verify()
+        path.unlink(); snapshot.verify()
+        path.symlink_to(self.source/'input.in')
+        with self.assertRaises(ManifestError):
+            snapshot.verify()
+
+    def test_external_structure_fields_roles_and_schema_are_strict(self):
+        original = self.external_record()
+        bad = []
+        for role in ('potential', 'analysis_spec', 'lammps_input', 'unknown'):
+            bad.append({**original, 'role': role})
+        bad.extend([{**original, 'size': True}, {**original, 'size': -1},
+                    {**original, 'sha256': 'not-a-digest'}, {**original, 'extra': 'forbidden'},
+                    {**original, 'external_source': {'catalog_sha256': 'e'*64}},
+                    {**original, 'external_source': {'catalog_sha256': 'e'*64, 'pin': '../escape'}},
+                    {**original, 'external_source': {'catalog_sha256': 'e'*64, 'pin': 'f'*64, 'path': '/private'}}])
+        for record in bad:
+            with self.subTest(record=record), self.assertRaises(ManifestError):
+                self.freeze(external_files={'structure.data': record})
+        snapshot = self.freeze(external_files={'structure.data': original})
+        document = snapshot.verify(); document['schema_version'] = 1
+        encoded = canonical(document); manifest = snapshot.path/'manifest.json'
+        manifest.chmod(0o600); manifest.write_bytes(encoded)
+        with self.assertRaises(ManifestError):
+            Snapshot(snapshot.path, sha256(encoded)).verify()
+
+    def test_external_storage_count_duplicate_and_path_overlap(self):
+        record = self.external_record(size=4096)
+        with self.assertRaises(ManifestError):
+            self.freeze(external_files={'structure.data': record})
+        with self.assertRaises(ManifestError):
+            self.freeze(external_files={'input.in': {**self.external_record(), 'path': 'input.in'}})
+        with self.assertRaises(ManifestError):
+            self.freeze(external_files={'structure.data': {**self.external_record(), 'path': 'different.data'}})
+        with self.assertRaises(ManifestError):
+            self.freeze(external_files={'potential': {**self.external_record(), 'path': 'potential'}})
+        record = self.external_record()
+        with self.assertRaises(ManifestError):
+            self.freeze(external_files={f's{i}.data': {**record, 'path': f's{i}.data'} for i in range(127)})
+        snapshot = self.freeze(external_files={'structure.data': record})
+        document = snapshot.verify(); document['files'].append(record)
+        encoded = canonical(document); manifest = snapshot.path/'manifest.json'
+        manifest.chmod(0o600); manifest.write_bytes(encoded)
+        with self.assertRaises(ManifestError):
+            Snapshot(snapshot.path, sha256(encoded)).verify()
+
+    def test_external_materialization_rejects_hard_links_and_linked_parents(self):
+        data = (self.source/'input.in').read_bytes()
+        record = self.external_record(size=len(data)); record['sha256'] = sha256(data)
+        snapshot = self.freeze(external_files={'structure.data': record})
+        os.link(self.source/'input.in', snapshot.path/'structure.data')
+        with self.assertRaises(ManifestError):
+            snapshot.verify()
+        (snapshot.path/'structure.data').unlink()
+        nested = {**record, 'path': 'geometry/structure.data'}
+        snapshot = self.freeze(external_files={nested['path']: nested})
+        (snapshot.path/'geometry').symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(ManifestError):
+            snapshot.verify()
 
 
 if __name__ == '__main__':

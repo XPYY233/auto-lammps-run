@@ -38,9 +38,14 @@ def workspace(service, identifier):
                     name = item['path']
                     if name not in {'in.lammps', 'analysis.json'} and not re.fullmatch(r'structure(?:-[A-Za-z0-9_-]+)?\.data', name):
                         continue
+                    external = item.get('external_source')
                     content = (read_file(root, name, item['size']).decode('utf-8', 'replace')
-                               if item['size'] <= 200000 else None)
-                    files.append({'name': name, 'size': item['size'], 'sha256': item['sha256'], 'content': content})
+                               if item['size'] <= 200000 and not external else None)
+                    visible = {'name': name, 'size': item['size'], 'sha256': item['sha256'], 'content': content}
+                    if external:
+                        visible['external_source'] = external
+                        visible['source_label'] = 'HPC 上固定的初始结构；原字节不会下载到控制端。'
+                    files.append(visible)
             changed = ([label for key, label in CHANGE_LABELS.items()
                         if canonical(proposal.get(key)) != canonical(previous.get(key))]
                        if previous is not None else [])
