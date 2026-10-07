@@ -118,6 +118,15 @@ CREATE TABLE IF NOT EXISTS campaign_policy_revisions (
  policy TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
  PRIMARY KEY(campaign, revision)
 );
+CREATE TABLE IF NOT EXISTS reference_parallelism (
+ campaign TEXT PRIMARY KEY REFERENCES campaigns(id),
+ max_active INTEGER NOT NULL CHECK(max_active=3),
+ approval_sha256 TEXT NOT NULL, policy_sha256 TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_reference_parallelism_update BEFORE UPDATE ON reference_parallelism
+ BEGIN SELECT RAISE(ABORT, 'reference parallelism approval is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_reference_parallelism_delete BEFORE DELETE ON reference_parallelism
+ BEGIN SELECT RAISE(ABORT, 'reference parallelism approval is immutable'); END;
 CREATE TABLE IF NOT EXISTS development_allowances (
  evaluation TEXT PRIMARY KEY REFERENCES evaluations(id),
  max_attempts INTEGER NOT NULL CHECK(max_attempts=3), approval_sha256 TEXT NOT NULL
@@ -312,6 +321,102 @@ class Ledger:
             self._event(db,None,'campaign_policy_amended',{'campaign':campaign,'revision':revision,
                 'previous_sha256':expected_previous_sha256,'policy':asdict(policy)})
 
+    @staticmethod
+    def _campaign_requests(db, campaign):
+        return db.execute('SELECT r.*,e.identity AS evaluation_identity FROM requests r '
+                          'JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?',
+                          (campaign,)).fetchall()
+
+    @staticmethod
+    def _require_reconciled_dispatches(rows):
+        if any(r['state'] in {'dispatching', 'unknown', 'reconcile_required'} for r in rows):
+            raise Conflict('Reconcile uncertain dispatches and scheduler conflicts before authorization')
+
+    def approve_reference_parallelism(self, campaign: str, *, max_active: int,
+                                     approval_sha256: str, expected_policy_sha256: str):
+        """Trusted, explicit approval for three author-reference requests in parallel.
+
+        Without this additive record, concurrency remains campaign-wide. With it,
+        references have a separate three-request pool; all other roles together
+        retain the ordinary policy's concurrency. Requests, budgets, attempts and
+        the one-active-request-per-evaluation rule are never rewritten.
+        """
+        _identifier(campaign); _digest(approval_sha256); _digest(expected_policy_sha256)
+        if type(max_active) is not int or max_active != 3:
+            raise ValueError('Author-reference parallelism requires an explicit limit of three')
+        payload = dict(campaign=campaign, max_active=max_active,
+                       approval_sha256=approval_sha256, policy_sha256=expected_policy_sha256)
+        with self._transaction() as db:
+            old = db.execute('SELECT * FROM reference_parallelism WHERE campaign=?', (campaign,)).fetchone()
+            if old:
+                if dict(old) != payload:
+                    raise Conflict('Cannot replace author-reference parallelism approval')
+                return payload
+            previous = self._policy(db, campaign)
+            if hashlib.sha256(_json(previous).encode()).hexdigest() != expected_policy_sha256:
+                raise Conflict('Campaign policy changed; re-read the approved revision')
+            if approval_sha256 == previous['approval_sha256']:
+                raise Conflict('Reference parallelism needs its own approval evidence')
+            rows = self._campaign_requests(db, campaign)
+            self._require_reconciled_dispatches(rows)
+            references = sum(r['state'] in ACTIVE and
+                             json.loads(r['evaluation_identity'])['role'] == 'reference' for r in rows)
+            if references > max_active:
+                raise Conflict('Existing author-reference requests exceed the proposed parallel limit')
+            db.execute('INSERT INTO reference_parallelism VALUES (?,?,?,?)',
+                       (campaign, max_active, approval_sha256, expected_policy_sha256))
+            self._event(db, None, 'reference_parallelism_approved', payload)
+            return payload
+
+    def raise_campaign_resource_totals(self, campaign: str, *, total_core_seconds: int,
+                                      total_storage_bytes: int, approval_sha256: str,
+                                      expected_previous_sha256: str):
+        """Append an approved increase of totals while known jobs remain active.
+
+        This narrow operation cannot change job limits, ordinary concurrency or
+        per-task caps. The standard amendment still requires an inactive and
+        reconciled campaign. Unknown submissions must be reconciled first.
+        """
+        _identifier(campaign); _positive(total_core_seconds); _positive(total_storage_bytes)
+        _digest(approval_sha256); _digest(expected_previous_sha256)
+        with self._transaction() as db:
+            previous = self._policy(db, campaign)
+            if hashlib.sha256(_json(previous).encode()).hexdigest() != expected_previous_sha256:
+                raise Conflict('Campaign policy changed; re-read the approved revision')
+            if approval_sha256 == previous['approval_sha256']:
+                raise Conflict('A resource increase needs its own approval evidence')
+            if (total_core_seconds < previous['total_core_seconds']
+                    or total_storage_bytes < previous['total_storage_bytes']
+                    or (total_core_seconds == previous['total_core_seconds']
+                        and total_storage_bytes == previous['total_storage_bytes'])):
+                raise Conflict('Only a monotonic increase of resource totals is permitted')
+            rows = self._campaign_requests(db, campaign)
+            self._require_reconciled_dispatches(rows)
+            if (sum(r['charge_core_seconds'] for r in rows) > total_core_seconds
+                    or sum(r['charge_storage_bytes'] for r in rows) > total_storage_bytes):
+                raise LimitExceeded('New policy cannot hide already charged resources')
+            updated = dict(previous, total_core_seconds=total_core_seconds,
+                           total_storage_bytes=total_storage_bytes, approval_sha256=approval_sha256)
+            revision = db.execute('SELECT COALESCE(MAX(revision),0)+1 FROM campaign_policy_revisions '
+                                  'WHERE campaign=?', (campaign,)).fetchone()[0]
+            db.execute('INSERT INTO campaign_policy_revisions VALUES (?,?,?,?)',
+                       (campaign, revision, _json(updated), expected_previous_sha256))
+            self._event(db, None, 'campaign_resource_totals_raised', dict(campaign=campaign,
+                        revision=revision, previous_sha256=expected_previous_sha256, policy=updated))
+            return updated
+
+    @staticmethod
+    def _concurrency_pool(db, campaign, role, policy, rows):
+        approval = db.execute('SELECT max_active FROM reference_parallelism WHERE campaign=?',
+                              (campaign,)).fetchone()
+        if approval is None:
+            return sum(r['state'] in ACTIVE for r in rows), policy['concurrency']
+        reference = role == 'reference'
+        active = sum(r['state'] in ACTIVE and
+                     (json.loads(r['evaluation_identity'])['role'] == 'reference') == reference
+                     for r in rows)
+        return active, approval['max_active'] if reference else policy['concurrency']
+
     def approve_task_resource_limit(self, campaign, core_seconds, *, approval_sha256):
         """Append a CPU-only per-task cap without rewriting the campaign or identity.
 
@@ -493,8 +598,7 @@ class Ledger:
             if (resources.cores > policy["max_cores"] or resources.wall_seconds > policy["max_wall_seconds"]
                     or resources.memory_bytes > policy["max_memory_bytes"]):
                 raise LimitExceeded("Per-job resources exceed approved limits")
-            all_rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?",
-                                  (ev["campaign"],)).fetchall()
+            all_rows = self._campaign_requests(db, ev['campaign'])
             if any(r["state"] == "reconcile_required" for r in all_rows):
                 raise Conflict("Campaign contains an unresolved scheduler conflict")
             own = [r for r in all_rows if r["evaluation"] == evaluation]
@@ -503,7 +607,9 @@ class Ledger:
             max_attempts, _ = self._attempt_allowance(db, ev)
             if max_attempts is not None and sum(r["dispatch_claimed"] or r["state"] == "prepared" for r in own) >= max_attempts:
                 raise LimitExceeded("Evaluation submission allowance exhausted")
-            if sum(r["state"] in ACTIVE for r in all_rows) >= policy["concurrency"]:
+            active, limit = self._concurrency_pool(db, ev['campaign'], json.loads(ev['identity'])['role'],
+                                                    policy, all_rows)
+            if active >= limit:
                 raise LimitExceeded("Campaign concurrency exhausted")
             if sum(r["charge_core_seconds"] for r in all_rows) + resources.core_seconds > policy["total_core_seconds"]:
                 raise LimitExceeded("Campaign compute budget exhausted")
@@ -525,18 +631,19 @@ class Ledger:
                 return False
             # Accounting or an unexpected scheduler restart may have exhausted a
             # shared budget since reservation. Never dispatch a stale reservation.
-            campaign = db.execute("SELECT campaign FROM evaluations WHERE id=?", (row["evaluation"],)).fetchone()[0]
+            ev = db.execute('SELECT * FROM evaluations WHERE id=?', (row['evaluation'],)).fetchone()
+            campaign = ev['campaign']
             policy = self._policy(db, campaign)
             task_limit = self._task_resource_status(db, row['evaluation'])
             if task_limit and task_limit['charged_or_reserved_core_seconds'] > task_limit['limit_core_seconds']:
                 raise LimitExceeded('Task cumulative CPU budget exhausted; dispatch blocked')
-            rows = db.execute("SELECT r.* FROM requests r JOIN evaluations e ON r.evaluation=e.id WHERE e.campaign=?",
-                              (campaign,)).fetchall()
+            rows = self._campaign_requests(db, campaign)
             if any(r["state"] == "reconcile_required" for r in rows):
                 raise Conflict("Campaign contains an unresolved scheduler conflict")
+            active, limit = self._concurrency_pool(db, campaign, json.loads(ev['identity'])['role'], policy, rows)
             if (sum(r["charge_core_seconds"] for r in rows) > policy["total_core_seconds"]
                     or sum(r["charge_storage_bytes"] for r in rows) > policy["total_storage_bytes"]
-                    or sum(r["state"] in ACTIVE for r in rows) > policy["concurrency"]):
+                    or active > limit):
                 raise LimitExceeded("Campaign limits changed through accounting; dispatch blocked")
             db.execute("UPDATE requests SET state='dispatching',dispatch_claimed=1 WHERE id=?", (request_id,))
             self._event(db, request_id, "dispatch_intent", {"note": "Request may reach scheduler; reconcile after any interruption"})
