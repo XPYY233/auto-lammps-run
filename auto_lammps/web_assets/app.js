@@ -8,6 +8,7 @@ let pendingRoute=null, renderedRoute=null;
 let paperFilter='all';
 let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
 let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:null};
+let referenceProgress=null;
 let candidateState=null, candidateTask=null, candidatePolling=false;
 let candidateRecord=null, candidateAnswers=[], candidateOutcome='';
 const methodNames = {lammps_direct:'LAMMPS 直接结果',lammps_postprocessed:'LAMMPS 结果经后处理',other:'其他方法',unclear:'来源不明确'};
@@ -91,7 +92,8 @@ async function openTask(id) {
   if(pendingRoute!==null)return;
   current=task;
   $('#advanced-task').open=task.status!=='conditions_frozen';
-  normalResult=null;workspaceReport=null;rawResult=null;executionState=null;
+  normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;
+  $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
   activityData=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
   for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
@@ -1115,7 +1117,7 @@ action(async()=>{
   if(pendingRoute===null)await renderRoute(normalizeRoute(location.hash));
 });
 
-const requestStates={reserved:'已预留，未派发',dispatching:'派发中',unknown:'提交结果不明，先对账',accepted:'调度器已接受',pending:'排队中',running:'运行中',completed:'计算已结束，尚未科学核验',failed:'计算失败',cancelled:'已取消',timeout:'已超时',rejected:'提交被拒',cancel_requested:'已请求取消',cancelled_before_dispatch:'派发前取消'};
+const requestStates={reserved:'已预留，未派发',dispatching:'派发中',unknown:'提交结果不明，先对账',accepted:'调度器已接受',queued:'排队中',pending:'排队中',running:'运行中',completed:'计算已结束，尚未科学核验',failed:'计算失败',cancelled:'已取消',timeout:'已超时',rejected:'提交被拒',cancel_requested:'已请求取消',cancelled_before_dispatch:'派发前取消'};
 const paperEvents={bibliography_corrected:'核正论文题目与出版信息',candidate_added:'登记候选文献',paper_selected:'选入复现计划',task_linked:'关联条件任务',evaluation_linked:'关联不可重置的评测账本'};
 const roleNames={agent:'主 Agent 正式评测',reference:'作者参考运行',development:'开发验证',analysis:'分析作业'};
 async function showPapers() {
@@ -1277,7 +1279,7 @@ function taskCards(){
  const tasks=taskCache.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase())&&(taskFilter==='all'||(taskFilter==='finished'?taskFinished(t):taskFilter==='failed'?['failed','timeout','preparation_failed','clarification'].includes(taskState(t)):taskState(t)===taskFilter)));
  if(!tasks.length){box.append(emptyState('此分类暂无任务','新建一项研究，或调整搜索条件。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['任务','当前阶段','作业 / 提交次数','最近更新','操作'])hr.append(node('th',label));head.append(hr);table.append(head,body);
- for(const t of tasks){const tr=node('tr'),info=node('td'),title=node('strong',t.title);info.append(title,node('small',t.mode==='reproduction'?'文献验证':'科研计算'));const progress=node('td');progress.append(node('span',taskStateLabel(t),'badge '+(['validated','finished','prepared'].includes(taskState(t))?'accepted':['running','preparing'].includes(taskState(t))?'pending':['preparation_failed'].includes(taskState(t))?'failed':'')));if(taskState(t)==='validated'&&taskFinished(t))progress.append(node('small','已确认结束'));if(t.reference_stage)progress.append(node('small','作者参考：'+t.reference_stage));const counts=node('td',t.job_id?'作业 '+t.job_id:'尚未派发');if(t.submission_count!==undefined)counts.append(node('small',(t.mode==='reproduction'?'B 提交：':'提交：')+t.submission_count+' / '+(t.max_submissions||2)));const changed=node('td',t.updated_at?new Date(t.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'),actions=node('td'),go=node('button','查看详情','quiet');go.onclick=()=>requestRoute('#'+t.id);actions.append(go);
+ for(const t of tasks){const tr=node('tr'),info=node('td'),title=node('strong',t.title);info.append(title,node('small',t.mode==='reproduction'?'文献验证':'科研计算'));const progress=node('td');progress.append(node('span',taskStateLabel(t),'badge '+(['validated','finished','prepared'].includes(taskState(t))?'accepted':['running','preparing'].includes(taskState(t))?'pending':['preparation_failed'].includes(taskState(t))?'failed':'')));if(taskState(t)==='validated'&&taskFinished(t))progress.append(node('small','已确认结束'));if(t.reference_stage)progress.append(node('small','作者参考：'+t.reference_stage));const counts=node('td');if(t.reference_stage){counts.append(node('strong',t.reference_job_id?'A 作业 '+t.reference_job_id:'A 作业号待核对'),node('small',`A 提交：${t.reference_submission_count??'待核对'} 次（含失败）`),node('small',t.job_id?'B 作业 '+t.job_id:'B 尚未提交'));}else counts.append(node('span',t.job_id?'作业 '+t.job_id:'尚未派发'));if(t.submission_count!==undefined)counts.append(node('small',(t.mode==='reproduction'?'B 提交：':'提交：')+t.submission_count+' / '+(t.max_submissions||2)));const changed=node('td',t.updated_at?new Date(t.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'),actions=node('td'),go=node('button','查看详情','quiet');go.onclick=()=>requestRoute('#'+t.id);actions.append(go);
  const manage=async operation=>{await api(`/api/tasks/${t.id}/lifecycle`,{revision:t.revision,lifecycle_revision:t.lifecycle_revision||0,action:operation});await listTasks();taskCards();notice(operation==='delete'?'任务已从列表删除；计算账本和费用记录保留。':'已记录你确认任务结束；科学验收结论保持独立。');};
  if(!taskFinished(t))actions.append(removalButton('确认任务结束','再次点击确认结束',()=>manage('finish')));
  actions.append(removalButton('删除任务记录','确认从列表删除',()=>manage('delete')));
@@ -1647,6 +1649,34 @@ function renderWorkspaceResults(){
   box.append(node('h3','真实提交记录'));const list=node('ol',undefined,'timeline');for(const [i,q] of r.evaluation.requests.entries()){const li=node('li');li.append(node('strong',`A 第 ${i+1} 次 · ${requestStates[q.state]||q.state}`),node('small',`作业 ${q.job_id||'未确认'} · ${q.accounted?number(q.actual_core_seconds/3600,4)+' 核时':'尚待核算'}`));const events=node('details');events.append(node('summary','展开本次记录'));const history=node('ol');for(const e of q.events)history.append(node('li',`${new Date(e.at*1000).toLocaleString('zh-CN')} · ${{reserved:'预留资源',dispatch_intent:'发起提交',scheduler_accepted:'调度器接受',scheduler_observed:'核对计算状态',accounting_final:'核算真实用量'}[e.kind]||'保存运行记录'}`));events.append(history);li.append(events);list.append(li);}box.append(list,node('p',`B 已用 ${bCount(r)} 次；${bState(r)}。作者参考 A 的失败不从历史移除。`,'plot-caption'));for(const ev of r.agent_progress?.evaluations||[])for(const [i,q] of ev.requests.entries()){const row=node('article',undefined,'request-record');row.append(node('strong',`B 第 ${i+1} 次 · ${requestStates[q.state]||q.state}`),node('p','作业 '+(q.job_id||'待确认')),node('small',q.accounted?number(q.actual_core_seconds/3600,4)+' 核时':'运行费用尚未最终核算'));if(q.monitoring){const m=q.monitoring;row.append(node('p','后台检查：'+new Date(m.last_checked*1000).toLocaleString('zh-CN')+(m.reason?' · 连接或记录待核对，保留上次状态':' · 本次调度记录已核验')));if(!q.accounted)row.append(node('small',Date.now()/1000>m.next_due+60?'更新已延迟，等待后台恢复':'下次计划检查：'+new Date(m.next_due*1000).toLocaleTimeString('zh-CN')));}box.append(row);}box.append(node('h3','任务与条件历史'),taskTimeline());
  }
 }
+function renderReferenceProgress(){
+ const box=$('#reference-progress');box.replaceChildren();
+ const entries=referenceProgress?.task_id===current?.id?referenceProgress.entries:[];
+ box.hidden=!entries?.length;if(box.hidden)return;
+ box.append(node('h2','作者源码参考计算（A）'),node('p','A 直接运行作者工作流程；B 由应用内 AI 根据研究条件独立生成。两者的作业、次数和结果分别记录。','subtle'));
+ for(const item of entries){
+  const paper=item.paper,evaluation=item.evaluation;
+  const title=node('a',paper.title,'reference-paper-title');title.href=paper.doi_url;title.target='_blank';title.rel='noopener noreferrer';
+  box.append(title,node('small','DOI '+paper.doi),node('p',paper.scope,'subtle'));
+  if(!evaluation.available){box.append(node('p','参考账本暂不可读；已有提交保留，不能据此认定未提交。','error'));addInfo('A 状态','提交记录待核对');continue;}
+  const count=`${evaluation.dispatch_claims} 次（含失败）`;
+  addInfo('A 提交次数',count);
+  box.append(node('p','实际提交：'+count+' · '+(evaluation.max_attempts===null?'参考开发许可：继续至跑通':`本参考评测上限 ${evaluation.max_attempts} 次`),'reference-count'));
+  for(const [i,q] of evaluation.requests.entries()){
+   const row=node('article',undefined,'request-record'),latest=i===evaluation.requests.length-1;
+   row.append(node('strong',`A 第 ${i+1} 次 · ${requestStates[q.state]||'状态待核对'}`),node('p',q.job_id?'HPC 作业号：'+q.job_id:'尚无确认的作业号'));
+   if(q.resources)row.append(node('small',`${q.resources.cores} CPU 核 · ${fileSize(q.resources.memory_bytes)} 内存 · 作业最长 ${number(q.resources.wall_seconds/3600,1)} 小时`));
+   row.append(node('p',q.accounted?`实际用量：${number(q.actual_core_seconds/3600,4)} CPU 核时`:'实际费用尚未最终核算；资源预留与最终用量分别保留。'));
+   const observed=q.events.filter(e=>['scheduler_observed','accounting_final','monitor_result'].includes(e.kind)).at(-1);
+   if(observed){row.append(node('small','最近核对：'+new Date(observed.at*1000).toLocaleString('zh-CN')));if(!q.accounted&&Date.now()/1000-observed.at>1800)row.append(node('small','显示上次已核验状态；核对已超过 30 分钟，不能据此判断作业失败。'));}
+   if(q.monitoring?.reason)row.append(node('p','最近检查未能确认新状态，保留上次调度记录。','form-note'));
+   const detail=node('details');detail.append(node('summary','查看本次提交、状态核对与费用历史'));
+   const history=node('ol',undefined,'timeline');for(const e of q.events)history.append(node('li',new Date(e.at*1000).toLocaleString('zh-CN')+' · '+({reserved:'预留资源',dispatch_intent:'发起提交',scheduler_accepted:'收到作业号',scheduler_observed:'核对调度状态',accounting_final:'核算实际费用',monitor_result:'保存后台核对',dispatch_unknown:'提交结果待核对'}[e.kind]||'保存运行记录')));detail.append(history);row.append(detail);box.append(row);
+   if(latest){addInfo('A 作业号',q.job_id||'尚未确认');addInfo('A 状态',requestStates[q.state]||'待核对');}
+  }
+ }
+ box.append(node('p','调度完成后还需核验输出和论文对比；此处不代表科学复现通过。','plot-caption'));
+}
 async function refreshWorkspace(){
  if(!current)return;
  const id=current.id, generation=++workspaceGeneration;
@@ -1654,14 +1684,16 @@ async function refreshWorkspace(){
  workspaceState.phase='loading';renderWorkspaceResults();renderRefreshStatus();
  const replies=await Promise.allSettled([
   api(`/api/tasks/${id}/reference-result`),api(`/api/tasks/${id}/execution`),
-  api(`/api/tasks/${id}/raw-files`),api(`/api/tasks/${id}/results`)
+  api(`/api/tasks/${id}/raw-files`),api(`/api/tasks/${id}/results`),
+  api(`/api/tasks/${id}/reference-progress`)
  ]);
  if(current?.id!==id||generation!==workspaceGeneration)return;
  if(replies.some(r=>r.status==='rejected')){
   workspaceState.phase='error';renderRefreshStatus();renderWorkspaceResults();return;
  }
- const [reference,execution,raw,results]=replies.map(r=>r.value);
+ const [reference,execution,raw,results,progress]=replies.map(r=>r.value);
  workspaceReport=reference.report;executionState=execution;rawResult={task:id,files:raw.files};normalResult=results;
+ referenceProgress=progress;
  workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();renderTargetPlanning();
  const r=workspaceReport;
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
@@ -1684,7 +1716,7 @@ async function refreshWorkspace(){
   for(const f of new Map(currentRawFiles().map(f=>[f.request_id,f])).values())addInfo('作业 '+f.job_id,requestStates[f.state]||f.state);
   $('#execution-flow').replaceChildren(node('h2','计算记录'),node('p','原始输出已回收，可下载查看。完整执行阶段及分析报告尚未接入。','flow-note'));
  }
- renderExecutionControls();renderWorkspaceResults();
+ renderExecutionControls();renderReferenceProgress();renderWorkspaceResults();
  await refreshPlanReview();await refreshActivity();
  if(!$('.discussion-panel').hidden)await refreshDiscussion();
 }
@@ -1705,7 +1737,7 @@ function renderExecutionControls(){
     node('span',`已提交 ${job.dispatch_count} / ${job.max_attempts} 次`));box.append(receipt);
   $('#task-status').textContent=job.label;
   $('#task-information').replaceChildren();addInfo('执行状态',job.label);addInfo('提交次数',`${job.dispatch_count} / ${job.max_attempts}`);
-  addInfo('HPC 作业号',job.job_id||(job.dispatch_count?'提交结果待核对':'尚未提交'));
+  addInfo((typeof referenceProgress!=='undefined'&&referenceProgress?.entries?.length)?'B HPC 作业号':'HPC 作业号',job.job_id||(job.dispatch_count?'提交结果待核对':'尚未提交'));
   if(job.job_id)addInfo('调度状态',requestStates[job.scheduler_state]||'待核对');
   addInfo('资源核算',job.accounted?'已核算':'待核算');addInfo('科学结论','尚未核验');
   if(!executionState.worker_alive&&['queued','running','waiting'].includes(job.state))box.append(node('p','后台当前未运行；恢复服务后继续已有请求，不会重复提交。','form-note'));
@@ -1722,7 +1754,7 @@ function renderExecutionControls(){
   const details=node('details');details.append(node('summary','查看提交、调度、回收与分析的完整记录'));const list=node('ol');for(const e of job.events)list.append(node('li',new Date(e.at).toLocaleString('zh-CN')+' · '+e.label));details.append(list);box.append(details);
  }else{
   $('#task-information').replaceChildren();
-  addInfo('HPC 作业号',executionState.submissions?.count?'已有提交，回执待核对':'尚未提交');
+  addInfo((typeof referenceProgress!=='undefined'&&referenceProgress?.entries?.length)?'B HPC 作业号':'HPC 作业号',executionState.submissions?.count?'已有提交，回执待核对':'尚未提交');
   if(executionState.submissions)addInfo('提交次数',`${executionState.submissions.count} / ${executionState.submissions.maximum}`);
   const flow=executionState.automatic_workflow,step=flow?.workflow;
   if(step){box.replaceChildren(node('h2','任务执行流程'),node('p',step.label,'flow-note'));$('#task-status').textContent=step.label;
@@ -1910,6 +1942,7 @@ function taskState(t){
     if(['needs_reconciliation','uncertain'].includes(t.condition_preparation_state))return 'condition_attention';
     if(['prepared','generating','validating','repairing','awaiting_import'].includes(t.condition_preparation_state))return 'understanding';
   }
+  if(t.reference_state)return t.reference_state;
   return t.status==='conditions_frozen'?'frozen':'draft';
 }
 function taskStateLabel(t){return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',reconcile_required:'计算记录待核对',unknown:'提交状态待核对',dispatching:'正在提交',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败',condition_failed:'需求条件整理失败',condition_attention:'条件整理记录待核对',understanding:'正在整理需求条件'})[taskState(t)]||'状态待核对';}

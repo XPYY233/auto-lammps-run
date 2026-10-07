@@ -656,6 +656,22 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                         row['execution_state']=runs[-1]['state']
                         row['job_id']=runs[-1]['job_id']
                         row['submission_count']=sum(e['dispatch_claims'] for e in agents)
+        for row in rows:
+            reference = papers.reference_progress(row['id'])
+            if reference['entries']:
+                evaluations = [item['evaluation'] for item in reference['entries']]
+                runs = [request for evaluation in evaluations for request in evaluation.get('requests', [])]
+                row['reference_available'] = reference['available']
+                row['reference_submission_count'] = (sum(e.get('dispatch_claims', 0) for e in evaluations)
+                                                     if reference['available'] else None)
+                row['reference_state'] = (runs[-1]['state'] if runs else 'prepared') if reference['available'] else 'reconcile_required'
+                row['reference_job_id'] = runs[-1]['job_id'] if runs else None
+                row['reference_stage'] = ('作者参考 A · ' + {
+                    'prepared': '尚未提交', 'running': '运行中', 'queued': '排队中', 'accepted': '已提交',
+                    'completed': '计算结束 · 科学结果待核验', 'failed': '计算失败',
+                    'timeout': '超时', 'unknown': '提交结果待核对',
+                    'reconcile_required': '记录暂不可读，保留已有提交',
+                }.get(row['reference_state'], '状态见提交记录'))
         if preparations:
             # 任务列表必须反映"方案准备"的真实进展，否则冻结后无论准备成功、失败还是
             # 需要补充条件，都会一律显示为"待准备"。
@@ -681,6 +697,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 except (ValueError,KeyError,TypeError,OSError,runtime_denied):
                     row['acceptance_unavailable']=True
         return {'tasks':rows}
+
+    @app.get('/api/tasks/{identifier}/reference-progress')
+    def reference_progress(identifier: str):
+        # Human-only local ledger projection. Never passed to model/plan inputs.
+        return papers.reference_progress(identifier)
 
     @app.post('/api/tasks/{identifier}/lifecycle')
     @serialized_task_action

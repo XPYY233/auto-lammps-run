@@ -831,3 +831,6 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 .request-open #task-prompt .markdown-body{white-space:normal}
 .plan-objective p{margin:0}
 .discussion-question{font-weight:600}
+
+/* Reference and independent computation retain separate, evidence-based states. */
+.reference-progress{border-left:4px solid #244b83}.reference-progress>small{display:block;margin-top:8px;color:var(--muted)}.reference-paper-title{display:block;margin-top:16px;font-weight:600;line-height:1.6}.reference-progress .request-record{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:#f7f9fd}.reference-progress .request-record>small{display:block;margin:6px 0}.reference-progress .reference-count{font-weight:600;color:#244b83}.reference-progress summary{cursor:pointer;font-weight:600;padding-top:8px}

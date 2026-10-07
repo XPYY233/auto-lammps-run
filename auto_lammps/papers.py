@@ -1,16 +1,25 @@
 """Operator paper register and append-only history, never a score publisher."""
 from datetime import datetime, timezone
 import json
+import math
 import re
 import sqlite3
 import uuid
 from urllib.parse import quote
 
-from .ledger import LedgerError
+from .ledger import ACTIVE, TERMINAL, LedgerError
 from .manifest import canonical
 from .tasks import StaleTask, TaskError, task_id, text
 
 STATUSES = {'pending': '待复现', 'in_progress': '复现中', 'reproduced': '已复现'}
+REFERENCE_RESOURCE_FIELDS = ('cores', 'wall_seconds', 'memory_bytes', 'storage_bytes')
+
+
+def _reference_time(value):
+    try:
+        return type(value) in (int, float) and value >= 0 and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def doi_text(value):
@@ -109,22 +118,153 @@ class PaperStore:
 
     def bind_reference_evaluation(self, identifier, identifier_task, evaluation):
         """Trusted controller: A may precede B condition freeze; never permits agent bindings."""
-        if self.ledger is None:raise TaskError('未配置参考账本')
-        snapshot=self.ledger.evaluation_snapshot(evaluation)
-        if snapshot['identity']['role']!='reference':raise TaskError('这里只能关联作者参考 A')
+        snapshot = self._reference_snapshot(evaluation)
         with self.tasks.transaction() as db:
             doc=self._read(db,identifier)
             task=self.tasks._read(db,identifier_task)
-            if doc['selection']!='selected' or task['mode']!='reproduction':raise TaskError('需要已选论文和复现任务')
+            if doc['selection']!='selected' or task['mode'] not in {'research', 'reproduction'}:
+                raise TaskError('需要已选论文和已关联任务')
             if not db.execute('SELECT 1 FROM paper_tasks WHERE paper_id=? AND task_id=?',(identifier,identifier_task)).fetchone():
                 raise TaskError('参考任务未关联此论文')
-            previous=db.execute('SELECT * FROM paper_evaluations WHERE evaluation=?',(evaluation,)).fetchone()
-            if previous:
-                if previous['paper_id']==identifier and previous['task_id']==identifier_task:return
-                raise TaskError('参考运行已有关联，不可转移')
-            db.execute('INSERT INTO paper_evaluations VALUES (?,?,?,?)',
-                       (identifier,identifier_task,evaluation,snapshot['identity']['task']))
-            self._write(db,doc,'reference_evaluation_linked:'+evaluation)
+            self._bind_reference(db, doc, identifier_task, evaluation, snapshot['identity']['task'])
+
+    def _reference_snapshot(self, evaluation):
+        if self.ledger is None:
+            raise TaskError('未配置参考账本')
+        if not isinstance(evaluation, str) or not re.fullmatch('[a-f0-9]{64}', evaluation):
+            raise TaskError('参考评测标识无效')
+        snapshot = self.ledger.evaluation_snapshot(evaluation)
+        identity = snapshot.get('identity') if isinstance(snapshot, dict) else None
+        if (not isinstance(identity, dict) or snapshot.get('id') != evaluation
+                or identity.get('role') != 'reference'):
+            raise TaskError('这里只能关联作者参考 A')
+        if not isinstance(identity.get('task'), str) or not re.fullmatch('[a-f0-9]{64}', identity['task']):
+            raise TaskError('参考任务摘要无效')
+        return snapshot
+
+    def _bind_reference(self, db, doc, identifier_task, evaluation, expected_task_sha256):
+        previous = db.execute('SELECT * FROM paper_evaluations WHERE evaluation=?', (evaluation,)).fetchone()
+        if previous:
+            if (previous['paper_id'] == doc['id'] and previous['task_id'] == identifier_task
+                    and previous['task_sha256'] == expected_task_sha256):
+                if not db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?',
+                                  (doc['id'], 'reference_evaluation_linked:'+evaluation)).fetchone():
+                    self._write(db, doc, 'reference_evaluation_linked:'+evaluation)
+                return
+            raise TaskError('参考运行已有关联，身份与历史不可转移')
+        db.execute('INSERT INTO paper_evaluations VALUES (?,?,?,?)',
+                   (doc['id'], identifier_task, evaluation, expected_task_sha256))
+        self._write(db, doc, 'reference_evaluation_linked:'+evaluation)
+
+    def link_reference_task(self, identifier, identifier_task, evaluation):
+        """Trusted controller-only linkage of an existing A to its user-visible task.
+
+        This does not authorize a job, freeze B, alter a request or validate the
+        scientific match. Browser link_task deliberately remains reproduction-only.
+        Both append-only relationships and their history commit atomically.
+        """
+        snapshot = self._reference_snapshot(evaluation)
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            task = self.tasks._read(db, identifier_task)
+            if doc['selection'] != 'selected' or task['mode'] not in {'research', 'reproduction'}:
+                raise TaskError('需要已选论文和研究或复现任务')
+            previous = db.execute('SELECT paper_id FROM paper_tasks WHERE task_id=?',
+                                  (identifier_task,)).fetchone()
+            if previous and previous['paper_id'] != identifier:
+                raise TaskError('该任务已关联其他论文，不可转移')
+            if previous is None:
+                db.execute('INSERT INTO paper_tasks VALUES (?,?)', (identifier, identifier_task))
+                self._write(db, doc, 'task_linked:'+identifier_task)
+            self._bind_reference(db, doc, identifier_task, evaluation, snapshot['identity']['task'])
+        return self.reference_progress(identifier_task)
+
+    def _reference_request(self, evaluation, request):
+        """Project snapshot and immutable resources without raw request payloads."""
+        if (not isinstance(request, dict) or not isinstance(request.get('id'), str)
+                or not re.fullmatch('[a-f0-9]{32}', request['id'])
+                or request.get('state') not in {*ACTIVE, *TERMINAL}):
+            raise TaskError('参考请求状态不可核对')
+        original = self.ledger.get(request['id'])
+        if (not isinstance(original, dict) or original.get('evaluation') != evaluation
+                or original.get('id') != request['id']):
+            raise TaskError('参考请求身份不一致')
+        resources = json.loads(original['resources'])
+        if (not isinstance(resources, dict) or set(resources) != set(REFERENCE_RESOURCE_FIELDS)
+                or any(type(resources[k]) is not int or resources[k] <= 0 for k in REFERENCE_RESOURCE_FIELDS)):
+            raise TaskError('参考资源记录不可核对')
+        result = {key: request[key] for key in ('id', 'job_id', 'state', 'dispatch_claimed',
+                                               'charge_core_seconds', 'actual_core_seconds', 'accounted')}
+        if (type(result['charge_core_seconds']) is not int or result['charge_core_seconds'] < 0
+                or result['dispatch_claimed'] not in (0, 1) or result['accounted'] not in (0, 1)
+                or (result['actual_core_seconds'] is not None and
+                    (type(result['actual_core_seconds']) is not int or result['actual_core_seconds'] < 0))
+                or (result['job_id'] is not None and
+                    (not isinstance(result['job_id'], str) or not re.fullmatch('[1-9][0-9]{0,19}', result['job_id'])))):
+            raise TaskError('参考费用或作业号不可核对')
+        result['resources'] = {key: resources[key] for key in REFERENCE_RESOURCE_FIELDS}
+        storage = original.get('charge_storage_bytes')
+        if type(storage) is not int or storage < 0:
+            raise TaskError('参考存储费用不可核对')
+        result['charge_storage_bytes'] = storage
+        events = request.get('events')
+        if not isinstance(events, list):
+            raise TaskError('参考历史不可核对')
+        result['events'] = []
+        for event in events:
+            if (not isinstance(event, dict) or not isinstance(event.get('kind'), str)
+                    or not re.fullmatch('[a-z_]{1,100}', event['kind'])
+                    or not _reference_time(event.get('at'))):
+                raise TaskError('参考历史不可核对')
+            result['events'].append({key: event[key] for key in ('kind', 'at')})
+        monitor = request.get('monitoring')
+        result['monitoring'] = None
+        if monitor is not None:
+            if (not isinstance(monitor, dict) or any(not _reference_time(monitor.get(k))
+                    for k in ('last_checked', 'next_due'))
+                    or type(monitor.get('failures')) is not int or monitor['failures'] < 0
+                    or not isinstance(monitor.get('reason'), str)
+                    or not re.fullmatch('[a-z_]{0,80}', monitor['reason'])):
+                raise TaskError('参考跟进记录不可核对')
+            result['monitoring'] = {key: monitor[key] for key in ('last_checked', 'next_due', 'reason', 'failures')}
+        return result
+
+    def reference_progress(self, identifier_task):
+        """Read known A bindings even before a report; no model or scheduler I/O."""
+        with self.tasks.transaction() as db:
+            self.tasks._read(db, identifier_task)
+            rows = db.execute('SELECT e.*,r.document FROM paper_evaluations e JOIN papers p ON p.id=e.paper_id '
+                    'JOIN paper_revisions r ON r.paper_id=p.id AND r.revision=p.revision '
+                    'WHERE e.task_id=? AND EXISTS (SELECT 1 FROM paper_revisions h WHERE h.paper_id=e.paper_id '
+                    "AND h.event=('reference_evaluation_linked:' || e.evaluation)) ORDER BY e.rowid",
+                    (identifier_task,)).fetchall()
+        entries = []
+        for binding in rows:
+            doc = json.loads(binding['document'])
+            entry = dict(paper={key: doc[key] for key in ('id', 'title', 'doi', 'scope')},
+                         evaluation=dict(id=binding['evaluation'], available=False))
+            entry['paper']['doi_url'] = 'https://doi.org/'+quote(doc['doi'], safe='/')
+            try:
+                snapshot = self._reference_snapshot(binding['evaluation'])
+                if snapshot['identity']['task'] != binding['task_sha256']:
+                    raise TaskError('参考评测任务摘要改变')
+                visible = {key: snapshot[key] for key in ('id', 'max_attempts', 'remaining_attempts',
+                                                          'dispatch_claims', 'reserved_attempts')}
+                if (any(type(visible[key]) is not int or visible[key] < 0
+                        for key in ('dispatch_claims', 'reserved_attempts'))
+                        or any(visible[key] is not None and (type(visible[key]) is not int or visible[key] < 0)
+                               for key in ('max_attempts', 'remaining_attempts'))
+                        or not isinstance(snapshot.get('requests'), list)):
+                    raise TaskError('参考次数记录不可核对')
+                visible['requests'] = [self._reference_request(binding['evaluation'], request)
+                                       for request in snapshot['requests']]
+                entry['evaluation'] = dict(visible, available=True)
+            except (LedgerError, TaskError, sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                entry['evaluation']['reason'] = 'reference_record_unavailable'
+            entries.append(entry)
+        return dict(schema_version=1, task_id=identifier_task,
+                    available=all(item['evaluation']['available'] for item in entries), entries=entries,
+                    scientific_validation='not_performed', execution_authorized=False)
 
     def get(self, identifier):
         with self.tasks.transaction() as db:
