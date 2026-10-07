@@ -112,6 +112,10 @@ def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
         raise CandidateError('atom/swap requires MC in the configured engine packages; do not invent availability')
     if type(type_count) is not int or type_count < 2:
         raise CandidateError('atom/swap requires at least two declared atom types')
+    if 'types' not in tokens[8:]:
+        raise CandidateError("atom/swap is missing the literal 'types' keyword before its two type IDs; "
+            'required grammar: fix ID all atom/swap N X seed T types i j ke yes_or_no. '
+            'Sampler placeholders replace only i and j, never the types keyword')
     if len(tokens) < 13 or tokens[2] != 'all':
         raise CandidateError('atom/swap requires the all group and explicit N, X, seed, T, types and ke')
     if not re.fullmatch(r'[A-Za-z0-9_]{1,64}', tokens[1]):
@@ -605,6 +609,12 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
         'For composition-preserving MC/MD, atom/swap requires MC in configured_engine_packages. '
         'Use fix ID all atom/swap N X seed T types i j ke yes_or_no, optionally semi-grand no. '
+        'The word types is a REQUIRED literal keyword, not a descriptive placeholder. '
+        'A complete grammar example (illustrative numbers, not scientific defaults) is '
+        'fix exchange all atom/swap 1 10 17311 450.0 types 1 2 ke yes. '
+        'When a bounded-cycle sampler named pair supplies the type IDs, the same grammar is '
+        'fix exchange all atom/swap 1 10 17311 450.0 types ${pair_i} ${pair_j} ke yes. '
+        'Retain the literal types and ke keywords; use the supplied task numbers and explicit seeds. '
         'N is the positive MD-step interval, X is attempts per event (NOT total cycles), seed is a '
         'positive integer, T is a positive finite temperature. Use literal numbers and exactly two '
         'distinct declared numeric types per fix, or exactly the two placeholders produced by '
@@ -1067,7 +1077,14 @@ def research_inputs(tasks, identifier, revision):
             raise CandidateError('Reference-derived inputs require the separate release workflow')
     from .task_packages import split_condition_record
     draft = json.loads(split_condition_record(frozen)['execution'])
-    result = {'task_text': draft['task_text'], 'units': draft['conditions']['units']['value'],
+    # Use the same case-sensitive complete-source-token contract as condition
+    # generation. Keep the confirmed prose and provenance in the frozen record;
+    # a unit label alone cannot supply an identifier missing from that value.
+    units = set(re.findall(r'(?<![A-Za-z0-9_])(metal|real)(?![A-Za-z0-9_])',
+                           draft['conditions']['units']['value']))
+    if len(units) != 1:
+        raise CandidateError('Confirmed units value must contain one unique complete metal or real source token; no inference or conversion')
+    result = {'task_text': draft['task_text'], 'units': units.pop(),
               'condition_record_sha256': sha256(frozen)}
     if 'initial_geometry' in draft:
         result['initial_geometry'] = validate_initial_geometry(draft['initial_geometry'], max_atoms=1000000,

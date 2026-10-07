@@ -39,6 +39,11 @@ sample_swap_types <safe_prefix> <literal_type_count> <positive_literal_seed> may
 appear once per prefix, inside a cycle. It freezes ${prefix_i} and ${prefix_j} as two
 distinct uniformly sampled type IDs from 1..type_count for that iteration; the declared
 count must match ALL configured atom types. Use these exact variables as the MC pair.
+The native fix grammar still requires the literal types keyword BEFORE those variables:
+fix exchange all atom/swap 1 10 17311 450.0 types ${pair_i} ${pair_j} ke yes
+Here pair is a prefix previously declared by sample_swap_types in this SAME cycle.
+Numbers in this syntax example are illustrative, not task defaults; obtain all scientific
+parameters from confirmed conditions, and use a unique sampler prefix for each cycle.
 They are local to their cycle, must not be redefined/deleted manually and are deleted
 by the adapter at its end. All samplers in one workflow must use the SAME seed; native
 random()/normal() expressions cannot be mixed with this tool. LAMMPS equal-style RNG

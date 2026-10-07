@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from auto_lammps.agent_candidates import CandidateError, generate_candidate_draft, generate_research_candidate, validate_body
+from auto_lammps.agent_candidates import CandidateError, generate_candidate_draft, generate_research_candidate, research_inputs, validate_body
 from auto_lammps.deepseek import DeepSeekClient, DeepSeekConfig, ModelCalls, ModelError
 from auto_lammps.ledger import Resources
 from auto_lammps.potentials import PotentialAdapter, PotentialCatalog
@@ -310,20 +310,75 @@ class AgentCandidateTests(unittest.TestCase):
     def test_existing_research_task_uses_selected_conditions_without_free_prompt(self):
         tasks = TaskStore(self.root / 'tasks.sqlite')
         doc = tasks.create('unused title', 'UNSELECTED_PROMPT_SENTINEL', 'research')
+        units_value = '使用 units=metal；时间步为 0.002 ps，保持已确认的参数。'
         for field in FIELDS:
             if field != 'reference':
-                doc = tasks.add_candidate(doc['id'], doc['revision'], field, evidence('metal' if field == 'units' else 'synthetic input'))
+                choice = evidence(units_value if field == 'units' else 'synthetic input')
+                if field == 'units':
+                    choice['unit'] = 'metal'
+                doc = tasks.add_candidate(doc['id'], doc['revision'], field, choice)
         doc = tasks.confirm(doc['id'], doc['revision'], [x for x in FIELDS if x != 'reference'])
         with self.assertRaisesRegex(CandidateError, 'Freeze'):
             generate_research_candidate(self.client, tasks, doc['id'], doc['revision'], self.adapter,
                                         resources=self.resources, store=self.root / 'candidates')
         self.transport.assert_not_called()
         doc = tasks.freeze(doc['id'], doc['revision'])
+        frozen = tasks.export(doc['id'])
+        history = tasks.history(doc['id'])
         result = generate_research_candidate(self.client, tasks, doc['id'], doc['revision'], self.adapter,
                                              resources=self.resources, store=self.root / 'candidates')
         self.assertFalse(result['execution_authorized'])
         self.assertEqual(result['generation']['input']['condition_record_sha256'], doc['record_sha256'])
+        model_input = json.loads(result['generation']['input']['messages'][-1]['content'])
+        self.assertIn(units_value, model_input['task_text'])
+        self.assertEqual(model_input['units'], 'metal')
+        self.assertEqual(result['generation']['potential_receipt']['units'], 'metal')
+        self.assertEqual(tasks.export(doc['id']), frozen)
+        self.assertEqual(tasks.history(doc['id']), history)
         self.assertNotIn('UNSELECTED_PROMPT_SENTINEL', self.transport.call_args.args[0].decode())
+
+    def frozen_units_task(self, value, unit=''):
+        tasks = TaskStore(self.root / 'unit-inputs.sqlite')
+        doc = tasks.create('synthetic units', 'UNSELECTED units=metal PROMPT', 'research')
+        for field in FIELDS:
+            if field != 'reference':
+                choice = evidence(value if field == 'units' else 'synthetic input')
+                if field == 'units':
+                    choice['unit'] = unit
+                doc = tasks.add_candidate(doc['id'], doc['revision'], field, choice)
+        doc = tasks.confirm(doc['id'], doc['revision'], [x for x in FIELDS if x != 'reference'])
+        return tasks, tasks.freeze(doc['id'], doc['revision'])
+
+    def test_research_units_accept_exact_supported_identifiers(self):
+        for units in ('metal', 'real'):
+            with self.subTest(units=units):
+                tasks, doc = self.frozen_units_task(units)
+                self.assertEqual(research_inputs(tasks, doc['id'], doc['revision'])['units'], units)
+
+    def test_research_units_accept_one_unique_source_token_in_prose(self):
+        value = '采用 metal 单位制。所有阶段保持 metal。'
+        tasks, doc = self.frozen_units_task(value)
+        inputs = research_inputs(tasks, doc['id'], doc['revision'])
+        self.assertEqual(inputs['units'], 'metal')
+        self.assertIn(value, inputs['task_text'])
+
+    def test_research_units_reject_ambiguity_and_unit_label_without_source_token(self):
+        for value in ('metal 或 real', '单位制未明确', 'metallurgy', 'unreal', 'some_metal', 'metal2'):
+            with self.subTest(value=value):
+                tasks, doc = self.frozen_units_task(value, unit='metal')
+                with self.assertRaisesRegex(CandidateError, 'Confirmed units value'):
+                    generate_research_candidate(self.client, tasks, doc['id'], doc['revision'], self.adapter,
+                                                resources=self.resources, store=self.root / 'candidates')
+        self.transport.assert_not_called()
+        self.assertEqual(self.calls.status()['used_requests'], 0)
+
+    def test_research_units_preserve_case_sensitive_source_contract(self):
+        for value in ('METAL', 'Metal', 'metAl', 'REAL', 'Real'):
+            with self.subTest(value=value):
+                tasks, doc = self.frozen_units_task(value, unit='metal')
+                with self.assertRaisesRegex(CandidateError, 'Confirmed units value'):
+                    research_inputs(tasks, doc['id'], doc['revision'])
+        self.transport.assert_not_called()
 
     def test_reproduction_task_cannot_bypass_release_gate(self):
         tasks = TaskStore(self.root / 'tasks.sqlite')

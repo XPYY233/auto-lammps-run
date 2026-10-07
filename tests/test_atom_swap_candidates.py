@@ -40,6 +40,15 @@ class AtomSwapSyntaxTests(unittest.TestCase):
             with self.subTest(count=count,packages=packages),self.assertRaises(CandidateError):
                 self.check(type_count=count,packages=packages)
 
+    def test_missing_types_keyword_is_reported_precisely_without_rewriting(self):
+        body=SWAP.replace('types 1 2','1 2')
+        with self.assertRaisesRegex(CandidateError,"missing the literal 'types' keyword"):
+            self.check(body+TAIL)
+        # This malformed model output remains rejected, rather than repaired
+        # by the compiler or accepted to bypass the plan round budget.
+        with self.assertRaisesRegex(CandidateError,'Sampler placeholders replace only i and j'):
+            self.check(SWAP.replace('types 1 2','${pair_i} ${pair_j}')+TAIL)
+
     def test_invalid_different_ensemble_and_ambiguous_parameters_reject(self):
         bad=[SWAP.replace('types 1 2','types 1 1'),SWAP.replace('types 1 2','types 1 4'),
              SWAP.replace('types 1 2','types 1 2 3'),SWAP.replace('types 1 2','types Cu Ni'),
