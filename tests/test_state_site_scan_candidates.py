@@ -8,7 +8,8 @@ from unittest.mock import patch
 from auto_lammps.agent_candidates import (CandidateError, candidate_messages, render_candidate_script,
                                          validate_body)
 from auto_lammps.candidate_tools import (expand_tools, state_scan_metadata, scan_columns,
-                                        check_table_writers, workflow_tool_context)
+                                        check_table_writers, workflow_tool_context, cycle_metadata,
+                                        scheduled_swap_accounting)
 from auto_lammps.authorization import candidate_check
 import test_atom_swap_candidates as fixture
 
@@ -31,6 +32,17 @@ def workflow(spec=None,count=2,stride=1000):
     return '\n'.join(['fix evolution all npt temp 600 600 0.2 iso 0 0 2',
         'fix exchange all atom/swap 1000 25 12345 600 types 1 2 ke no',
         f'begin_cycle production {count}',f'run {stride}',f'save_state saved states.dump {stride} {stride}',
+        'end_cycle production','unfix exchange','unfix evolution',
+        'scan_sites complete '+shlex.quote(json.dumps(spec,separators=(',',':')))])
+
+
+def scheduled_workflow(spec=None,steps=(14,35,105),start_step=0):
+    spec=spec if spec is not None else specification()
+    declared=shlex.quote(json.dumps(list(steps),separators=(',',':')))
+    return '\n'.join(['fix evolution all npt temp 600 600 0.2 iso 0 0 2',
+        'fix exchange all atom/swap 7 4 12345 600 types 1 2 ke no',
+        f'begin_cycle production {len(steps)}',f'run_schedule saved {start_step} {declared}',
+        f'save_state saved states.dump steps {declared}',
         'end_cycle production','unfix exchange','unfix evolution',
         'scan_sites complete '+shlex.quote(json.dumps(spec,separators=(',',':')))])
 
@@ -93,6 +105,82 @@ class CompleteStateSiteSyntaxTests(unittest.TestCase):
         self.assertNotIn('reset_atoms',script)
         self.assertEqual(record['state_site_scan']['output_files'],OUTPUTS)
         self.assertIn('format float %.17g',script)
+
+    def test_explicit_schedule_saves_and_scans_every_exact_step_and_counts_mc_intervals(self):
+        steps=[14,35,105]
+        raw=scheduled_workflow(steps=steps)
+        record=self.check(raw)
+        saved=record['state_site_scan']['states'][0]
+        self.assertEqual(record['state_site_scan']['version'],2)
+        self.assertEqual(saved['steps'],steps)
+        self.assertEqual(saved['run_steps_per_iteration'],[14,21,70])
+        self.assertEqual(saved['total_run_steps'],105)
+        self.assertNotIn('stride',saved)
+        self.assertEqual(record['state_site_scan']['scans'][0]['source_timesteps'],steps)
+        self.assertEqual(record['calculation_commands'],3+3*(1+3*3))
+        schedule=cycle_metadata(raw)['run_schedules'][0]
+        counted=scheduled_swap_accounting(schedule,7,4,fix_created_step=0)
+        self.assertEqual(counted,dict(planned_events_per_segment=[2,3,10],planned_events=15,
+            planned_attempts_per_segment=[8,12,40],planned_attempts=60))
+        # Event phase follows fix creation, not global multiples of N or the
+        # first step of each literal run segment.
+        offset=cycle_metadata(scheduled_workflow(steps=[14,35,105],start_step=3))['run_schedules'][0]
+        self.assertEqual(scheduled_swap_accounting(offset,7,4,fix_created_step=3)['planned_events'],15)
+        phased=cycle_metadata(scheduled_workflow(steps=[5,9,16],start_step=3))['run_schedules'][0]
+        self.assertEqual(scheduled_swap_accounting(phased,7,4,fix_created_step=3),
+            dict(planned_events_per_segment=[1,0,1],planned_events=2,
+                 planned_attempts_per_segment=[4,0,4],planned_attempts=8))
+        self.assertEqual(scheduled_swap_accounting(phased,7,4,recreate_per_segment=True),
+            dict(planned_events_per_segment=[1,1,1],planned_events=3,
+                 planned_attempts_per_segment=[4,4,4],planned_attempts=12))
+        with self.assertRaises(ValueError):scheduled_swap_accounting(phased,7,4)
+        with self.assertRaises(ValueError):scheduled_swap_accounting(phased,7,4,fix_created_step=4)
+        script=expand_tools(raw,plan(),'/output/',lower_cycles=True,reload_header=HEADER)
+        self.assertEqual([int(words[1]) for line in script.splitlines()
+            if (words:=shlex.split(line)) and words[0]=='run'],[14,21,70])
+        self.assertEqual(script.count('fix exchange all atom/swap'),1)
+        self.assertEqual(script.count('unfix exchange'),1)
+        self.assertNotIn('run 0',script)
+        self.assertNotIn('jump SELF __alr_label_production',script)
+        self.assertIn('variable __alr_scan_complete_state index 1 2 3',script)
+        self.assertIn('variable __alr_scan_complete_step index 14 35 105',script)
+        self.assertIn('next __alr_scan_complete_state __alr_scan_complete_step',script)
+        self.assertIn('read_dump /output/states.dump ${__alr_scan_complete_step}',script)
+        for previous,target in zip([0,*steps[:-1]],steps):
+            self.assertIn(f'if "$(step) != {previous}" then "quit 90"\nrun {target-previous}',script)
+            self.assertIn(f'if "$(step) != {target}" then "quit 90"\nwrite_dump',script)
+
+    def test_explicit_schedule_rejects_reduction_missing_or_inconsistent_steps(self):
+        raw=scheduled_workflow()
+        invalid_lists=['[]','[1,1,3]','[3,1,9]','[-1,2,3]','[true,2,3]',
+            '[1.0,2,3]','["1",2,3]','[1,2,2147483648]','[1,2,NaN]',
+            '{"steps":[1,2,3]}',json.dumps(list(range(257)))]
+        for invalid in invalid_lists:
+            replaced=raw.replace("'[14,35,105]'",shlex.quote(invalid))
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                expand_tools(replaced,plan(),'/output/')
+        bad_bodies=[raw.replace('production 3','production 2'),
+            raw.replace('run_schedule saved 0','run_schedule saved 14'),
+            raw.replace('run_schedule saved 0','run_schedule saved ${step}'),
+            raw.replace('save_state saved states.dump steps','save_state other states.dump steps'),
+            raw.replace("save_state saved states.dump steps '[14,35,105]'",
+                        "save_state saved states.dump steps '[14,35,106]'"),
+            raw.replace("save_state saved states.dump steps '[14,35,105]'",'save_state saved states.dump 14 21'),
+            raw.replace("save_state saved states.dump steps '[14,35,105]'",''),
+            raw.replace("run_schedule saved 0 '[14,35,105]'",''),
+            raw.replace('end_cycle production','run 0\nend_cycle production'),
+            raw.replace('end_cycle production','minimize 0 1e-7 1200 9000\nend_cycle production'),
+            raw.replace('end_cycle production','reset_timestep 0\nend_cycle production'),
+            raw.replace("run_schedule saved 0 '[14,35,105]'\nsave_state saved states.dump steps '[14,35,105]'",
+                        "save_state saved states.dump steps '[14,35,105]'\nrun_schedule saved 0 '[14,35,105]'"),
+            raw.replace('end_cycle production',"run_schedule other 0 '[14,35,105]'\nend_cycle production")]
+        for invalid in bad_bodies:
+            with self.subTest(invalid=invalid[:100]),self.assertRaises(ValueError):
+                expand_tools(invalid,plan(),'/output/')
+        schedule=cycle_metadata(raw)['run_schedules'][0]
+        for mutate in [lambda s:s['run_intervals'][1].__setitem__(0,15),lambda s:s.update(total_run_steps=104)]:
+            changed=deepcopy(schedule);mutate(changed)
+            with self.assertRaises(ValueError):scheduled_swap_accounting(changed,7,4,fix_created_step=0)
 
     def test_each_variant_restores_complete_baseline_before_mutation_and_minimization(self):
         script=expand_tools(workflow(),plan(),'/output/',lower_cycles=True,reload_header=HEADER)
@@ -166,6 +254,9 @@ class CompleteStateSiteSyntaxTests(unittest.TestCase):
         context=json.loads(messages[1]['content'])['workflow_adapter']
         self.assertEqual(context,workflow_tool_context())
         self.assertIn('scan_sites',context['operations'])
+        self.assertIn('run_schedule',context['operations'])
+        self.assertEqual(context['explicit_sampling']['scan_steps'],'same_complete_list')
+        self.assertIn("run_schedule sampled 0 '[14,35,105]'",messages[0]['content'])
         self.assertIn('ONE accounted HPC',messages[0]['content'])
         check_table_writers(expand_tools(workflow(),plan(),'/output/'),plan(),'/output/')
 
@@ -241,6 +332,38 @@ class CompleteStateSiteFrozenTests(unittest.TestCase):
         self.assertEqual(saved['script_screen'],check['screen'])
         self.assertEqual(len(check['outputs']),7)
         self.assertEqual(self.transport.call_count,1)  # synthetic response only
+
+    def test_all_explicit_fifty_logarithmic_states_freeze_and_recheck_without_approximating_steps(self):
+        self.configure()
+        from test_structures import SPEC
+        self.value['structure']=deepcopy(SPEC)
+        self.value['structure'].update(crystal='bcc',repeat=[8,8,8],type_elements=['Cu','Ni'],masses_amu=[63.5,58.7],
+            assignment={'mode':'random_counts','counts':[512,512],'seed':43210})
+        # Complete synthetic logarithmic input; no reference code or target values.
+        steps=[round(20*1.25**index) for index in range(50)]
+        spec=specification(1024)
+        self.value['workflow']=scheduled_workflow(spec,steps=steps)
+        operation=thermodynamics_operation(50,1024)
+        operation['expected_counts']={'0':512,'1':512}
+        self.value['analysis'].update(files=OUTPUTS,plan={'tables':[{'file':'sites.dat','format':'site_scan_array_v1',
+            'columns':scan_columns(['Cu','Ni'])}], 'operations':[operation]})
+        with patch('subprocess.Popen',side_effect=AssertionError('No target physics or real model')):
+            result=self.generate();check=candidate_check(result['snapshot'],max_atoms=100000)
+        state=check['screen']['state_site_scan']['states'][0]
+        scan=check['screen']['state_site_scan']['scans'][0]
+        self.assertEqual(state['steps'],steps)
+        self.assertEqual(state['total_run_steps'],steps[-1])
+        self.assertEqual(scan['source_timesteps'],steps)
+        self.assertEqual(scan['rows'],204800)
+        self.assertEqual(scan['variant_minimizations'],153600)
+        self.assertEqual(check['screen']['calculation_commands'],153700)
+        script=(result['snapshot'].path/'in.lammps').read_text()
+        self.assertEqual([int(words[1]) for line in script.splitlines()
+            if (words:=shlex.split(line)) and words[0]=='run'],
+            [last-first for first,last in zip([0,*steps[:-1]],steps)])
+        self.assertEqual(script.count('write_dump all custom /output/states.dump'),50)
+        self.assertIn('variable __alr_scan_complete_step index '+ ' '.join(map(str,steps)),script)
+        self.assertEqual(self.transport.call_count,1)
 
 
 if __name__=='__main__':

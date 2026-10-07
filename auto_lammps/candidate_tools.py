@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from .manifest import sha256
 
-VERSION = 4
+VERSION = 5
 MAX_CYCLES = 1000000
 MAX_CYCLE_BLOCKS = 64
 MAX_SAMPLE_TYPES = 64
@@ -20,7 +20,7 @@ _RAW_CONTROL = {'label', 'next', 'jump', 'clear', 'include', 'shell', 'if'}
 _CYCLE_STATE_RESETS = {'load_structure', 'reset_structure', 'delete_atoms',
                        'change_box', 'reset_timestep', 'displace_atoms'}
 
-GUIDE = '''Adapter capabilities (version 4):
+GUIDE = '''Adapter capabilities (version 5):
 begin_cycle <safe_id> <positive_literal_count> / end_cycle <same_id> declares a
 finite, non-nested scientific cycle. At most 64 sequential blocks, at most 1000000
 iterations per block; these are technical limits, NOT additional resource authority.
@@ -150,10 +150,41 @@ outputs per scan/source: raw states dump, all-baselines dump, one last-state res
 cache, one full array table; no per-site files. The compiler owns native control.
 These operations currently support atomic data and metal units; incompatible units,
 noncontiguous IDs or conditions need clarification, never a reduced sample.
+For nonuniform sampling, use run_schedule <state_id> <start_step> '<JSON step list>'
+exactly once inside a bounded cycle, and save_state <same_id> <dump> steps '<same list>'
+after it. The list contains 1..256 strictly increasing integer timesteps greater than
+the explicit nonnegative start_step; the cycle count MUST equal its complete length.
+Both lists must match exactly, including every timestep. This expresses logarithmic
+or other explicit sampling without replacing it by a linear approximation. Example:
+fix exchange all atom/swap 7 4 17311 450.0 types 1 2 ke no
+begin_cycle observations 3
+run_schedule sampled 0 '[14,35,105]'
+save_state sampled states.dump steps '[14,35,105]'
+end_cycle observations
+unfix exchange
+These are synthetic syntax examples, NOT scientific defaults. Obtain the complete
+list, starting timestep and MC parameters from confirmed task conditions. Declare
+the states.dump output and scan_sites specification with states:"sampled" explicitly.
+Minimization leaves its actual timestep unknown before execution. Before a scheduled
+stage, explicitly establish the starting timestep (for example reset_timestep before
+creating its MC fix); never reset an active atom/swap fix. After scan_sites, the final
+restored baseline has timestep equal to the complete saved-state count.
+The scheduled cycle has exactly this one physical stage: no additional run/minimize,
+state reset or hidden run 0. The compiler emits literal run differences (14,21,70 in
+the example), checks the actual start and every saved step, and never evaluates a
+model expression as a run length. Existing fixes remain active across run segments;
+the compiler does not reset them or the timestep. Planned MC events use the actual
+fix creation timestep: the first event is the next timestep, then every N steps
+(LAMMPS 28Mar2023 atom/swap). Splitting a run preserves that event phase and does
+not invent additional swap attempts; an explicitly recreated fix has a new phase.
+Unknown creation timesteps cannot be assigned exact planned attempts. The scan
+reads the SAME complete timestep list, with contiguous state IDs 1..list length.
+The old first_step/stride save_state format remains available for uniform cycles.
 Sources (standard engine protocols, not author code):
 https://docs.lammps.org/read_dump.html , https://docs.lammps.org/write_dump.html ,
 https://docs.lammps.org/read_restart.html , https://docs.lammps.org/write_restart.html ,
 https://docs.lammps.org/set.html , https://docs.lammps.org/delete_atoms.html .
+https://raw.githubusercontent.com/lammps/lammps/patch_28Mar2023/src/MC/fix_atom_swap.cpp .
 '''
 
 
@@ -162,7 +193,7 @@ def workflow_tool_context():
     return {'name': 'scientific_workflow_tools', 'version': VERSION,
             'source_sha256': sha256(Path(__file__).read_bytes()),
             'operations': ['capture', 'emit_table', 'begin_cycle', 'end_cycle',
-                           'sample_swap_types', 'save_state', 'scan_sites'],
+                           'sample_swap_types', 'run_schedule', 'save_state', 'scan_sites'],
             'limits': {'cycle_blocks': MAX_CYCLE_BLOCKS, 'cycles_per_block': MAX_CYCLES,
                        'saved_states':MAX_SAVED_STATES,'scan_atoms':MAX_SCAN_ATOMS,
                        'scan_minimizations':MAX_SCAN_EVALUATIONS,'scan_types':MAX_SCAN_TYPES},
@@ -171,6 +202,10 @@ def workflow_tool_context():
                                     'minimizers':['cg','sd'],'box_modes':['fixed','iso'],
                                     'full_cartesian_product':True,
                                     'current_thermodynamics':'independent_binary_sites_v1'},
+            'explicit_sampling':{'operation':'run_schedule','save_state_form':'steps',
+                'steps':'strictly_increasing_literal_integer_list','start_step':'explicit_literal_integer',
+                'cycle_count':'complete_list_length','physical_stages_per_iteration':1,
+                'compilation':'literal_run_segments','scan_steps':'same_complete_list'},
             'physical_evaluation_performed': False,
             'limits_grant_resources': False}
 
@@ -201,6 +236,70 @@ def _positive_literal(value, maximum, description, *, minimum=1):
     return int(value)
 
 
+def _explicit_steps(value):
+    try:
+        steps=json.loads(value)
+    except (ValueError,TypeError):
+        raise ValueError('Scheduled timesteps require one literal JSON integer list') from None
+    if not isinstance(steps,list) or not 1<=len(steps)<=MAX_SAVED_STATES:
+        raise ValueError('Scheduled timesteps require 1..'+str(MAX_SAVED_STATES)+' complete steps')
+    for step in steps:
+        _literal_integer(step,2147483647,'Scheduled timestep',minimum=0)
+    if any(second<=first for first,second in zip(steps,steps[1:])):
+        raise ValueError('Scheduled timesteps must be strictly increasing without duplicates')
+    return steps
+
+
+def _run_schedule(words):
+    if len(words)!=4 or not re.fullmatch(_SAFE_ID,words[1]):
+        raise ValueError('run_schedule requires a safe state ID, literal starting step and quoted JSON timestep list')
+    start=_positive_literal(words[2],2147483647,'Scheduled starting timestep',minimum=0)
+    steps=_explicit_steps(words[3])
+    if steps[0]<=start:
+        raise ValueError('Every scheduled timestep must be greater than the starting timestep')
+    intervals=list(zip([start,*steps[:-1]],steps))
+    return dict(id=words[1],start_step=start,steps=steps,
+                run_steps_per_iteration=[last-first for first,last in intervals],
+                run_intervals=[list(pair) for pair in intervals],total_run_steps=steps[-1]-start)
+
+
+def scheduled_swap_accounting(schedule, every_steps, attempts_per_event, *,
+                              fix_created_step=None, recreate_per_segment=False):
+    """Count planned MC work over absolute steps; never infer observed acceptance."""
+    _literal_integer(every_steps,2147483647,'MC event interval')
+    _literal_integer(attempts_per_event,2147483647,'MC attempts per event')
+    # Revalidate metadata instead of trusting caller-created intervals or totals.
+    if not isinstance(schedule,dict) or not {'id','start_step','steps','run_intervals',
+            'run_steps_per_iteration','total_run_steps'}<=set(schedule):
+        raise ValueError('Scheduled MC accounting requires complete literal schedule metadata')
+    _literal_integer(schedule['start_step'],2147483647,'Scheduled starting timestep',minimum=0)
+    if not isinstance(schedule['id'],str):
+        raise ValueError('Scheduled MC accounting requires a safe state ID')
+    validated=_run_schedule(['run_schedule',schedule['id'],str(schedule['start_step']),
+                             json.dumps(schedule['steps'])])
+    if (schedule.get('run_intervals')!=validated['run_intervals'] or
+            schedule.get('run_steps_per_iteration')!=validated['run_steps_per_iteration'] or
+            schedule.get('total_run_steps')!=validated['total_run_steps']):
+        raise ValueError('Scheduled MC accounting requires consistent complete run intervals')
+    if type(recreate_per_segment) is not bool or (recreate_per_segment and fix_created_step is not None):
+        raise ValueError('MC accounting must distinguish a persistent fix from one explicitly recreated per segment')
+    if not recreate_per_segment:
+        _literal_integer(fix_created_step,2147483647,'MC fix creation timestep',minimum=0)
+        if fix_created_step>validated['start_step']:
+            raise ValueError('Persistent MC fix must exist before the scheduled run starts')
+    events=[]
+    for first,last in validated['run_intervals']:
+        created=first if recreate_per_segment else fix_created_step
+        # Fixed engine semantics: first exchange at creation+1; subsequent ones
+        # are N steps apart, preserving the phase across literal run segments.
+        def through(step):
+            return max(0,1+(step-created-1)//every_steps)
+        events.append(through(last)-through(first))
+    attempts=[count*attempts_per_event for count in events]
+    return dict(planned_events_per_segment=events,planned_events=sum(events),
+                planned_attempts_per_segment=attempts,planned_attempts=sum(attempts))
+
+
 def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
     """Inspect virtual cycles, without executing or evaluating scientific expressions.
 
@@ -211,7 +310,7 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
         raise ValueError('Cycle workflow must be text')
     if type(max_cycles) is not int or not 1 <= max_cycles <= 2147483647:
         raise ValueError('Invalid technical cycle bound')
-    cycles, records, line_multipliers = [], [], {}
+    cycles, records, line_multipliers, schedules = [], [], {}, []
     active, ids, prefixes, sample_variables = None, set(), set(), {}
     seed = None
     calculation_commands = 0
@@ -254,6 +353,17 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
             active['calculation_commands_total'] = active['count'] * active['calculation_commands_per_cycle']
             line_multipliers[number] = 1
             active = None
+        elif command == 'run_schedule':
+            if active is None:
+                raise ValueError('run_schedule must belong to one bounded cycle')
+            schedule=_run_schedule(words)
+            if active.get('run_schedule') is not None or any(s['id']==schedule['id'] for s in schedules):
+                raise ValueError('Scheduled state IDs must be unique, with one run_schedule per cycle')
+            if active['count']!=len(schedule['steps']):
+                raise ValueError('Scheduled cycle count must equal the complete timestep list length')
+            schedule.update(line=number,cycle_id=active['id'])
+            active['run_schedule']=schedule
+            schedules.append(schedule)
         elif command == 'sample_swap_types':
             if len(words) != 4 or not re.fullmatch(_SAFE_ID, words[1]) or active is None:
                 raise ValueError('sample_swap_types requires a safe prefix, type count and seed inside a cycle')
@@ -280,7 +390,7 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
                 raise ValueError('Scientific cycle cannot reopen/overwrite output files; declare dumps before it or use emit_table/append')
             if command == 'variable' and len(words) >= 3 and words[2] == 'index':
                 raise ValueError('Index variables survive iterations; use capture/equal or sampling tools inside cycles')
-        if command in {'run', 'minimize'}:
+        if command in {'run', 'minimize', 'run_schedule'}:
             multiplier = active['count'] if active else 1
             calculation_commands += multiplier
             if active is not None:
@@ -288,6 +398,9 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
     if active is not None:
         raise ValueError('Unclosed scientific cycle '+active['id'])
     for number, content, words, cycle_id in records:
+        if cycle_id is not None and words[0] in {'run','minimize'} and any(
+                s['cycle_id']==cycle_id for s in schedules):
+            raise ValueError('Scheduled cycles have exactly one run_schedule physical stage; no extra run/minimize')
         if cycles and re.search(r'\bnext\s*\(', content):
             raise ValueError('next() expressions can alter cycle control and are not allowed')
         if cycles and words[0] == 'run':
@@ -325,7 +438,7 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
     return dict(version=VERSION, cycles=cycles, line_multipliers=line_multipliers,
                 sample_variables=sample_variables, calculation_commands=calculation_commands,
                 sampling_rng='shared_equal_style_stream' if sample_variables else None,
-                sampling_seed=seed)
+                sampling_seed=seed,run_schedules=schedules)
 
 
 def _table_headers(name, tables, prefix):
@@ -446,26 +559,42 @@ def state_scan_metadata(body, cycles=None, *, plan=None, atom_count=None, type_e
         if words[0]=='save_state':
             owner=next((c for c in cycles['cycles'] if c['begin_line']<number<c['end_line']),None)
             if len(words)!=5 or not re.fullmatch(_SAFE_ID,words[1]) or owner is None:
-                raise ValueError('save_state requires an ID, dump, first step and stride inside one bounded cycle')
+                raise ValueError('save_state requires an ID, dump and literal sampling inside one bounded cycle')
             if words[1] in series or any(item['cycle_id']==owner['id'] for item in series.values()):
                 raise ValueError('Save exactly one complete state per owning cycle; state IDs must be unique')
             _literal_integer(owner['count'],MAX_SAVED_STATES,'Saved state count')
-            first=_positive_literal(words[3],2147483647,'First saved timestep',minimum=0)
-            stride=_positive_literal(words[4],2147483647,'Saved timestep stride')
-            last=first+(owner['count']-1)*stride
-            if last>2147483647:
-                raise ValueError('Saved timestep domain exceeds the explicit bound')
+            schedule=owner.get('run_schedule')
+            if words[3]=='steps':
+                steps=_explicit_steps(words[4])
+                if (schedule is None or words[1]!=schedule['id'] or steps!=schedule['steps']
+                        or number<=schedule['line'] or len(steps)!=owner['count']):
+                    raise ValueError('save_state steps must follow the SAME complete run_schedule ID and timestep list')
+                first,last=steps[0],steps[-1]
+            else:
+                if schedule is not None:
+                    raise ValueError('Scheduled cycles require the SAME explicit save_state steps list')
+                first=_positive_literal(words[3],2147483647,'First saved timestep',minimum=0)
+                stride=_positive_literal(words[4],2147483647,'Saved timestep stride')
+                last=first+(owner['count']-1)*stride
+                if last>2147483647:
+                    raise ValueError('Saved timestep domain exceeds the explicit bound')
             filename=_basename(words[2])
             if filename in writers:
                 raise ValueError('State/scan outputs cannot have multiple writers')
             writers[filename]=number
-            run_steps=sum(int(tokens[1]) for text in body.splitlines()[owner['begin_line']:owner['end_line']-1]
-                          if (tokens:=workflow_tokens(text)) and tokens[0]=='run')
-            series[words[1]]=dict(id=words[1],line=number,file=filename,cycle_id=owner['id'],
-                count=owner['count'],first_step=first,stride=stride,last_step=last,
-                run_steps_per_cycle=run_steps,total_run_steps=run_steps*owner['count'],
+            saved=dict(id=words[1],line=number,file=filename,cycle_id=owner['id'],
+                count=owner['count'],first_step=first,last_step=last,
                 fields=['id','type','x','y','z','vx','vy','vz','ix','iy','iz'],
                 id_preservation='purge_yes_add_keep',full_precision=True)
+            if schedule is not None:
+                saved.update(sampling='explicit_steps',steps=list(steps),start_step=schedule['start_step'],
+                    run_steps_per_iteration=list(schedule['run_steps_per_iteration']),
+                    total_run_steps=schedule['total_run_steps'])
+            else:
+                run_steps=sum(int(tokens[1]) for text in body.splitlines()[owner['begin_line']:owner['end_line']-1]
+                              if (tokens:=workflow_tokens(text)) and tokens[0]=='run')
+                saved.update(stride=stride,run_steps_per_cycle=run_steps,total_run_steps=run_steps*owner['count'])
+            series[words[1]]=saved
         elif words[0]=='scan_sites':
             if any(c['begin_line']<number<c['end_line'] for c in cycles['cycles']):
                 raise ValueError('scan_sites owns its finite loops and cannot be placed inside a model cycle')
@@ -518,15 +647,21 @@ def state_scan_metadata(body, cycles=None, *, plan=None, atom_count=None, type_e
                                                     diagnostic['pressure_tolerance'],rel_tol=1e-12)):
                             raise ValueError('Scan and analysis must freeze the SAME force/pressure diagnostics and minimization bounds')
             scan_ids.add(words[1])
-            scans.append(dict(id=words[1],line=number,specification=spec,state_count=source['count'],
+            scan=dict(id=words[1],line=number,specification=spec,state_count=source['count'],
                 site_domain=[1,spec['atom_count']],state_domain=[1,source['count']],
                 independent_restore=True,baseline_minimizations=source['count'],
                 variant_minimizations=source['count']*spec['atom_count']*len(spec['variants']),
                 calculation_commands=evaluations,rows=source['count']*spec['atom_count']*(1+len(spec['variants'])),
                 maximum_force_evaluations=source['count']*spec['baseline_relaxation']['max_evaluations']+
                     source['count']*spec['atom_count']*len(spec['variants'])*spec['variant_relaxation']['max_evaluations'],
-                retry_count=0,additional_submissions=0))
-    return dict(version=1,states=list(series.values()),scans=scans,
+                retry_count=0,additional_submissions=0)
+            if source.get('sampling')=='explicit_steps':
+                scan['source_timesteps']=list(source['steps'])
+            scans.append(scan)
+    for schedule in cycles['run_schedules']:
+        if schedule['id'] not in series or series[schedule['id']]['cycle_id']!=schedule['cycle_id']:
+            raise ValueError('Every run_schedule requires its complete matching save_state steps operation')
+    return dict(version=2 if cycles['run_schedules'] else 1,states=list(series.values()),scans=scans,
                 calculation_commands=sum(s['calculation_commands'] for s in scans),
                 output_files=list(writers),limits_grant_resources=False)
 
@@ -582,9 +717,15 @@ def _lower_scan(scan, source, tables, prefix, reload_header):
         payload=' '.join(entries[c['name']] for c in scan_columns(spec['elements']))
         return f'print "{payload}" append {prefix}{spec["table_file"]}'
     result=_table_headers(spec['table_file'],tables,prefix)
-    result.extend([f'variable {state} loop {source["count"]}',f'label {name}_states',
-                   f'variable {step} equal $({source["first_step"]}+(v_{state}-1)*{source["stride"]}:%.0f)',
-                   'clear',*reload_header,
+    explicit=source.get('sampling')=='explicit_steps'
+    if explicit:
+        # next requires the same variable style in one synchronized operation.
+        result.extend([f'variable {state} index '+ ' '.join(str(i) for i in range(1,source['count']+1)),
+                       f'variable {step} index '+ ' '.join(map(str,source['steps'])),f'label {name}_states'])
+    else:
+        result.extend([f'variable {state} loop {source["count"]}',f'label {name}_states',
+                       f'variable {step} equal $({source["first_step"]}+(v_{state}-1)*{source["stride"]}:%.0f)'])
+    result.extend(['clear',*reload_header,
                    f'read_dump {prefix}{source["file"]} ${{{step}}} x y z vx vy vz ix iy iz box yes purge yes add keep',
                    f'if "$(count(all)) != {spec["atom_count"]}" then "quit 91"'])
     result.extend(_scan_relax_lines(name,baseline,f'{scan["id"]} state ${{{state}}} site 0 variant -1'))
@@ -613,7 +754,7 @@ def _lower_scan(scan, source, tables, prefix, reload_header):
         observed,values=_scan_values(name,variant_relax,spec['elements'])
         result.extend(observed);result.append(row(values,variant['id'],0))
     result.extend([f'next {site}',f'jump SELF {name}_sites',
-                   f'next {state}',f'jump SELF {name}_states'])
+                   f'next {state}'+(' '+step if explicit else ''),f'jump SELF {name}_states'])
     result.extend(restore_cache())
     # Keep ordinary workflow variable namespace intact; trusted scratch names
     # cannot be supplied or reused by a model and are scoped to this scan ID.
@@ -630,8 +771,24 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
     samples = {sample['line']: sample for cycle in metadata['cycles'] for sample in cycle['samples']}
     states={item['line']:item for item in state_scans['states']}
     scans={item['line']:item for item in state_scans['scans']}
+    schedules={item['line']:item for item in metadata['run_schedules']}
     lines = body.splitlines()
-    for number, line in enumerate(lines, 1):
+    def entries():
+        number=1
+        while number<=len(lines):
+            cycle=starts.get(number)
+            if lower_cycles and cycle is not None and 'run_schedule' in cycle:
+                # The bounded body is repeated lexically, never with a model run
+                # expression. No clear/reset or extra calculation is inserted.
+                yield number,lines[number-1],None
+                for iteration in range(cycle['count']):
+                    for owned in range(number+1,cycle['end_line']+1):
+                        yield owned,lines[owned-1],iteration
+                number=cycle['end_line']+1
+            else:
+                yield number,lines[number-1],None
+                number+=1
+    for number, line, iteration in entries():
         try:
             words = shlex.split(line, comments=True)
         except ValueError:
@@ -650,10 +807,10 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
                     if writer[1] not in initialized:
                         result.extend(_table_headers(writer[1], tables, prefix))
                         initialized.add(writer[1])
-            if lower_cycles:
+            if lower_cycles and 'run_schedule' not in cycle:
                 result.extend([f'variable __alr_cycle_{cycle["id"]} loop {cycle["count"]}',
                                f'label __alr_label_{cycle["id"]}'])
-            else:
+            elif not lower_cycles:
                 result.append(line)
         elif words[0] == 'end_cycle':
             cycle = ends[number]
@@ -661,8 +818,16 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
                 for sample in cycle['samples']:
                     result.extend([f'variable {name} delete' for name in sample['variables']])
                     result.append(f'variable __alr_draw_{sample["prefix"]} delete')
-                result.extend([f'next __alr_cycle_{cycle["id"]}',
-                               f'jump SELF __alr_label_{cycle["id"]}'])
+                if 'run_schedule' not in cycle:
+                    result.extend([f'next __alr_cycle_{cycle["id"]}',
+                                   f'jump SELF __alr_label_{cycle["id"]}'])
+            else:
+                result.append(line)
+        elif words[0]=='run_schedule':
+            schedule=schedules[number]
+            if lower_cycles:
+                first,last=schedule['run_intervals'][iteration]
+                result.extend([f'if "$(step) != {first}" then "quit 90"',f'run {last-first}'])
             else:
                 result.append(line)
         elif words[0] == 'sample_swap_types':
@@ -678,8 +843,12 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
         elif words[0]=='save_state':
             saved=states[number]
             if lower_cycles:
-                index='__alr_cycle_'+saved['cycle_id']
-                result.extend([f'if "$(step) != {saved["first_step"]}+(v_{index}-1)*{saved["stride"]}" then "quit 90"',
+                if saved.get('sampling')=='explicit_steps':
+                    expected=str(saved['steps'][iteration])
+                else:
+                    index='__alr_cycle_'+saved['cycle_id']
+                    expected=f'{saved["first_step"]}+(v_{index}-1)*{saved["stride"]}'
+                result.extend([f'if "$(step) != {expected}" then "quit 90"',
                     f'write_dump all custom {prefix}{saved["file"]} id type x y z vx vy vz ix iy iz modify append yes sort id format float %.17g'])
             else:
                 result.append(line)

@@ -120,9 +120,14 @@ def condition_messages(sources, mode='research'):
     model_sources = [{key: value for key, value in source.items() if key != 'text'}
                      | {'source_sha256': sha256(canonical(source))}
                      if source['origin'] in {'user', 'paper'} else source for source in sources]
-    return [{'role': 'system', 'content': system},
-            {'role': 'user', 'content': canonical({'sources': model_sources,
-                'source_locator_adapter': condition_evidence_context(sources)}).decode()}]
+    messages = [{'role': 'system', 'content': system},
+                {'role': 'user', 'content': canonical({'sources': model_sources,
+                    'source_locator_adapter': condition_evidence_context(sources)}).decode()}]
+    from .scientific_adapters import ScientificAdapterError, prepare_stage_messages
+    try:
+        return prepare_stage_messages('condition_extraction', messages, {'sources': sources})[0]
+    except ScientificAdapterError as error:
+        raise TaskError(str(error)) from None
 
 
 # 模型偶尔会多给一个无关键（例如 units/notes/summary）。这些被忽略而不是被采纳，
@@ -332,6 +337,13 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
         raise TaskError('任务已更新或冻结，请先核对当前版本')
     bundle = source_bundle(sources)
     messages = condition_messages(bundle, current['mode'])
+    from .scientific_adapters import ScientificAdapterError, validate_prepared_messages
+    def check_messages(value):
+        try:
+            return validate_prepared_messages('condition_extraction', value, {'sources': bundle})
+        except ScientificAdapterError as error:
+            raise TaskError(str(error)) from None
+    check_messages(messages)
     request_id = condition_request_identity(client, store, identifier, revision, bundle, request_id,
                                             retry_of=retry_of)
     if not store.begin_condition_request(identifier, revision, request_id, sha256(canonical(bundle)),
@@ -341,6 +353,7 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
     try:
         store.record_condition_request_event(identifier, request_id, 'call_started', call_id=request_id)
         _check_condition_dispatch(store, identifier, request_id, request_id)
+        check_messages(messages)
         completion = client.complete_json(request_id, messages)
         store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=request_id,
                                              receipt=completion['receipt'])
@@ -363,6 +376,7 @@ def generate_condition_draft(client, store, identifier, revision, sources, reque
             store.record_condition_request_event(identifier, request_id, 'repair_started', call_id=repair_id)
             call_id = repair_id
             _check_condition_dispatch(store, identifier, request_id, repair_id)
+            check_messages(repair_messages)
             repair = client.complete_json(repair_id, repair_messages)
             store.record_condition_request_event(identifier, request_id, 'model_completed', call_id=repair_id,
                                                  receipt=repair['receipt'])

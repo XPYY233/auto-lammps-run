@@ -90,19 +90,34 @@ function collect(root,predicate,found=[]){
   for(const child of root.children||[]) if(child&&typeof child==='object'&&child.children) collect(child,predicate,found);
   return found;
 }
-test('冻结任务不发送条件写入，也不声称重新调用模型',async()=>{
+test('冻结任务只引导至正常候选答复入口，不显示重复条件编辑或后台交接',async()=>{
   const {context,calls,notices,elements}=setupPanel({status:'conditions_frozen'});
-  vm.runInContext('renderCandidateClarification('+JSON.stringify(clarificationJob)+')',context);
-  assert.equal(vm.runInContext('candidateAnswers.length',context),5);
-  vm.runInContext("candidateAnswers[0].answer.value='20260928'",context);
+  const job={...clarificationJob,result:{...clarificationJob.result,
+    questions:[{question:'请补充采样方案',why:'需要完整范围'}]}};
+  vm.runInContext('renderCandidateClarification('+JSON.stringify(job)+')',context);
+  assert.equal(vm.runInContext('candidateAnswers.length',context),0);
   await vm.runInContext('saveClarificationAnswers()',context);
   assert.deepEqual(calls,[]);
   assert.match(notices.at(-1).message,/已冻结版本不可修改/);
-  assert.match(notices.at(-1).message,/没有重新调用模型/);
-  const save=collect(elements.get('#candidate-clarification'),item=>item.id==='save-clarification');
-  assert.equal(save.length,1);
-  assert.equal(save[0].disabled,true);
-  assert.equal(save[0].textContent,'冻结版本不可修改');
+  const box=elements.get('#candidate-clarification');
+  assert.equal(collect(box,item=>item.id==='save-clarification').length,0);
+  assert.equal(collect(box,item=>item.tagName==='textarea').length,0);
+  assert.equal(collect(box,item=>item.textContent==='打开逐条问题与答复').length,1);
+  const text=collect(box,item=>item.textContent).map(item=>item.textContent).join('\n');
+  assert.match(text,/答复追加到本任务的方案历史/);
+  assert.match(text,/三轮上限/);
+  assert.doesNotMatch(text,/\[object Object\]|请把答复交给控制端|冻结版本不可修改/);
+});
+
+test('未冻结条件编辑表单可读显示结构化问题',()=>{
+  const {context,elements}=setupPanel({status:'draft'});
+  const job={...clarificationJob,result:{...clarificationJob.result,
+    questions:[{question:'请给出初始化种子',why:'复查'}]}};
+  vm.runInContext('renderCandidateClarification('+JSON.stringify(job)+')',context);
+  const text=collect(elements.get('#candidate-clarification'),item=>item.textContent)
+    .map(item=>item.textContent).join('\n');
+  assert.match(text,/请给出初始化种子/);
+  assert.doesNotMatch(text,/\[object Object\]/);
 });
 
 test('可编辑任务按既有条件证据端点写入答复并链式推进版本',async()=>{

@@ -65,8 +65,13 @@ def reference_messages(sources):
         'questions 每项仅含 field,question；结果定义或方法缺项可用 quantity 或 analysis。'
         '空列表是允许的；源文不能支持时不要造条目。可用输入字段：' + canonical(FIELDS).decode()
     )
-    return [dict(role='system', content=instruction),
-            dict(role='user', content=canonical(dict(sources=sources)).decode())]
+    messages = [dict(role='system', content=instruction),
+                dict(role='user', content=canonical(dict(sources=sources)).decode())]
+    from .scientific_adapters import ScientificAdapterError, prepare_stage_messages
+    try:
+        return prepare_stage_messages('reference_extraction', messages, {'sources': sources})[0]
+    except ScientificAdapterError as error:
+        raise TaskError(str(error)) from None
 
 
 def validate_reference(sources, value):
@@ -130,12 +135,36 @@ def generate_reference_draft(client, store, identifier, revision, csv_texts):
     if current['mode'] != 'reproduction':
         raise TaskError('此接口仅用于参考端，普通科研不要求论文')
     sources, exports = reference_sources(csv_texts)
+    unreserved = []
+    # A new application contract must not manufacture a new retry identity for
+    # the same evidence, including old successful or uncertain requests.
+    for prior in store.reference_requests(identifier):
+        saved, saved_operation = store.reference_intent(identifier, prior['request_id'])
+        if saved.get('sources') != sources or saved.get('exports') != exports:
+            continue
+        if saved.get('accounting_sha256') != accounting_binding(client):
+            raise TaskError('请使用原参考模型记账配置核对；不会发送新请求')
+        if prior['imported']:
+            return current
+        if client.calls.lookup(prior['request_id']) is not None:
+            return recover_reference_draft(client, store, identifier, revision, prior['request_id'])
+        unreserved.append((saved, saved_operation))
     messages = reference_messages(sources)
+    from .scientific_adapters import ScientificAdapterError, validate_prepared_messages
+    try:
+        validate_prepared_messages('reference_extraction', messages, {'sources': sources})
+    except ScientificAdapterError as error:
+        raise TaskError(str(error)) from None
     body = request_body(client.calls.config, messages)
     context = dict(version=VERSION, task_id=identifier, sources=sources,
                    exports=exports, request_sha256=sha256(body), accounting_sha256=accounting_binding(client))
     operation = sha256(canonical(context))
     request_id = operation[:32]
+    # Saving intent precedes ledger reservation. A crash in that gap leaves a
+    # genuinely unsent request, whose first dispatch may reuse the exact intent.
+    # Changed contracts cannot silently replace its immutable request binding.
+    if any(saved != context or saved_operation != operation for saved, saved_operation in unreserved):
+        raise ModelError('unreserved_adapter_context_changed')
     if request_id in current.get('reference_batches', {}):
         batch = current['reference_batches'][request_id]
         if batch['operation_sha256'] != operation:
@@ -146,6 +175,10 @@ def generate_reference_draft(client, store, identifier, revision, csv_texts):
     store.save_reference_intent(identifier, revision, request_id, context, operation)
     previous = client.calls.lookup(request_id)
     if previous is None:
+        try:
+            validate_prepared_messages('reference_extraction', messages, {'sources': sources})
+        except ScientificAdapterError as error:
+            raise TaskError(str(error)) from None
         completion = client.complete_json(request_id, messages)
     else:
         receipt = previous['receipt']

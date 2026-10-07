@@ -638,9 +638,21 @@ function renderCandidateClarification(job) {
     node('p',`准备方案时模型要求补充 ${questions.length} 项信息；补齐前不会生成结构、势函数调用或输入脚本，也不会提交计算。`,'plot-caption'));
   if(job.result?.request_id) box.append(node('p','模型请求记录：'+job.result.request_id,'source-hash'));
   if(!questions.length) {box.append(node('p','服务端标记为需要澄清，但没有返回具体问题，请核对准备记录。','form-note'));return;}
+  if(frozen) {
+    box.append(node('p','原研究条件已固定。请在“方案准备需要补充条件”区逐条答复；答复追加到本任务的方案历史，仍共用首版在内三轮上限，不会改写冻结条件。','form-note'));
+    const go=node('button','打开逐条问题与答复','primary');go.type='button';
+    go.onclick=()=>{
+      $('#advanced-task').open=true;
+      $('#candidate-attention').scrollIntoView({behavior:'smooth',block:'start'});
+      $('#candidate-attention').querySelector('textarea')?.focus();
+    };
+    box.append(go);
+    return;
+  }
   const form=node('form',undefined,'clarification-form');form.id='clarification-form';
   const cell=(text,control)=>{const label=node('label',undefined,'clarification-cell');label.append(node('span',text),control);return label;};
-  for(const [index,question] of questions.entries()) {
+  for(const [index,rawQuestion] of questions.entries()) {
+    const question=questionText(rawQuestion);
     const answer=node('textarea');answer.rows=3;answer.maxLength=4000;answer.className='clarification-answer';
     answer.setAttribute('aria-label',`问题 ${index+1} 的答复`);
     const unit=node('input');unit.maxLength=80;unit.className='clarification-unit';unit.placeholder='可留空';
@@ -653,18 +665,15 @@ function renderCandidateClarification(job) {
     form.append(card);candidateAnswers.push({question,answer,unit,field});
   }
   box.append(form);
-  box.append(frozen?
-    node('p',`此任务已冻结（revision ${current.revision}）。服务端规定冻结版本的条件字段只读：答复无法写入条件，也不会重新调用模型。请把答复交给控制端，由控制端决定新一轮准备。`,'form-note'):
-    node('p','答复会以“用户明确指定”写入所选条件字段（复用既有条件证据接口）。写入后需在条件区逐项选择、确认并重新冻结，才能再次准备方案。','form-note'));
-  if(frozen) box.append(node('p','需要控制端提供：允许同一任务追加新的准备轮次（原记录与澄清问题不被覆盖），或受控的新修订入口。','form-note'));
+  box.append(node('p','答复会以“用户明确指定”写入所选条件字段（复用既有条件证据接口）。写入后需在条件区逐项选择、确认并重新冻结，才能再次准备方案。','form-note'));
   const actions=node('div',undefined,'actions');
-  const save=node('button',frozen?'冻结版本不可修改':'记录澄清答复',frozen?'quiet':'primary');
-  save.type='button';save.id='save-clarification';save.disabled=frozen;
+  const save=node('button','记录澄清答复','primary');
+  save.type='button';save.id='save-clarification';
   save.onclick=()=>action(saveClarificationAnswers);
   const copy=node('button','复制澄清答复','quiet');copy.type='button';copy.id='copy-clarification';
   copy.onclick=()=>action(copyClarificationAnswers);
   actions.append(save,copy);box.append(actions,
-    node('p',frozen?'答复只在本机生成文本：复制后由你交给控制端；页面不会发出必然被拒绝的写入请求。':'尚未写入任何条件。','form-note'));
+    node('p','尚未写入任何条件。','form-note'));
 }
 async function copyClarificationAnswers() {
   const text=clarificationAnswersText();

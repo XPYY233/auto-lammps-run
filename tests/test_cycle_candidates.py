@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from auto_lammps.agent_candidates import CandidateError, candidate_messages, validate_body
 from auto_lammps.authorization import candidate_check
-from auto_lammps.candidate_tools import expand_tools
+from auto_lammps.candidate_tools import expand_tools, cycle_metadata
 import test_atom_swap_candidates as swap_fixture
 
 
@@ -73,9 +73,30 @@ class CycleScreenTests(unittest.TestCase):
         self.assertIn('warren_cowley_first_shell',messages[0]['content'])
         self.assertIn('structural_contract',json.loads(messages[1]['content'])['analysis_adapter'])
         tool=json.loads(messages[1]['content'])['workflow_adapter']
-        self.assertEqual(tool['version'],4)
+        self.assertEqual(tool['version'],5)
         self.assertIn('sample_swap_types',tool['operations'])
         self.assertFalse(tool['limits_grant_resources'])
+
+    def test_scheduled_cycle_preserves_sampler_lifecycle_without_extra_physics(self):
+        steps=[5,17,61]
+        body='\n'.join(['begin_cycle synthetic 3','sample_swap_types pair 2 24680',
+            'fix exchange all atom/swap 1 7 34567 220 types ${pair_i} ${pair_j} ke no',
+            "run_schedule saved 0 '[5,17,61]'","save_state saved states.dump steps '[5,17,61]'",
+            'unfix exchange','emit_table final.data "$(step) $(pe)"','end_cycle synthetic'])
+        metadata=cycle_metadata(body)
+        self.assertEqual(metadata['calculation_commands'],3)
+        self.assertEqual(metadata['cycles'][0]['calculation_commands_total'],3)
+        script=expand_tools(body,PLAN,'/output/',lower_cycles=True)
+        import shlex
+        self.assertEqual([int(t[1]) for line in script.splitlines()
+            if (t:=shlex.split(line)) and t[0]=='run'],[5,12,44])
+        self.assertEqual(script.count('variable pair_i index'),len(steps))
+        self.assertEqual(script.count('variable pair_i delete'),len(steps))
+        self.assertEqual(script.count('variable pair_j delete'),len(steps))
+        self.assertEqual(script.count('variable __alr_draw_pair delete'),len(steps))
+        self.assertEqual(script.count('# columns: step energy'),1)
+        self.assertNotIn('run 0',script)
+        self.assertNotIn('next __alr_cycle_synthetic',script)
 
 
 class CycleFrozenCandidateTests(unittest.TestCase):
@@ -106,7 +127,7 @@ class CycleFrozenCandidateTests(unittest.TestCase):
         self.assertNotIn('sample_swap_types',script)
         self.assertEqual(len(record['script_screen']['bounded_cycles']),9)
         self.assertEqual(self.transport.call_count,1)
-        self.assertEqual(record['input']['workflow_adapter']['version'],4)
+        self.assertEqual(record['input']['workflow_adapter']['version'],5)
 
     def test_mixed_eighteen_sources_bind_structural_plan_to_the_same_grant(self):
         self.configure()

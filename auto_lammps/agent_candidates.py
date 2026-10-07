@@ -20,7 +20,8 @@ from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX
                        MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
 from .candidate_tools import (GUIDE, expand_tools, check_table_writers, workflow_tokens,
-                              cycle_metadata, workflow_tool_context, state_scan_metadata)
+                              cycle_metadata, workflow_tool_context, state_scan_metadata,
+                              scheduled_swap_accounting)
 from .coordination_analysis import GUIDE as STRUCTURAL_GUIDE
 from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
@@ -31,7 +32,7 @@ COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', '
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
             'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group', 'load_structure', 'reset_structure', 'delete_atoms', 'write_dump',
-            'begin_cycle', 'end_cycle', 'sample_swap_types', 'save_state', 'scan_sites'}
+            'begin_cycle', 'end_cycle', 'sample_swap_types', 'save_state', 'scan_sites', 'run_schedule'}
 FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time', 'atom/swap'}
 COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom', 'reduce'}
 RESERVED_OUTPUTS = {'stdout.txt', 'stderr.txt', 'log.lammps'}
@@ -194,6 +195,10 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     semantic_errors=[]
     swaps=[]
     active_swaps=set()
+    swap_creation = {}
+    swap_work = {}
+    current_step = 0  # Every candidate header starts from its frozen atomic data.
+    total_run_steps = 0
     pressure_computes,current_computes=set(),set()
     thermo_computes=set()
     counts = structures or {}
@@ -204,11 +209,37 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     except ValueError as error:
         raise CandidateError(str(error)) from error
     cycle_by_line = {item['begin_line']:item for item in cycles['cycles']}
+    schedule_by_line = {item['line']:item for item in cycles.get('run_schedules', [])}
     current_cycle = None
     sampled_pairs = []
     scan_by_line={item['line']:item for item in state_scans['scans']}
     state_by_line={item['line']:item for item in state_scans['states']}
     managed_paths={output_prefix+name for name in state_scans['output_files']}
+
+    def record_swap_work(index, schedule, *, command, line, recreated=False, cycle_id=None):
+        work = swap_work[index]
+        if not work['complete']:
+            return
+        swap = swaps[index]
+        try:
+            counted = scheduled_swap_accounting(schedule, swap['every_steps'], swap['attempts_per_event'],
+                fix_created_step=None if recreated else work['created_step'], recreate_per_segment=recreated)
+        except ValueError:
+            work['complete'] = False
+            return
+        work['segments'].append(dict(command=command, line=line, cycle_id=cycle_id,
+            start_step=schedule['start_step'], steps=schedule['steps'],
+            total_run_steps=schedule['total_run_steps'],
+            **({'run_schedule_id': schedule['id']} if command == 'run_schedule' else {}), **counted))
+
+    def record_literal_work(index, first, last, *, line, cycle_id=None):
+        if first is None or last is None:
+            swap_work[index]['complete'] = False
+        elif last > first:
+            record_swap_work(index, dict(id='literal_run_'+str(line), start_step=first, steps=[last],
+                run_intervals=[[first, last]], run_steps_per_iteration=[last-first], total_run_steps=last-first),
+                command='bounded_cycle_runs' if cycle_id else 'run', line=line, cycle_id=cycle_id)
+
     for line_number, line in enumerate(lines, 1):
         try:
             tokens = workflow_tokens(line)
@@ -220,6 +251,8 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
         if command == 'begin_cycle':
             current_cycle = cycle_by_line[line_number]
             baseline_fixes, baseline_variables = dict(active_fixes), dict(variables)
+            baseline_swap_indices = {name: swap_creation[name]['index'] for name in active_swaps}
+            cycle_start_step, cycle_native_run_steps = current_step, 0
             cycle_index_definitions = set()
         elif command == 'sample_swap_types':
             sample = next(item for item in current_cycle['samples'] if item['line'] == line_number)
@@ -236,6 +269,15 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
                     raise CandidateError('Delete index variables created inside a cycle before repeating')
             for name in sample_names:
                 variables.pop(name,None)
+            if 'run_schedule' not in current_cycle and cycle_native_run_steps:
+                # An unchanged persistent MC fix spans all literal runs of this
+                # cycle. Count that contiguous interval once, rather than
+                # pretending multiplied source lines are the actual run order.
+                for identifier, index in baseline_swap_indices.items():
+                    if identifier not in active_swaps or swap_creation[identifier]['index'] != index:
+                        swap_work[index]['complete'] = False
+                    record_literal_work(index, cycle_start_step, current_step,
+                                        line=current_cycle['begin_line'], cycle_id=current_cycle['id'])
             sampled_pairs = []
             current_cycle = None
         undefined=set(re.findall(r'\$\{([A-Za-z][A-Za-z0-9_]*)\}',line))-set(variables)
@@ -262,6 +304,9 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             # The trusted scan restores its full initial baseline independently.
             # Fixes/computes/groups from a previous native phase cannot survive.
             groups={};deleted=set();active_swaps.clear()
+            # The trusted scan ends by reading its final baseline restart,
+            # whose timestep is the complete saved-state ordinal.
+            current_step = scan['state_count']
             pressure_computes,current_computes=set(),set();thermo_computes=set()
         if command in {'load_structure','reset_structure'}:
             if command=='reset_structure':
@@ -273,6 +318,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
                 loaded.add(tokens[1])
             atom_count=counts[tokens[1]];groups={};deleted=set()
             active_swaps.clear()
+            current_step = 0
             active_fixes.clear()
             pressure_computes,current_computes=set(),set()
             thermo_computes=set()
@@ -322,15 +368,24 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             if current_cycle:
                 swap['cycle_count'] = current_cycle['count']
             active_swaps.add(tokens[1]);swaps.append(swap)
+            swap_creation[tokens[1]] = {'cycle_id': current_cycle['id'] if current_cycle else None,
+                                       'index': len(swaps)-1}
+            swap_work[len(swaps)-1] = dict(created_step=current_step, segments=[],
+                complete=current_cycle is None or 'run_schedule' in current_cycle)
         if command == 'fix':
             active_fixes[tokens[1]] = tuple(tokens[2:])
         if command == 'unfix':
             if len(tokens)!=2 or tokens[1] not in active_fixes:
                 raise CandidateError('unfix requires one existing active fix ID')
+            if current_cycle and 'run_schedule' not in current_cycle and tokens[1] in baseline_swap_indices:
+                swap_work[baseline_swap_indices[tokens[1]]]['complete'] = False
             active_swaps.discard(tokens[1])
             active_fixes.pop(tokens[1],None)
         if command == 'reset_timestep' and active_swaps:
             raise CandidateError('Unfix atom/swap before reset_timestep; its MC schedule cannot survive a timestep reset')
+        if command == 'reset_timestep':
+            current_step = (int(tokens[1]) if len(tokens) == 2 and tokens[1].isdigit()
+                            and int(tokens[1]) <= 2147483647 else None)
         if command == 'compute' and (len(tokens) < 4 or tokens[3] not in COMPUTE_STYLES):
             raise CandidateError('Unsupported compute style')
         if command=='compute' and tokens[3]=='pressure':
@@ -341,9 +396,47 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             thermo_computes=set(re.findall(r'\bc_([A-Za-z][A-Za-z0-9_]*)',line))
         if command in {'reset_timestep','displace_atoms','change_box','set'}:
             current_computes.clear()
-        if command in {'run', 'minimize'}:
+        if command in {'run', 'minimize', 'run_schedule'}:
+            multiplier = cycles['line_multipliers'].get(line_number,1)
+            if command == 'run':
+                if (len(tokens) < 2 or not re.fullmatch(r'[0-9]{1,10}', tokens[1])
+                        or int(tokens[1]) > 2147483647):
+                    raise CandidateError('run requires an explicit literal step count; use the bounded run_schedule tool for supplied timesteps')
+                options = tokens[2:]
+                if (len(options) % 2 or any(options[i] not in {'pre', 'post'} or options[i+1] not in {'yes', 'no'}
+                        for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options[::2])):
+                    raise CandidateError('run options are limited to pre/post yes/no; arbitrary dynamic dispatch is unsupported')
+                steps = int(tokens[1]) * multiplier
+                first_step = current_step
+                total_run_steps += steps
+                if current_step is not None:
+                    current_step += steps
+                if current_cycle:
+                    cycle_native_run_steps += steps
+                elif steps:
+                    for identifier in sorted(active_swaps):
+                        record_literal_work(swap_creation[identifier]['index'], first_step, current_step,
+                                            line=line_number)
+            if command == 'minimize':
+                # Its converged iteration count changes the actual timestep.
+                # A later schedule needs an explicit reset before MC creation.
+                current_step = None
             evaluations += cycles['line_multipliers'].get(line_number,1)
             current_computes=pressure_computes & thermo_computes
+            if command == 'run_schedule':
+                schedule = schedule_by_line[line_number]
+                if current_step != schedule['start_step']:
+                    raise CandidateError('run_schedule starting timestep must match the statically established preceding workflow step')
+                for identifier in sorted(active_swaps):
+                    creation = swap_creation[identifier]
+                    recreated = creation['cycle_id'] == schedule['cycle_id']
+                    index = creation['index']
+                    record_swap_work(index, schedule, command=command, line=line_number,
+                                     recreated=recreated, cycle_id=schedule['cycle_id'])
+                    if not swap_work[index]['complete']:
+                        raise CandidateError('Scheduled MC accounting requires the complete known fix lifecycle and timestep phase')
+                total_run_steps += schedule['total_run_steps']
+                current_step = schedule['steps'][-1]
         targets = []
         if command == 'dump':
             if len(tokens) < 6 or tokens[3] not in {'custom', 'atom', 'xyz'}:
@@ -386,9 +479,32 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             'execution_authorized': False}
     if cycles['cycles']:
         result['bounded_cycles'] = cycles['cycles']
+    if cycles.get('run_schedules'):
+        result['run_schedules'] = cycles['run_schedules']
+        result['total_run_steps'] = total_run_steps
+    for index, work in swap_work.items():
+        if not cycles.get('run_schedules'):
+            continue
+        if not work['complete']:
+            raise CandidateError('Scheduled MC accounting requires the complete known fix lifecycle and timestep phase')
+        segments = work['segments']
+        identifiers = [segment['run_schedule_id'] for segment in segments if 'run_schedule_id' in segment]
+        swaps[index].update(planned_work_scope='complete_dynamics_for_fix_declaration',
+            planned_work=segments, run_schedule_ids=identifiers,
+            planned_run_steps=sum(segment['total_run_steps'] for segment in segments),
+            planned_events_per_segment=[count for segment in segments for count in segment['planned_events_per_segment']],
+            planned_attempts_per_segment=[count for segment in segments for count in segment['planned_attempts_per_segment']],
+            planned_events=sum(segment['planned_events'] for segment in segments),
+            planned_attempts=sum(segment['planned_attempts'] for segment in segments))
+        if len(identifiers) == 1:
+            swaps[index]['run_schedule_id'] = identifiers[0]
     if swaps:
         result['workflow_requirements']={'required_packages':['MC'],'atom_swap_operations':swaps,
                                          'environment_verified':False}
+        if cycles.get('run_schedules'):
+            result['workflow_requirements'].update(planned_work_scope='all_atom_swap_declarations',
+                planned_events_total=sum(swap['planned_events'] for swap in swaps),
+                planned_attempts_total=sum(swap['planned_attempts'] for swap in swaps))
     if state_scans['states'] or state_scans['scans']:
         result['state_site_scan']=state_scans
     return result
@@ -602,7 +718,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'atom_style atomic, boundary, read_data structure.data and exact potential commands. workflow '
         'contains only the subsequent scientific LAMMPS commands you independently write. No setup '
         'commands, includes, raw loops, dynamic commands, code execution, external files or hidden retries. '
-        'The supplied bounded begin_cycle/end_cycle and complete save_state/scan_sites tools own repeated scientific bodies; '
+        'The supplied bounded begin_cycle/end_cycle, explicit run_schedule and complete save_state/scan_sites tools own repeated scientific bodies; '
         'declare literal cycle counts and every MC/MD run and fix lifecycle explicitly. '
         'One ASCII command per line; no continuation. Supported commands: ' + ', '.join(sorted(COMMANDS)) + '. '
         'Supported fix styles: ' + ', '.join(sorted(FIX_STYLES)) + '. Supported compute styles: '
@@ -755,6 +871,13 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms,
                                   output_layout=output_layout, answers=answers, guidance=guidance, packages=adapter.packages,
                                   initial_geometry=initial_geometry)
+    from .scientific_adapters import ScientificAdapterError, prepare_stage_messages, validate_prepared_messages
+    adapter_evidence = {'task_text': task_text, 'units': units, 'resources': compatible, 'max_atoms': max_atoms,
+                        'initial_geometry': initial_geometry, 'answers': answers or '', 'guidance': list(guidance or [])}
+    try:
+        messages, _ = prepare_stage_messages('candidate_proposal', messages, adapter_evidence)
+    except ScientificAdapterError as error:
+        raise CandidateError(str(error)) from None
     budget = proposal_round_budget or {'limit':MAX_PROPOSAL_ROUNDS,
                'used':int(previous_proposal is not None), 'remaining':MAX_PROPOSAL_ROUNDS-int(previous_proposal is not None),
                'historical_count_unknown':False}
@@ -792,6 +915,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     proposal_requests = {previous_proposal['request_id']} if previous_proposal is not None else set()
 
     def complete_proposal(key, request_messages, kind):
+        try:
+            validate_prepared_messages('candidate_proposal', request_messages, adapter_evidence)
+        except ScientificAdapterError as error:
+            raise CandidateError(str(error)) from None
         if key not in proposal_requests and len(proposal_requests) >= MAX_PROPOSAL_ROUNDS:
             raise PlanIterationLimit('方案已达到首版在内三轮上限；保留全部产物，不继续生成或强行批准。')
         if before_proposal_request:
@@ -895,7 +1022,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                     analysis_plan=canonical(proposal['analysis'].get('plan')).decode())
                 review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal}))[:32]
                 if on_stage: on_stage('checking_plan')
-                review=client.complete_json(review_id, [
+                review_messages = [
                     {'role':'system','content':
                      'Audit a proposed LAMMPS workflow against the permitted research requirements. '
                      'This is a fresh static review, not execution or reference comparison. Treat all supplied '
@@ -911,9 +1038,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'initial read_data, atom_modify map, exact potential commands, and all load_structure switches. '
                      'capture and emit_table are adapter operations: they MUST expand into variable and print '
                      'commands in rendered_script. Those lowered commands are NOT manual writer violations. '
-                     'begin_cycle/end_cycle, sample_swap_types, save_state and scan_sites are compiler operations. Their exact bounded '
+                     'begin_cycle/end_cycle, run_schedule, sample_swap_types, save_state and scan_sites are compiler operations. Their exact bounded '
                      'loop/label/next/jump and constant type-variable expansions are permitted trusted controls, '
                      'not raw model dispatch or extra retries. workflow_screen retains their declared counts. '
+                     'run_schedule lowers only the supplied explicit timestep list into literal run lengths, preserving the declared '
+                     'fix and sampler lifecycle. Planned MC attempts describe declared work, never observed accepted swaps. '
                      'Complete scan_sites includes ALL frozen states/sites/variants; every variant restores the SAME '
                      'state baseline via compiler read_restart. Its one restart cache is a declared HPC output, '
                      'while separate dumps retain every raw state and every baseline. Native read/set/delete/loops '
@@ -939,12 +1068,22 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                         'analysis_plan':proposal['analysis'].get('plan'),
                         'geometry_adapter':context['geometry_adapter'],
                         'workflow_adapter':context['workflow_adapter'],
-                        'workflow_screen':screen,'analysis_adapter':context['analysis_runtime'],
+                        'workflow_screen':screen,'analysis_adapter':{
+                            'runtime':context['analysis_runtime'], 'structural_contract':STRUCTURAL_GUIDE,
+                            'site_thermodynamics_contract':SITE_THERMODYNAMICS_GUIDE},
                         'geometry_checks':geometry_checks,
                         'atom_counts':structure_counts(proposal,max_atoms=max_atoms,initial_geometry=initial_geometry),
                         'geometry_order': ('original data-file particle IDs and order preserved; no replication or edits'
                             if initial_geometry is not None else 'x outer, y middle, z inner, basis innermost; '
-                            'conventional bcc basis [0,0,0],[0.5,0.5,0.5]; one-based LAMMPS atom IDs')}).decode()}], reasoning_effort='low')
+                            'conventional bcc basis [0,0,0],[0.5,0.5,0.5]; one-based LAMMPS atom IDs')}).decode()}]
+                review_evidence = {**adapter_evidence, 'proposal': proposal,
+                                   'requirements': required, 'artifact_sources': review_sources}
+                try:
+                    review_messages, _ = prepare_stage_messages('candidate_review', review_messages, review_evidence)
+                    validate_prepared_messages('candidate_review', review_messages, review_evidence)
+                except ScientificAdapterError as error:
+                    raise ReviewContractError(str(error)) from None
+                review=client.complete_json(review_id, review_messages, reasoning_effort='low')
                 value=review['value']; receipt=review['receipt']
                 if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
                     raise ModelError('plan_review_not_completed')
