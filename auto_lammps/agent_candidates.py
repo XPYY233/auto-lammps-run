@@ -18,14 +18,16 @@ from .analysis_v2 import AnalysisError, adapter_identity, plan_adapter, validate
 from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX_TABLES,
                        MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
-from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
+from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens, cycle_metadata, workflow_tool_context
+from .coordination_analysis import GUIDE as STRUCTURAL_GUIDE
 
-GENERATOR_VERSION = 17
+GENERATOR_VERSION = 18
 MAX_PROPOSAL_ROUNDS = 3
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
-            'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group', 'load_structure', 'delete_atoms', 'write_dump'}
+            'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group', 'load_structure', 'reset_structure', 'delete_atoms', 'write_dump',
+            'begin_cycle', 'end_cycle', 'sample_swap_types'}
 FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time', 'atom/swap'}
 COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom', 'reduce'}
 RESERVED_OUTPUTS = {'stdout.txt', 'stderr.txt', 'log.lammps'}
@@ -49,7 +51,7 @@ class ReviewContractError(CandidateError):
     """A malformed reviewer report is not evidence that the scientific plan is wrong."""
 
 
-def _atom_swap(tokens, *, type_count, packages):
+def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
     """Declared canonical MC syntax only; no engine or expression evaluation."""
     if 'MC' not in packages:
         raise CandidateError('atom/swap requires MC in the configured engine packages; do not invent availability')
@@ -83,14 +85,21 @@ def _atom_swap(tokens, *, type_count, packages):
     if 'types' not in options or 'ke' not in options:
         raise CandidateError('atom/swap requires explicit types and kinetic-energy option ke yes/no')
     pair = options['types']
-    if (any(not re.fullmatch(r'[0-9]{1,10}', x) or not 1 <= int(x) <= type_count for x in pair)
+    sampled = next((sample for sample in sampled_pairs
+                    if pair == ['${'+name+'}' for name in sample['variables']]
+                    and sample['type_count'] == type_count), None)
+    if sampled is None and (any(not re.fullmatch(r'[0-9]{1,10}', x) or not 1 <= int(x) <= type_count for x in pair)
             or int(pair[0]) == int(pair[1])):
         raise CandidateError('atom/swap types must be two distinct declared numeric atom types')
     if options['ke'] not in (['yes'], ['no']) or options.get('semi-grand', ['no']) != ['no']:
         raise CandidateError('atom/swap requires ke yes/no and preserves composition (semi-grand no)')
-    return dict(fix_id=tokens[1],every_steps=int(tokens[4]),attempts_per_event=int(tokens[5]),
-                seed=int(tokens[6]),temperature=temperature,types=[int(x) for x in pair],
-                conserve_kinetic_energy=options['ke']==['yes'],composition_preserved=True)
+    result = dict(fix_id=tokens[1],every_steps=int(tokens[4]),attempts_per_event=int(tokens[5]),
+                  seed=int(tokens[6]),temperature=temperature,
+                  types=pair if sampled else [int(x) for x in pair],
+                  conserve_kinetic_energy=options['ke']==['yes'],composition_preserved=True)
+    if sampled:
+        result['type_sampler'] = {key:sampled[key] for key in ('prefix','type_count','seed')}
+    return result
 
 
 def normalized_review_issues(value):
@@ -102,8 +111,8 @@ def normalized_review_issues(value):
 def validate_body(body, outputs, *, output_prefix='/output/', structures=None, type_count=None, packages=()):
     """Conservative syntax/resource screen, NOT a scientific or security verifier.
 
-    No subprocess is used. Loops and dynamic dispatch are deliberately unsupported;
-    distinct scientific stages must be explicit. Execution needs a separate trusted
+    No subprocess is used. Only trusted, literal bounded-cycle tools are supported;
+    raw loops and dynamic dispatch remain unsupported. Execution needs a separate trusted
     deployment; this screen never establishes isolation.
     """
     _text(body, 100000)
@@ -121,6 +130,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     undeclared=set()
     groups, deleted, loaded = {}, set(), set()
     variables = {}
+    active_fixes = {}
     semantic_errors=[]
     swaps=[]
     active_swaps=set()
@@ -128,7 +138,14 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     thermo_computes=set()
     counts = structures or {}
     atom_count = counts.get("initial")
-    for line in lines:
+    try:
+        cycles = cycle_metadata(body)
+    except ValueError as error:
+        raise CandidateError(str(error)) from error
+    cycle_by_line = {item['begin_line']:item for item in cycles['cycles']}
+    current_cycle = None
+    sampled_pairs = []
+    for line_number, line in enumerate(lines, 1):
         try:
             tokens = workflow_tokens(line)
         except ValueError:
@@ -136,17 +153,44 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
         if not tokens:
             continue
         command = tokens[0]
+        if command == 'begin_cycle':
+            current_cycle = cycle_by_line[line_number]
+            baseline_fixes, baseline_variables = dict(active_fixes), dict(variables)
+            cycle_index_definitions = set()
+        elif command == 'sample_swap_types':
+            sample = next(item for item in current_cycle['samples'] if item['line'] == line_number)
+            if any(name in variables for name in sample['variables']):
+                raise CandidateError('Type sampler variables must not replace existing workflow variables')
+            sampled_pairs.append(sample)
+            variables.update({name:'sampled_index' for name in sample['variables']})
+        elif command == 'end_cycle':
+            if active_fixes != baseline_fixes:
+                raise CandidateError('Each bounded cycle must restore its fix lifecycle before repeating')
+            sample_names = {name for item in current_cycle['samples'] for name in item['variables']}
+            for name in cycle_index_definitions:
+                if name in variables:
+                    raise CandidateError('Delete index variables created inside a cycle before repeating')
+            for name in sample_names:
+                variables.pop(name,None)
+            sampled_pairs = []
+            current_cycle = None
         undefined=set(re.findall(r'\$\{([A-Za-z][A-Za-z0-9_]*)\}',line))-set(variables)
         if undefined:
             semantic_errors.append('Undefined LAMMPS variables: '+', '.join(sorted(undefined))+
                 '; ${name} requires a declared variable; use $(step) for the thermo step keyword')
         if command not in COMMANDS:
             raise CandidateError('Unsupported workflow command: ' + command[:40])
-        if command == 'load_structure':
-            if len(tokens)!=2 or tokens[1]=='initial' or tokens[1] not in counts or tokens[1] in loaded:
-                raise CandidateError('load_structure must select each supplied additional structure exactly once')
-            loaded.add(tokens[1]);atom_count=counts[tokens[1]];groups={};deleted=set()
+        if command in {'load_structure','reset_structure'}:
+            if command=='reset_structure':
+                if len(tokens)!=2 or tokens[1]!='initial' or 'initial' not in counts:
+                    raise CandidateError('reset_structure accepts only the frozen initial structure')
+            else:
+                if len(tokens)!=2 or tokens[1]=='initial' or tokens[1] not in counts or tokens[1] in loaded:
+                    raise CandidateError('load_structure must select each supplied additional structure exactly once')
+                loaded.add(tokens[1])
+            atom_count=counts[tokens[1]];groups={};deleted=set()
             active_swaps.clear()
+            active_fixes.clear()
             pressure_computes,current_computes=set(),set()
             thermo_computes=set()
         if command == 'group' and len(tokens)>2:
@@ -174,21 +218,34 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             if stale and '$(' in line:
                 semantic_errors.append('Pressure computes not current: '+', '.join(sorted(stale))+'; define before calculation AND consume c_ID in thermo_style custom during its final step, or use an already initialized thermo pressure keyword. Definition alone does not invoke a compute.')
             name, style = tokens[1:3]
+            if variables.get(name) == 'sampled_index':
+                raise CandidateError('Only the type sampler may create or remove its variables')
             if style=='delete':
                 variables.pop(name,None)
             else:
                 if variables.get(name)=='index':
                     raise CandidateError('Index variable '+name+' survives load_structure/clear and cannot be reassigned; delete it first or use distinct names')
                 variables[name]=style
+                if current_cycle and style == 'index':
+                    cycle_index_definitions.add(name)
         if command == 'fix' and (len(tokens) < 4 or tokens[3] not in FIX_STYLES):
             raise CandidateError('Unsupported fix style')
+        if command == 'fix' and tokens[1] in active_fixes and active_fixes[tokens[1]][1] != tokens[3]:
+            raise CandidateError('Unfix an existing fix before changing its style')
         if command == 'fix' and tokens[1] in active_swaps:
             raise CandidateError('Unfix an active atom/swap before redefining its parameters')
         if command == 'fix' and tokens[3] == 'atom/swap':
-            swap=_atom_swap(tokens,type_count=type_count,packages=packages)
+            swap=_atom_swap(tokens,type_count=type_count,packages=packages,sampled_pairs=sampled_pairs)
+            if current_cycle:
+                swap['cycle_count'] = current_cycle['count']
             active_swaps.add(tokens[1]);swaps.append(swap)
-        if command == 'unfix' and len(tokens)==2:
+        if command == 'fix':
+            active_fixes[tokens[1]] = tuple(tokens[2:])
+        if command == 'unfix':
+            if len(tokens)!=2 or tokens[1] not in active_fixes:
+                raise CandidateError('unfix requires one existing active fix ID')
             active_swaps.discard(tokens[1])
+            active_fixes.pop(tokens[1],None)
         if command == 'reset_timestep' and active_swaps:
             raise CandidateError('Unfix atom/swap before reset_timestep; its MC schedule cannot survive a timestep reset')
         if command == 'compute' and (len(tokens) < 4 or tokens[3] not in COMPUTE_STYLES):
@@ -202,7 +259,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
         if command in {'reset_timestep','displace_atoms','change_box','set'}:
             current_computes.clear()
         if command in {'run', 'minimize'}:
-            evaluations += 1
+            evaluations += cycles['line_multipliers'].get(line_number,1)
             current_computes=pressure_computes & thermo_computes
         targets = []
         if command == 'dump':
@@ -239,6 +296,8 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     result = {'screen': 'bounded_command_and_output_screen', 'calculation_commands': evaluations,
             'declared_outputs': list(outputs), 'scientific_validation': 'not_performed',
             'execution_authorized': False}
+    if cycles['cycles']:
+        result['bounded_cycles'] = cycles['cycles']
     if swaps:
         result['workflow_requirements']={'required_packages':['MC'],'atom_swap_operations':swaps,
                                          'environment_verified':False}
@@ -344,12 +403,13 @@ def render_candidate_script(proposal, units, potential_commands, output_layout=N
     extra={item['id']:item['structure'] for item in proposal.get('additional_structures',[])}
     # Legacy frozen proposals have literal paths. New tools use the frozen layout.
     layout = output_layout or ('isolated' if '/output/' in proposal['workflow'] else 'working_directory')
-    body = expand_tools(proposal['workflow'], proposal['analysis'].get('plan'), output_prefix(layout))
+    body = expand_tools(proposal['workflow'], proposal['analysis'].get('plan'), output_prefix(layout), lower_cycles=True)
     for line in body.splitlines():
         tokens=shlex.split(line,comments=True)
-        if tokens and tokens[0]=='load_structure':
+        if tokens and tokens[0] in {'load_structure','reset_structure'}:
             name=tokens[1]
-            lines.extend(['clear',*header(extra[name],'structure-'+name+'.data')])
+            spec,filename=(proposal['structure'],'structure.data') if tokens[0]=='reset_structure' else (extra[name],'structure-'+name+'.data')
+            lines.extend(['clear',*header(spec,filename)])
         else:lines.append(line)
     return ('\n'.join(lines)+'\n').encode('ascii')
 
@@ -403,7 +463,10 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'For a declared multi-condition study, keep the first geometry in structure and optionally supply '
         'additional_structures:[{id,structure},...] (up to seven). Each structure uses the same schema, '
         'types, masses, and boundary. In workflow, load_structure <id> selects a declared extra exactly once; '
-        'the adapter expands it into clear plus trusted geometry/potential setup. No loops or raw clear/read_data. '
+        'the adapter expands it into clear plus trusted geometry/potential setup. '
+        'For explicitly requested independent conditions sharing one initial geometry, use reset_structure initial '
+        'before each next condition: it reloads the exact frozen initial bytes and potential, not the previous '
+        'relaxed state. Do not invent nine separate geometries for nine conditions. Raw clear/read_data and loops remain forbidden. '
         'After switching, re-establish all fixes/settings. LAMMPS variables survive clear: use distinct names '
         'or explicitly delete/redefine them. Preserve every requested condition and report each result. '
         'Use ordinary per-stage output names; at most 29 total outputs. For cubic ASE order, atom ID is '
@@ -426,7 +489,9 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'If suitability cannot be established, ask rather than guess. The service supplies units, '
         'atom_style atomic, boundary, read_data structure.data and exact potential commands. workflow '
         'contains only the subsequent scientific LAMMPS commands you independently write. No setup '
-        'commands, includes, loops, dynamic commands, code execution, external files or hidden retries. '
+        'commands, includes, raw loops, dynamic commands, code execution, external files or hidden retries. '
+        'The supplied bounded begin_cycle/end_cycle tool is the only supported repeated scientific body; '
+        'declare literal cycle counts and every MC/MD run and fix lifecycle explicitly. '
         'One ASCII command per line; no continuation. Supported commands: ' + ', '.join(sorted(COMMANDS)) + '. '
         'Supported fix styles: ' + ', '.join(sorted(FIX_STYLES)) + '. Supported compute styles: '
         + ', '.join(sorted(COMPUTE_STYLES)) + '. Variables may be equal, index or string. '
@@ -434,7 +499,9 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Use fix ID all atom/swap N X seed T types i j ke yes_or_no, optionally semi-grand no. '
         'N is the positive MD-step interval, X is attempts per event (NOT total cycles), seed is a '
         'positive integer, T is a positive finite temperature. Use literal numbers and exactly two '
-        'distinct declared numeric types per fix. For multicomponent exchange, independently '
+        'distinct declared numeric types per fix, or exactly the two placeholders produced by '
+        'sample_swap_types inside the same bounded cycle with the full declared type count. '
+        'For multicomponent exchange, independently '
         'declare the required pair fixes and their scientific schedules; do not silently change '
         'composition, number of attempts or physical time. ke must be explicit. No mu, semi-grand '
         'yes or region support; ask for clarification for unsupported algorithms. Unfix before '
@@ -459,18 +526,18 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Do not declare vector/block output as scalar. Both table formats may share a plan. '
         'Each operation is {id,method,file,x,y,window:[min,max]}; method is one of '
         + ', '.join(ANALYSIS_METHODS) + '. '
-        + f'Limits enforced by the validator: 1 to {MAX_TABLES} tables; each table {MIN_COLUMNS} to {MAX_COLUMNS} '
+        + f'Numeric limits enforced by the validator: 1 to {MAX_TABLES} numeric tables; each numeric table {MIN_COLUMNS} to {MAX_COLUMNS} '
         + f'labeled columns; 1 to {MAX_OPERATIONS} operations; x and y must differ and both be declared columns of '
         + 'that table; window is an inclusive [min,max] with min <= max; the table file must be one of '
         + 'analysis.files and every workflow write must use the declared prefix path. '
-        + f'Every analysis table must declare between {MIN_COLUMNS} and {MAX_COLUMNS} labeled columns, because '
+        + f'Every numeric analysis table must declare between {MIN_COLUMNS} and {MAX_COLUMNS} labeled columns, because '
         + 'every operation needs both an x column and a y column: a table with a single column is rejected '
         + 'outright. Include the x column your operation will use (for example a step or timestep column) next '
         + 'to the value column. '
         'The analysis contract is checked strictly, so satisfy it exactly: (a) analysis.files lists every '
         'analysis file the workflow writes, each a distinct flat filename with no directory part; (b) every '
         'table file and every operation file must be one of those declared analysis.files, and an operation '
-        'may only use a table declared in plan.tables; (c) operation x and y must be column names declared '
+        'may only use a source declared in plan.tables; (c) numeric operation x and y must be column names declared '
         'for that table; (d) potential_pin must be copied verbatim from the supplied resource summaries, '
         'character for character; (e) every write in the workflow must target exactly the declared path, that is '
         'the output prefix followed by one of the names in analysis.files (write_data <prefix><name>, dump ... file '
@@ -496,7 +563,13 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Always emit one JSON object, never prose. The workflow value is a single JSON string: write newlines as '
         'the two characters \\n and never put a raw newline or tab inside any string.'
     )
-    instruction += ('\n'+GUIDE+'\nAt most three proposal-generation rounds, including the initial plan, '
+    instruction += ('\n'+GUIDE+'\n'+STRUCTURAL_GUIDE+'\nMixed structural plans support at most 16 numeric '
+                    'and 16 trajectory sources, at most 29 sources in total, with at most 32 operations. '
+                    'Numeric files are fully validated separately; never shrink the requested scientific '
+                    'sampling merely to fit an old aggregate preview size. Trajectories have no numeric '
+                    'columns and must not use emit_table. The structural operation uses its exact schema '
+                    'above instead of numeric x/y/window fields.\n'
+                    'At most three proposal-generation rounds, including the initial plan, '
                     'are allowed for the same task. Return a COMPLETE proposal; use the supplied '
                     'adapter contracts before answering and revise only the reported errors. '
                     'No additional round is granted by refresh, restart or configuration changes. '
@@ -514,6 +587,8 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         instruction = instruction + ' ' + extra
     context = {'task_text': task_text, 'units': units, 'resources': resource_summaries, 'max_atoms': max_atoms,
                'geometry_adapter':geometry_tool_context(max_atoms),
+               'workflow_adapter':workflow_tool_context(),
+               'analysis_adapter':{'runtime':adapter_identity(), 'structural_contract':STRUCTURAL_GUIDE},
                'configured_engine_packages':sorted(packages),
                'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])]}
     return [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': canonical(context).decode()}]
@@ -555,6 +630,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'potential_compatibility': adapter.compatibility_policy(),
                'configured_engine_packages':sorted(adapter.packages),
                'geometry_adapter':geometry_tool_context(max_atoms),
+               'workflow_adapter':workflow_tool_context(),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
                'requested_model': getattr(client,'model',client.calls.config.model),
                'thinking': getattr(client, 'thinking', False),
@@ -675,6 +751,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'initial read_data, atom_modify map, exact potential commands, and all load_structure switches. '
                      'capture and emit_table are adapter operations: they MUST expand into variable and print '
                      'commands in rendered_script. Those lowered commands are NOT manual writer violations. '
+                     'begin_cycle/end_cycle and sample_swap_types are compiler operations. Their exact bounded '
+                     'loop/label/next/jump and constant type-variable expansions are permitted trusted controls, '
+                     'not raw model dispatch or extra retries. workflow_screen retains their declared counts. '
                      'The immutable snapshot retains potential files, resource metadata, provenance and checksums; '
                      'the controller retains log.lammps. These do not need LAMMPS copy/print operations or an '
                      'extra analysis.files entry. Do not request fabricated potential_source files. '
@@ -689,10 +768,12 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'Each requested derived property must actually be calculated and extracted, not just prose. '
                      'Prefer the newest guidance over old condition suggestions. Do not invent extra scientific requirements or expected values. Unsupported/missing agreed '
                      'requirements are issues; no stylistic issues. An empty issues list means static consistency '
-                     'only, never scientific success. '+GUIDE},
+                     'only, never scientific success. '+GUIDE+'\n'+STRUCTURAL_GUIDE},
                     {'role':'user','content':canonical({'requirements':task_text,'guidance':guidance or [],
                         'proposal':proposal,'rendered_script':reviewed_script,'resource_metadata':compatible,
                         'geometry_adapter':context['geometry_adapter'],
+                        'workflow_adapter':context['workflow_adapter'],
+                        'workflow_screen':screen,'analysis_adapter':context['analysis_runtime'],
                         'geometry_checks':{name:{**{k:g.receipt[k] for k in
                             ('atom_count','composition','type_elements','boundary')},
                             'receipt_sha256':sha256(canonical(g.receipt)),
@@ -731,11 +812,12 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                 {'role': 'user', 'content': canonical({
                     'correction': '上一次输出未通过校验。请只修正被指出的问题并重新输出完整的同一 JSON 契约：'
                                   'questions 非空时 structure/potential_pin/workflow/analysis 必须全部为 null；'
-                                  '给出可执行方案时 questions 必须是空列表；structure 的几何字段必须齐全'
-                                  '（crystal、elements、a_angstrom、repeat、orientation、boundary、vacancies、'
-                                  'substitutions、type_elements、masses_amu），不要省略任何一项；'
-                                  '每个分析表必须声明**至少两列**（操作要用到的 x 列与 y 列，例如 step 与 energy），'
-                                  '单列表格一律被拒；operations 的 x、y 必须取自该表声明的列名。不要改变科研范围。',
+                                  '给出可执行方案时 questions 必须是空列表；structure 按主动 geometry_adapter 中'
+                                  '所选构建器的完整契约填写，不把显式晶胞误改成常规晶格；'
+                                  '每个数字分析表必须声明**至少两列**（数字操作的 x 列与 y 列，例如 step 与 energy），'
+                                  '数字操作的 x、y 必须取自该数字表声明的列名；'
+                                  'lammps_dump 是结构来源，不要增加数字 columns 或 x/y/window；'
+                                  '结构操作使用同版 structural_contract 的完整字段。不要改变科研范围。',
                     'failure': str(error)[:6000]}).decode()}]
             try:
                 if on_stage: on_stage('repairing_plan')
