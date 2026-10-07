@@ -467,7 +467,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                     request.pop('history',None)
                     for analysis in request['reports']:
                         if analysis['status']=='analyzed':
-                            context['source_tables'].append(results_reader.tables(identifier,analysis['id']))
+                            preview=results_reader.tables(identifier,analysis['id'])
+                            # Structural data is already fully verified in the
+                            # report. Keep one copy in the model context instead
+                            # of doubling every frame and pair statistic.
+                            preview.pop('structural_results',None)
+                            context['source_tables'].append(preview)
         else:
             raise TaskError('尚无可分析的计算结果。')
         # The result assistant needs the actual method and convergence criteria,

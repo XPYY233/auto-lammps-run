@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 
 from .candidate_jobs import CandidateHistory
-from .manifest import sha256
+from .manifest import canonical, sha256
 from . import runtime_launcher as runtime
 
 STATES={'prepared':'尚未提交','dispatching':'正在提交','unknown':'提交状态待核对','accepted':'已提交',
@@ -51,6 +51,86 @@ def existing_private_directory(path):
     if any((parent/'.git').exists() for parent in (path,*path.parents)):
         raise ValueError('Result storage must be outside Git')
     return path
+
+
+def structural_projection(item, source):
+    """Validate a bounded derived report, not recompute geometry in a GET."""
+    from . import coordination_analysis as coordination
+    proof=runtime.hash_value(item['derived_sha256'])
+    if sha256(canonical({key:value for key,value in item.items() if key!='derived_sha256'}))!=proof:
+        raise ResultUnavailable('Derived structural result changed')
+    spec={key:source[key] for key in coordination.TABLE_FIELDS}
+    coordination.validate_operation(item['parameters'],spec)
+    if (item['method']!=coordination.METHOD or item['id']!=item['parameters']['id']
+            or item['file']!=source['file'] or item['source']!=source
+            or item['scientific_status']!='not_evaluated' or item['physics_simulation'] is not False):
+        raise ResultUnavailable('Structural result differs from its declared source or method')
+    columns=dict(directed=['type_i','type_j','directed_neighbor_count','N_i','N_j',
+                          'p_j_given_i','c_j','alpha_ij'],
+                 symmetric=['type_i','type_j','alpha_symmetric'],
+                 aggregate=['type_i','type_j','mean','sample_std','min','max'])
+    if item['columns']!=columns:
+        raise ResultUnavailable('Unsupported structural derived columns')
+    keys=sorted(map(int,source['elements']))
+    pairs=dict(directed=[(i,j) for i in keys for j in keys],
+               symmetric=[(i,j) for pos,i in enumerate(keys) for j in keys[pos:]])
+    def rows(values,kind,width,nullable=()):
+        if not isinstance(values,list) or len(values)!=len(pairs[kind]):
+            raise ResultUnavailable('Incomplete structural element pairs')
+        for row,pair in zip(values,pairs[kind]):
+            if (not isinstance(row,list) or len(row)!=width or tuple(row[:2])!=pair
+                    or any(type(v) is not int for v in row[:2])
+                    or any(not (v is None and index in nullable) and
+                           (type(v) not in (int,float) or not math.isfinite(v))
+                           for index,v in enumerate(row))):
+                raise ResultUnavailable('Invalid structural derived values')
+        return values
+    interval=item['parameters']['frames']
+    selected=list(range(interval['first'],interval['last']+1,interval['stride']))
+    frames=item['frames']
+    if (type(item['source_frame_count']) is not int or item['source_frame_count']<=interval['last']
+            or type(item['selected_frame_count']) is not int or item['selected_frame_count']!=len(selected) or not isinstance(frames,list)
+            or len(frames)!=len(selected)):
+        raise ResultUnavailable('Structural sampling differs from the frozen interval')
+    safe_frames=[];previous_step=-1;particle_identity=None
+    diagnostic_keys=('kth_distance_min','kth_distance_max','next_distance_min','next_distance_max',
+                     'minimum_gap','zero_gap_atoms','reciprocal','coincident_fractional_tolerance')
+    for frame,index in zip(frames,selected):
+        identity=runtime.hash_value(frame['particle_ids_sha256'])
+        if (type(frame['frame']) is not int or frame['frame']!=index
+                or type(frame['timestep']) is not int or frame['timestep']<=previous_step
+                or type(frame['atom_count']) is not int or frame['atom_count']!=sum(source['expected_counts'].values())
+                or particle_identity not in (None,identity)):
+            raise ResultUnavailable('Structural frame identity differs from frozen sampling')
+        diagnostic={key:frame['neighbor_diagnostics'][key] for key in diagnostic_keys}
+        if 'missing_reverse_edges' in frame['neighbor_diagnostics']:
+            diagnostic['missing_reverse_edges']=frame['neighbor_diagnostics']['missing_reverse_edges']
+            if type(diagnostic['missing_reverse_edges']) is not int or diagnostic['missing_reverse_edges']<0:
+                raise ResultUnavailable('Invalid structural reciprocity count')
+        if (type(diagnostic['reciprocal']) is not bool or type(diagnostic['zero_gap_atoms']) is not int
+                or not 0<=diagnostic['zero_gap_atoms']<=frame['atom_count']
+                or any(type(diagnostic[key]) not in (int,float) or not math.isfinite(diagnostic[key])
+                       for key in diagnostic_keys if key not in ('reciprocal','zero_gap_atoms'))):
+            raise ResultUnavailable('Invalid structural neighborhood diagnostics')
+        safe_frames.append(dict(frame=index,timestep=frame['timestep'],atom_count=frame['atom_count'],
+            particle_ids_sha256=identity,neighbor_diagnostics=diagnostic,
+            directed=rows(frame['directed'],'directed',8),symmetric=rows(frame['symmetric'],'symmetric',3)))
+        previous_step,particle_identity=frame['timestep'],identity
+    aggregates={kind:rows(item['aggregates'][kind],kind,6,(3,)) for kind in pairs}
+    chart=dict(kind='categorical_bars',quantity='Warren-Cowley alpha',unit='1',
+               labels=[source['elements'][str(i)]+'–'+source['elements'][str(j)] for i,j in pairs['symmetric']],
+               values=[row[2] for row in aggregates['symmetric']])
+    if item['chart']!=chart or not isinstance(item['ovito_version'],str) or not re.fullmatch(r'[0-9.]+',item['ovito_version']):
+        raise ResultUnavailable('Structural chart differs from the full derived table')
+    return dict(id=item['id'],method=item['method'],file=item['file'],parameters=item['parameters'],
+        source=source,ovito_version=item['ovito_version'],source_frame_count=item['source_frame_count'],
+        selected_frame_count=len(selected),columns=columns,frames=safe_frames,aggregates=aggregates,
+        chart=chart,derived_sha256=proof,scientific_status='not_evaluated',physics_simulation=False,
+        formulas=dict(directed='alpha_ij = 1 - n_ij/(k*N_i*(N_j/N))',symmetric='(alpha_ij + alpha_ji)/2',
+                      aggregation='equal weight per selected frame'),
+        limitations=['最近邻定义不自动证明物理第一配位壳层。',
+                    '帧间波动仅为描述统计，相关帧不等于独立重复实验。',
+                    '数值处理不包含论文答案、科学通过阈值或事后改选采样区间。'])
 
 
 class ResultsReader:
@@ -98,15 +178,44 @@ class ResultsReader:
                 raise ResultUnavailable('Invalid numeric result')
             results.append({key:item[key] for key in ('id','method','file','x','y','window','sample_count',
                                                        'source_line_ranges','values','value_units','units_origin')})
-        return dict(id=identifier,status='analyzed',label='数值分析已完成',at=public_time(event['at']),
+        inventory={item['path']:item for item in source['header']['files']}
+        sources=[];structural_sources={}
+        for item in report['sources']:
+            name=item['file']
+            if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',name):
+                raise ResultUnavailable('Invalid source label')
+            collected_item=inventory.get('output/'+name)
+            if not collected_item or any(item[key]!=collected_item[key] for key in ('sha256','size')):
+                raise ResultUnavailable('Analysis source differs from collected receipt')
+            if item.get('format')=='lammps_dump':
+                from .coordination_analysis import TABLE_FIELDS, validate_table
+                validate_table({key:item[key] for key in TABLE_FIELDS})
+                public_source={key:item[key] for key in (*TABLE_FIELDS,'sha256','size')}
+                structural_sources[name]=public_source
+                sources.append(public_source)
+            else:
+                sources.append({key:item[key] for key in ('file','sha256','columns')})
+        if len({s['file'] for s in sources})!=len(sources):
+            raise ResultUnavailable('Duplicate analysis sources')
+        structural_results=[]
+        for item in report.get('structural_results',[]):
+            if item['file'] not in structural_sources:
+                raise ResultUnavailable('Structural result has no matching dump source')
+            structural_results.append(structural_projection(item,structural_sources[item['file']]))
+        if structural_sources and (report.get('adapter_version')!=3
+                or {s['file'] for s in structural_results}!=set(structural_sources)):
+            raise ResultUnavailable('Structural source lacks versioned analysis')
+        projection=dict(id=identifier,status='analyzed',label='数值分析已完成',at=public_time(event['at']),
                     quantity=report['declared_quantity'],results=results,
-                    sources=[{key:item[key] for key in ('file','sha256','columns')} for item in report['sources']],
+                    sources=sources,
                     scientific_status='not_evaluated',
                     notes=['尚未核验科学结论；数值处理完成不等于研究目标已达成。',
                            ('原生标量表不含单位；单位来自预先声明，需核验物理定义和脚本中的单位处理。'
                             if any(r['units_origin']=='declared_only_not_present_in_scalar_header' for r in results)
-                            else '单位已与表头核对，仍需核验物理定义和脚本中的单位处理。'),
+                            else '结构分析参数或数值表头已核对，仍需核验物理定义和脚本中的单位处理。'),
                            '样本标准差描述数据波动，不代表独立重复实验的不确定度。'])
+        if structural_results:projection.update(structural_results=structural_results,analysis_format='numeric_tables_v3')
+        return projection
 
     def task(self, identifier):
         self.tasks.get(identifier)
@@ -189,7 +298,10 @@ class ResultsReader:
         from .analysis import parse_table, MAX_TABLE_BYTES
         from .scalar_analysis import parse_scalar
         tables=[];total=0
-        if not 1<=len(report['sources'])<=16:raise ResultUnavailable('Preview table limit exceeded')
+        is_structural=verified.get('analysis_format')=='numeric_tables_v3'
+        if not 1<=len(report['sources'])<=(29 if is_structural else 16):
+            raise ResultUnavailable('Preview source limit exceeded')
+        public_sources={s['file']:s for s in verified['sources']}
         for source in report['sources']:
             name=source['file']
             if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',name):
@@ -197,21 +309,30 @@ class ResultsReader:
             item=inventory.get('output/'+name)
             if not item or item['sha256']!=source['sha256'] or item['size']!=source['size']:
                 raise ResultUnavailable('Source declaration differs from receipt')
+            if source.get('format')=='lammps_dump':
+                from .coordination_analysis import _source_digest
+                _source_digest(self.collections/ticket/'payload'/'output'/name,source)
+                continue
             total+=item['size']
-            if total>MAX_TABLE_BYTES:raise ResultUnavailable('Preview byte limit exceeded')
+            if item['size']>MAX_TABLE_BYTES or (not is_structural and total>MAX_TABLE_BYTES):
+                raise ResultUnavailable('Preview byte limit exceeded')
             data=runtime.read_regular(self.collections/ticket/'payload'/'output'/name,item['size'])
             if sha256(data)!=source['sha256']:raise ResultUnavailable('Source bytes changed')
             spec={k:source[k] for k in ('file','columns')}
             if 'format' in source:spec.update({k:source[k] for k in ('format','headers','steps')})
             rows=parse_scalar(data,spec) if 'format' in spec else parse_table(data,spec)
+            if len(rows)*len(spec['columns'])>500000:raise ResultUnavailable('Preview cell limit exceeded')
             # Even spacing includes both endpoints; the UI states that this is a
             # preview. Fit metrics still come from the original frozen analysis.
             indices=sorted({round(i*(len(rows)-1)/127) for i in range(min(128,len(rows)))}) if len(rows)>128 else range(len(rows))
             selected=[rows[i] for i in indices]
-            tables.append(dict(file=name,sha256=source['sha256'],columns=verified['sources'][len(tables)]['columns'],
+            tables.append(dict(file=name,sha256=source['sha256'],columns=public_sources[name]['columns'],
                                total_rows=len(rows),sampled=len(rows)>128,
                                rows=[values for _,values in selected],source_lines=[line for line,_ in selected]))
-        return dict(analysis_id=analysis_id,tables=tables,scientific_status='not_evaluated')
+            del rows,data
+        value=dict(analysis_id=analysis_id,tables=tables,scientific_status='not_evaluated')
+        if is_structural:value['structural_results']=verified['structural_results']
+        return value
 
     def report(self, identifier, analysis_id):
         runtime.hash_value(analysis_id)

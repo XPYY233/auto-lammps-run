@@ -11,12 +11,14 @@ from auto_lammps import outputs
 from auto_lammps.following import FollowingService
 from auto_lammps.ledger import Conflict, Ledger, Policy
 from auto_lammps.manifest import canonical, sha256
+from auto_lammps.manifest import freeze
 from auto_lammps.reconciliation import ReconciliationService
 from auto_lammps.slurm_read import Observation, SlurmReader
 import test_agent_candidates as candidates
 import test_outputs as collected
 import test_runtime_launcher as runtime
 import test_analysis as numeric
+import test_coordination_analysis as ordering
 
 TABLE=dict(file='trajectory.dump',format='lammps_ave_time_scalar',
     headers=['# Time-averaged data for fix curve','# TimeStep v_strain v_stress'],
@@ -173,3 +175,100 @@ class NativePipelineTests(unittest.TestCase):
             if change=='file':plan['tables'][0]['file']='unlisted.dat'
             with self.subTest(change=change),self.assertRaises(legacy.AnalysisError):
                 native.validate_plan(plan,['trajectory.dump'])
+
+
+@unittest.skipUnless(ordering._ovito_ready(), 'Application OVITO geometry runtime is optional')
+class StructuralPipelineTests(unittest.TestCase):
+    """Real collection/analysis/Follower, synthetic scheduler and geometry only."""
+    def prepare(self, *, mixed=False, data=None):
+        f=collected.OutputTests();f.setUp();self.addCleanup(f.doCleanups)
+        self.f=f;self.root=f.root
+        table=deepcopy(ordering.TABLE);table['file']='trajectory.dump'
+        operation=deepcopy(ordering.OPERATION);operation['file']=table['file']
+        plan=dict(tables=[table],operations=[operation])
+        if mixed:
+            for index in range(2):
+                name=f'numeric_{index}.dat'
+                plan['tables'].append(dict(numeric.TABLE,file=name))
+                plan['operations'].append(dict(numeric.PLAN['operations'][0],id=f'mean_{index}',file=name))
+        outputs=runtime.OUTPUTS+[t['file'] for t in plan['tables'] if t['file'] not in runtime.OUTPUTS]
+        spec=dict(proposal=dict(quantity='synthetic ordering',method='explicit first shell',
+                               files=[t['file'] for t in plan['tables']],plan=plan),
+                  outputs=outputs,implementation_status='numeric_tables_v3',adapter_identity=native.adapter_identity())
+        source=self.root/'structural-input';source.mkdir()
+        (source/'input.in').write_bytes(b'# synthetic packaging only; never executed\n')
+        (source/'analysis.json').write_bytes(canonical(spec))
+        self.snapshot=freeze(source,self.root/'structural-snapshots',
+            files={'input.in':'lammps_input','analysis.json':'analysis_spec'},entrypoint='input.in',
+            resources=runtime.RESOURCES,provenance=dict(task_sha256='a'*64,software_sha256='b'*64,
+                                                       analysis_sha256=sha256(canonical(spec))))
+        old=f.digest;f.digest=self.snapshot.digest
+        f.local_command=[f.digest if value==old else value for value in f.local_command]
+        (f.case/'manifest.json').unlink()
+        f.private(f.case/'manifest.json',(self.snapshot.path/'manifest.json').read_bytes())
+        intent=json.loads((f.case/'execution-intent.json').read_bytes())
+        intent.update(manifest_sha256=f.digest,outputs=outputs)
+        f.private(f.case/'execution-intent.json',canonical(intent))
+        with f.ledger._transaction() as db:
+            db.execute('UPDATE requests SET manifest_sha256=? WHERE id=?',(f.digest,f.request_id))
+        f.private(f.case/'output/trajectory.dump',data or ordering.synthetic_bcc_dump())
+        if mixed:
+            for index in range(2):f.private(f.case/'output'/f'numeric_{index}.dat',numeric.DATA)
+        self.service=native.VersionedAnalysisService(f.collector,self.root/'reports')
+
+    def analyze(self):
+        with self.f.local_transfer():return self.service.run(self.f.request_id,self.snapshot)
+
+    def test_structural_only_collection_persists_complete_values_and_resumes_once(self):
+        self.prepare()
+        saved=self.analyze();report=saved['report']
+        self.assertEqual(report['status'],'analyzed')
+        self.assertEqual(report['results'],[])
+        self.assertEqual(report['sources'][0]['format'],'lammps_dump')
+        self.assertNotIn('columns',report['sources'][0])
+        structural=report['structural_results'][0]
+        self.assertEqual(structural['source']['sha256'],sha256(ordering.synthetic_bcc_dump()))
+        self.assertEqual(structural['chart']['values'],[1.,-1.,1.])
+        self.assertEqual(structural['frames'][0]['frame'],0)
+        self.assertEqual(structural['frames'][0]['timestep'],0)
+        self.service=native.VersionedAnalysisService(self.f.collector,self.root/'reports')
+        with patch.object(outputs,'transfer',side_effect=AssertionError('No repeated download')):
+            self.assertEqual(self.service.run(self.f.request_id,self.snapshot),saved)
+        events=self.f.ledger.events(self.f.request_id)
+        self.assertEqual(sum(e['kind']=='analysis_reserved' for e in events),1)
+        self.assertEqual(sum(e['kind']=='analysis_saved' for e in events),1)
+        self.assertEqual(sum(e['kind']=='dispatch_intent' for e in events),1)
+
+    def test_v3_numeric_tables_are_calculated_per_file_without_aggregate_byte_cap(self):
+        self.prepare(mixed=True)
+        self.assertLess(len(numeric.DATA),80)
+        self.assertGreater(2*len(numeric.DATA),80)
+        with patch.object(native,'MAX_TABLE_BYTES',80):saved=self.analyze()
+        self.assertEqual(saved['report']['status'],'analyzed')
+        self.assertEqual(len(saved['report']['structural_results']),1)
+        self.assertEqual([r['values']['mean'] for r in saved['report']['results']],[3.,3.])
+
+    def test_invalid_geometry_is_retained_as_failure_without_partial_structural_results(self):
+        bad=ordering.synthetic_bcc_dump(field_change=lambda rows:rows[0].__setitem__(1,3))
+        self.prepare(data=bad)
+        saved=self.analyze()
+        self.assertEqual(saved['report']['status'],'analysis_failed')
+        self.assertIn('composition',saved['report']['reason'])
+        self.assertNotIn('structural_results',saved['report'])
+        self.assertEqual(self.analyze(),saved)
+
+    def test_normal_following_reaches_structural_analysis_without_querying_completed_job(self):
+        self.prepare();f=self.f
+        reader=SlurmReader(f.endpoint.host_alias,self.root/'queries',max_bytes=1024)
+        follower=FollowingService(f.ledger,ReconciliationService(f.ledger,reader),self.service,
+                                  self.snapshot.path.parent,max_polls=3)
+        with patch.object(reader,'lookup',side_effect=AssertionError('Already accounted synthetic completion')),f.local_transfer():
+            result=follower.advance(f.request_id)
+        self.assertEqual(result['state'],'analyzed')
+        before=f.ledger.events(f.request_id)
+        with patch.object(outputs,'transfer',side_effect=AssertionError('No repeated transfer')):
+            self.assertEqual(follower.advance(f.request_id),result)
+        self.assertEqual(before,f.ledger.events(f.request_id))
+        report_path=next((self.root/'reports').glob('*.json'))
+        saved=json.loads(report_path.read_bytes())
+        self.assertEqual(saved['report']['structural_results'][0]['chart']['values'],[1.,-1.,1.])
