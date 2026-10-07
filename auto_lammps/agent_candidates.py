@@ -13,14 +13,14 @@ import tempfile
 from .deepseek import ModelError
 from .ledger import Resources
 from .manifest import canonical, freeze, private_directory, sha256
-from .structures import build_structure, geometry_runtime, validate_structure
+from .structures import StructureError, build_structure, geometry_runtime, geometry_tool_context, validate_structure
 from .analysis_v2 import AnalysisError, adapter_identity, plan_adapter, validate_plan
 from .analysis import (UNITS as ANALYSIS_UNITS, METHODS as ANALYSIS_METHODS, MAX_TABLES,
                        MIN_COLUMNS, MAX_COLUMNS, MAX_OPERATIONS)
 
 from .candidate_tools import GUIDE, expand_tools, check_table_writers, workflow_tokens
 
-GENERATOR_VERSION = 15
+GENERATOR_VERSION = 16
 COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', 'minimize',
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
@@ -261,7 +261,10 @@ def validate_proposal(value, *, max_atoms, output_layout="isolated", require_ana
         if any(value[key] is not None for key in ('structure', 'potential_pin', 'workflow', 'analysis')):
             raise CandidateError('Clarification proposals must not contain a runnable candidate')
         return None
-    counts=structure_counts(value, max_atoms=max_atoms)
+    try:
+        counts=structure_counts(value, max_atoms=max_atoms)
+    except StructureError as error:
+        raise CandidateError('Structure specification: '+str(error)) from None
     if not isinstance(value['potential_pin'], str) or not re.fullmatch('[a-f0-9]{64}', value['potential_pin']):
         raise CandidateError('Select an exact supplied potential pin')
     analysis = value['analysis']
@@ -375,6 +378,19 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'orientation, boundary, vacancies, substitutions, type_elements, masses_amu. crystal is fcc, bcc, '
         'diamond, rocksalt or zincblende; elements contains base species (two for rocksalt/zincblende); '
         'repeat is three positive integers; orientation must be cubic_axes; boundary is three p/f strings. '
+        'For fcc/bcc alloys, use the same cubic geometry and optionally add assignment. '
+        'For an explicitly random solid solution use assignment={"mode":"random_counts","counts":[...],"seed":...}: '
+        'counts are positive integers in type_elements order and sum to all original lattice sites before defects; '
+        'seed is an explicit integer in [0,4294967295]. The adapter uses sha256_rank_v1 to assign exactly these '
+        'counts without changing positions. Do not enumerate random substitutions or invent a seed, '
+        'round fractions, or substitute a random alloy for a specified ordered structure. '
+        'For specified layers use assignment={"mode":"fractional_layers","axis":0_or_1_or_2, '
+        '"breaks":[0,...,1],"elements":[...]}: breaks strictly increase in the final replicated cell fraction '
+        'along the selected axis; each half-open interval [lower,upper) has its declared species. '
+        'The final break is 1. Every type must occur. Missing ordering, seed or layer boundaries require '
+        'clarification. Assignment is before substitutions, then vacancies, which retain original site indices. '
+        'No assignment is supported for explicit_cell, diamond, rocksalt or zincblende; use the supplied '
+        'basis/sites for ordered structures. Geometric assignment is not a physical-stability check. '
         'For defects present initially use vacancies (zero-based original indices) or substitutions. '
         'To remove a single atom AFTER relaxation, declare group <name> id <literal-one-based-ID>, '
         'save its ID/coordinates (write_dump <group> custom <declared-file> id type x y z), then '
@@ -475,7 +491,11 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'Always emit one JSON object, never prose. The workflow value is a single JSON string: write newlines as '
         'the two characters \\n and never put a raw newline or tab inside any string.'
     )
-    instruction += '\n'+GUIDE
+    instruction += ('\n'+GUIDE+'\nThe service automatically supplies current geometry_adapter '
+                    'capabilities for every proposal, correction and static review. Use them before '
+                    'designing the workflow; do not wait for a separate tool lookup. The adapter '
+                    'executes declared geometry and returns specific checks and receipts. Missing '
+                    'scientific choices require clarification; a prepared geometry is not scientific success.')
     extra = ''
     if guidance:
         extra = '用户中途给出的方向性要求，必须遵守：' + '；'.join(str(item)[:400] for item in guidance) + '。'
@@ -484,6 +504,7 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
     if extra:
         instruction = instruction + ' ' + extra
     context = {'task_text': task_text, 'units': units, 'resources': resource_summaries, 'max_atoms': max_atoms,
+               'geometry_adapter':geometry_tool_context(max_atoms),
                'configured_engine_packages':sorted(packages),
                'answers': (answers or '')[:4000], 'guidance': [str(item)[:500] for item in (guidance or [])]}
     return [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': canonical(context).decode()}]
@@ -517,6 +538,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'resources': vars(resources), 'software_sha256': adapter.software_sha256,
                'potential_compatibility': adapter.compatibility_policy(),
                'configured_engine_packages':sorted(adapter.packages),
+               'geometry_adapter':geometry_tool_context(max_atoms),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
                'requested_model': getattr(client,'model',client.calls.config.model),
                'thinking': getattr(client, 'thinking', False),
@@ -580,6 +602,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     # 契约很长，模型一次难以全部满足。校验规则一条都不放宽，但把**具体错误**回喂给模型，
     # 最多自动修复 3 轮（每轮都是一次可记账调用），常见结果是从"少一个字段"逐轮收敛到合法方案。
     screen = None
+    prepared_geometry = {}
     last_error = None
     seen_proposals=set()
     for attempt in range(4):
@@ -593,14 +616,23 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         try:
             screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout,
                                       require_analysis_plan=require_analysis_plan, packages=adapter.packages)
+            if screen is not None:
+                if proposal['potential_pin'] not in {x['pin'] for x in compatible}:
+                    raise CandidateError('Model selected a resource not supplied in this task')
+                # The geometry tool's real postconditions belong in the same
+                # bounded correction loop, before the model audits the plan.
+                try:
+                    prepared_geometry = {'initial':build_structure(proposal['structure'],units=units,max_atoms=max_atoms)}
+                    for item in proposal.get('additional_structures',[]):
+                        prepared_geometry[item['id']]=build_structure(item['structure'],units=units,max_atoms=max_atoms)
+                except StructureError as error:
+                    raise CandidateError('Geometry preparation: '+str(error)) from None
             if screen is not None and review_plan:
                 try:
                     check_table_writers(expand_tools(proposal['workflow'],proposal['analysis']['plan'],output_prefix(output_layout)),
                                         proposal['analysis']['plan'],output_prefix(output_layout))
                 except ValueError as error:
                     raise CandidateError(str(error)) from None
-                if proposal['potential_pin'] not in {x['pin'] for x in compatible}:
-                    raise CandidateError('Model selected a resource not supplied in this task')
                 reviewed_binding=adapter.resolve_potential(proposal['potential_pin'], type_elements=proposal['structure']['type_elements'], units=units)
                 reviewed_script=render_candidate_script(proposal,units,reviewed_binding.commands,output_layout=output_layout).decode('ascii')
                 review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal}))[:32]
@@ -633,7 +665,14 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'requirements are issues; no stylistic issues. An empty issues list means static consistency '
                      'only, never scientific success. '+GUIDE},
                     {'role':'user','content':canonical({'requirements':task_text,'guidance':guidance or [],
-                        'proposal':proposal,'rendered_script':reviewed_script,'resource_metadata':compatible,'atom_counts':structure_counts(proposal,max_atoms=max_atoms),'geometry_order':'x outer, y middle, z inner, basis innermost; '
+                        'proposal':proposal,'rendered_script':reviewed_script,'resource_metadata':compatible,
+                        'geometry_adapter':context['geometry_adapter'],
+                        'geometry_checks':{name:{**{k:g.receipt[k] for k in
+                            ('atom_count','composition','type_elements','boundary')},
+                            'receipt_sha256':sha256(canonical(g.receipt)),
+                            'physical_evaluation_performed':False,'scientifically_verified':False}
+                            for name,g in prepared_geometry.items()},
+                        'atom_counts':structure_counts(proposal,max_atoms=max_atoms),'geometry_order':'x outer, y middle, z inner, basis innermost; '
                         'conventional bcc basis [0,0,0],[0.5,0.5,0.5]; one-based LAMMPS atom IDs'}).decode()}], reasoning_effort='low')
                 value=review['value']; receipt=review['receipt']
                 if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
@@ -695,7 +734,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         raise CandidateError('Model selected a resource not supplied in this task')
     if on_stage:
         on_stage('preparing_files')
-    geometry = build_structure(proposal['structure'], units=units, max_atoms=max_atoms)
+    geometry = prepared_geometry['initial']
     binding = adapter.resolve_potential(proposal['potential_pin'],
                                         type_elements=proposal['structure']['type_elements'], units=units)
     script = render_candidate_script(proposal,units,binding.commands,output_layout=output_layout)
@@ -713,7 +752,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     files = {**binding.files, 'structure.data': geometry.data, 'in.lammps': script,
              'analysis.json': canonical(analysis), 'generation.json': canonical(generation)}
     for item in proposal.get('additional_structures',[]):
-        extra=build_structure(item['structure'],units=units,max_atoms=max_atoms)
+        extra=prepared_geometry[item['id']]
         files['structure-'+item['id']+'.data']=extra.data
         generation.setdefault('additional_geometry_receipts',{})[item['id']]=extra.receipt
     files['generation.json']=canonical(generation)

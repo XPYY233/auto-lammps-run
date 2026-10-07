@@ -1,7 +1,9 @@
 """ASE geometry and serialization only. No calculator, relaxation or dynamics."""
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from io import StringIO
+from hashlib import sha256 as hash_bytes
 import math
 
 from .manifest import canonical, sha256
@@ -13,10 +15,37 @@ SPEC_FIELDS = {'crystal', 'elements', 'a_angstrom', 'repeat', 'orientation', 'bo
                'vacancies', 'substitutions', 'type_elements', 'masses_amu'}
 EXPLICIT_FIELDS = (SPEC_FIELDS - {'elements', 'a_angstrom'}) | {
     'cell_angstrom', 'site_elements', 'scaled_positions'}
+ALLOY_CRYSTALS = ('fcc', 'bcc')
+COMPOSITION_SEED_MAX = 4294967295
+MAX_COMPOSITION_LAYERS = 32
+GEOMETRY_TOOL_VERSION = 2
 
 
 class StructureError(ValueError):
     pass
+
+
+def geometry_tool_context(max_atoms):
+    """Automatically supplied to planning, repair and review, not model-selected."""
+    return {'adapter': 'ase_geometry', 'version': GEOMETRY_TOOL_VERSION,
+            'ase_version': ASE_VERSION, 'max_atoms': max_atoms,
+            'cubic': {'basis_counts': dict(CELL_ATOMS), 'required_fields': sorted(SPEC_FIELDS),
+                      'orientation': 'cubic_axes'},
+            'explicit_cell': {'required_fields': sorted(EXPLICIT_FIELDS),
+                              'orientation': 'provided_axes', 'frame': 'restricted_triclinic'},
+            'composition': {'crystals': list(ALLOY_CRYSTALS),
+                            'random_counts': {'required_fields': ['mode', 'counts', 'seed'],
+                                              'seed_range': [0, COMPOSITION_SEED_MAX],
+                                              'algorithm': 'sha256_rank_v1',
+                                              'counts': 'positive integers in type_elements order; sum is original sites'},
+                            'fractional_layers': {'required_fields': ['mode', 'axis', 'breaks', 'elements'],
+                                                  'axes': [0, 1, 2], 'max_layers': MAX_COMPOSITION_LAYERS,
+                                                  'cell': 'final replicated cell', 'interval': '[lower,upper)'}},
+            'edit_order': ['composition', 'substitutions', 'vacancies'],
+            'site_indices': 'zero-based original sites; x,y,z,basis replication order',
+            'missing_scientific_parameters': 'ask a specific clarification; never guess or change scope',
+            'physical_evaluation': 'HPC only; this geometry adapter performs none',
+            'scientific_success': 'not established by geometry preparation'}
 
 
 def geometry_runtime():
@@ -77,13 +106,83 @@ def _explicit_cell(spec, max_basis_atoms):
     return len(elements)
 
 
+def _validate_assignment(spec, total):
+    """Composition is explicit task data, never inferred from elemental defaults."""
+    assignment = spec.get('assignment')
+    if assignment is None:
+        if 'assignment' in spec:
+            raise StructureError('Omit assignment or supply its complete specification')
+        return
+    if not isinstance(assignment, dict) or spec['crystal'] not in ALLOY_CRYSTALS:
+        raise StructureError('Composition assignment requires a conventional fcc or bcc geometry')
+    if assignment.get('mode') == 'random_counts':
+        if set(assignment) != {'mode', 'counts', 'seed'}:
+            raise StructureError('Random composition requires explicit counts and seed')
+        counts, seed = assignment['counts'], assignment['seed']
+        if (not isinstance(counts, list) or len(counts) != len(spec['type_elements'])
+                or any(type(x) is not int or x <= 0 for x in counts) or sum(counts) != total):
+            raise StructureError('Positive integer counts must follow type_elements and sum to all original sites')
+        if type(seed) is not int or not 0 <= seed <= COMPOSITION_SEED_MAX:
+            raise StructureError('An explicit composition seed in [0,4294967295] is required')
+    elif assignment.get('mode') == 'fractional_layers':
+        if set(assignment) != {'mode', 'axis', 'breaks', 'elements'}:
+            raise StructureError('Layers require an explicit fractional axis, breaks and species')
+        axis, breaks, elements = assignment['axis'], assignment['breaks'], assignment['elements']
+        if type(axis) is not int or axis not in (0, 1, 2):
+            raise StructureError('Layer axis must be 0, 1 or 2 in the final replicated cell')
+        if (not isinstance(breaks, list) or not 3 <= len(breaks) <= MAX_COMPOSITION_LAYERS+1
+                or any(not _finite(x) or not 0 <= x <= 1 for x in breaks)
+                or breaks[0] != 0 or breaks[-1] != 1
+                or any(a >= b for a, b in zip(breaks, breaks[1:]))):
+            raise StructureError('Strictly increasing layer breaks must span [0,1] without gaps')
+        if (not isinstance(elements, list) or len(elements) != len(breaks)-1
+                or any(not isinstance(x, str) or x not in spec['type_elements'] for x in elements)
+                or set(elements) != set(spec['type_elements'])):
+            raise StructureError('Provide one declared species per layer, covering all types')
+    else:
+        raise StructureError('Unsupported composition assignment; no guessed fractions or ordering')
+
+
+def _assign_composition(atoms, spec):
+    assignment = spec.get('assignment')
+    if assignment is None:
+        return None
+    total = len(atoms)
+    if assignment['mode'] == 'random_counts':
+        # Stable across Python/NumPy versions. Hash collisions use original site order.
+        prefix = b'auto-lammps/alloy-sha256-rank-v1\0' + assignment['seed'].to_bytes(4, 'big')
+        order = sorted(range(total), key=lambda i: (hash_bytes(prefix+i.to_bytes(8, 'big')).digest(), i))
+        symbols = [None]*total
+        start = 0
+        for element, count in zip(spec['type_elements'], assignment['counts']):
+            for site in order[start:start+count]:
+                symbols[site] = element
+            start += count
+        algorithm = 'sha256_rank_v1'
+    else:
+        positions = atoms.get_scaled_positions(wrap=False)[:, assignment['axis']]
+        symbols = []
+        for position in positions:
+            if not 0 <= position < 1:
+                raise StructureError('Layer site is outside the explicitly supplied fractional cell')
+            layer = next(i for i, upper in enumerate(assignment['breaks'][1:]) if position < upper)
+            symbols.append(assignment['elements'][layer])
+        algorithm = 'fractional_half_open_layers_v1'
+    atoms.set_chemical_symbols(symbols)
+    return {'specification': deepcopy(assignment), 'algorithm': algorithm,
+            'original_site_composition': dict(Counter(symbols)),
+            'order': 'assignment_before_substitutions_before_vacancies',
+            'coordinate_changes_performed': False, 'physical_evaluation_performed': False}
+
+
 def validate_structure(spec, *, max_atoms=100000):
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
         raise StructureError('Invalid geometry atom limit')
     if not isinstance(spec, dict):
         raise StructureError('All geometry fields must be explicit')
     explicit = spec.get('crystal') == 'explicit_cell'
-    if set(spec) != (EXPLICIT_FIELDS if explicit else SPEC_FIELDS):
+    fields = EXPLICIT_FIELDS if explicit else SPEC_FIELDS
+    if set(spec) not in (fields, fields | {'assignment'}):
         raise StructureError('All geometry fields must be explicit')
     if not isinstance(spec['crystal'], str) or spec['crystal'] not in {*CELL_ATOMS, 'explicit_cell'}:
         raise StructureError('Unsupported crystal builder')
@@ -131,6 +230,7 @@ def validate_structure(spec, *, max_atoms=100000):
             or len(set(types)) != len(types) or not isinstance(masses, list) or len(masses) != len(types)
             or any(not _positive(x) or x > 1000 for x in masses)):
         raise StructureError('Provide unique ordered types and explicit positive masses')
+    _validate_assignment(spec, total)
     return total
 
 
@@ -160,6 +260,7 @@ def build_structure(spec, *, units, max_atoms=100000):
         builder = 'ase.bulk.conventional_cubic'
     if len(atoms) != total or atoms.calc is not None:
         raise StructureError('Unexpected geometry builder result')
+    assignment_receipt = _assign_composition(atoms, spec)
     for change in spec['substitutions']:
         atoms[change['site']].symbol = change['element']
     del atoms[spec['vacancies']]
@@ -192,4 +293,6 @@ def build_structure(spec, *, units, max_atoms=100000):
                        automatic_rotation_performed=False, automatic_wrapping_performed=False,
                        basis_site_count=len(spec['site_elements']),
                        replication_order='x_outer_y_middle_z_inner_basis_innermost')
+    if assignment_receipt is not None:
+        receipt.update(schema_version=2, composition_assignment=assignment_receipt)
     return Geometry(data, receipt)

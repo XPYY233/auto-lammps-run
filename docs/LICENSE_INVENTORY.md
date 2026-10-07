@@ -14,6 +14,7 @@
 | ANI-Al | 模型和数据仓库可见 | 运行依赖和许可待核，不镜像 |
 | materialsvirtuallab/mlearn | 固定提交 10c427a5480c6281c15c64efaf869b03be04818f；根 LICENSE 为 BSD-3-Clause，版权 Materials Virtual Lab 2019 | 私人资源库保留原始模型、许可证及参考模板用于核验；弹性模板的上游许可义务仍需单独核对，不公开再分发；原创路径适配器未复制作者实现；见 POTENTIALS.md、REFERENCE_PATHS.md |
 | FastAPI 0.141.1 / Uvicorn 0.52.0 / HTTPX 0.28.1 | PyPI 元数据分别为 MIT / BSD-3-Clause / BSD-3-Clause；HTTPX 仅测试使用 | 通过官方包安装，不内嵌第三方源码；发行前继续核查完整传递依赖 |
+| HTTPX2 2.13.1 | [官方 PyPI 元数据](https://pypi.org/project/httpx2/2.13.1/) 标注 BSD-3-Clause、Python >=3.10 | 仅 test 可选依赖，支持当前 Starlette TestClient；保留原 HTTPX 兼容依赖，不嵌入第三方源码、不改变生产模型连接器 |
 | Bubblewrap / libseccomp | 仅调用系统安装版本的程序/API，无源码或二进制内嵌；部署版本、依赖及许可证仍需固定审计 | 不随原创代码重新许可，不打包分发 |
 | ASE 3.29.0 | PyPI 元数据与已安装包 LICENSE 均为 LGPL-2.1-or-later；官方建模与 LAMMPS data 接口已核对 | 作为 geometry 可选依赖独立安装，仅几何和序列化；无源码复制、不嵌入计算器；发行前继续核对传递依赖和许可义务 |
 | OVITO Python（Linux 3.15.5，macOS ARM64 3.16.1.post1，其他平台 3.16.1） | 官方 PyPI 包元数据 License-Expression 为 MIT；依赖 PySide6-Essentials/NumPy/traits | 通过 analysis 依赖安装，保留上游包许可；不调用桌面 Basic/Pro、不重新许可或复制其应用程序 |

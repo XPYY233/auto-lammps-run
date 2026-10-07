@@ -166,18 +166,17 @@ class AgentCandidateTests(unittest.TestCase):
         self.assertFalse(record['execution_authorized'])
         self.assertEqual(record['geometry_receipt']['builder'], 'ase.Atoms.explicit_cell')
         self.assertEqual(record['geometry_receipt']['atom_count'], 3)
-        self.assertEqual(record['input']['generator_version'], 15)
+        self.assertEqual(record['input']['generator_version'], 16)
         request = json.loads(self.transport.call_args.args[0])
         self.assertIn('meam', request['messages'][1]['content'])
         self.assertEqual(self.calls.status()['used_requests'], 1)
 
     def test_invalid_explicit_model_geometry_keeps_response_and_does_not_build(self):
         from test_structures import EXPLICIT
-        from auto_lammps.structures import StructureError
         self.value['structure'] = deepcopy(EXPLICIT)
         self.value['structure']['cell_angstrom'][0][1] = 0.1
         with patch('auto_lammps.agent_candidates.build_structure') as build:
-            with self.assertRaises(StructureError):
+            with self.assertRaisesRegex(CandidateError, 'Structure specification:.*restricted-triclinic'):
                 self.generate()
             build.assert_not_called()
         self.assertEqual(self.calls.status()['used_requests'], 1)
