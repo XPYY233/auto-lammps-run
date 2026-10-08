@@ -60,6 +60,9 @@ class ReferenceViews:
         folder=self.directory/identifier
         if not folder.exists():return None,None
         existing_private_directory(folder)
+        # Workbench P may be registered before an A diagnostic is produced.
+        # Its sibling directory does not imply a legacy A report exists.
+        if not (folder/'report.json').exists():return None,None
         raw=runtime.read_regular(folder/'report.json',262144,private=True)
         report=json.loads(raw)
         if report.get('version')!=1 or report.get('task_id')!=identifier or report.get('scientific_status')!='diagnostic':

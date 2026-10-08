@@ -13,6 +13,8 @@ from auto_lammps.results import ResultUnavailable
 from auto_lammps.runtime_launcher import ExecutionDenied
 from auto_lammps.manifest import canonical, sha256
 from auto_lammps.web import create_app
+from auto_lammps.operator_workspace import ReferenceViews
+from types import SimpleNamespace
 from test_tasks import target_inventory, evidence
 from test_web import ORIGIN, HEADERS
 
@@ -112,6 +114,11 @@ class PaperEvidenceTests(unittest.TestCase):
         report=self.views.get(self.task['id'])
         self.assertEqual(report['views'][0]['tables'][0]['rows'],[['0',''],['1','2']])
         self.assertEqual(self.views.download(self.task['id'],'points.csv'),content)
+
+    def test_P_only_folder_does_not_claim_or_break_legacy_A_report(self):
+        reference=ReferenceViews(self.directory,SimpleNamespace(ledger=object(),tasks=self.store))
+        self.assertIsNone(reference.get(self.task['id']))
+        self.assertIsNotNone(self.views.get(self.task['id']))
 
     def test_source_bytes_identity_hash_and_role_fail_closed(self):
         original=deepcopy(self.document)
