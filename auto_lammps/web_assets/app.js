@@ -854,7 +854,7 @@ function renderCurrentActivity(){
     const state=job.scheduler_state;
     title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
-      (job.state==='analyzed'?'已保存分析结果，请查看下方结果；科学结论仍需核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
+      (job.state==='analyzed'?'数值结果已保存。可让应用内 AI 对照研究目标指出已满足的条件与缺少的证据；科学结论仍待独立核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
     meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState?.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
   }else if(current?.status!=='conditions_frozen'&&taskActivity?.condition_preparation){
     const condition=taskActivity.condition_preparation;
@@ -870,6 +870,14 @@ function renderCurrentActivity(){
   renderNextAction();
 }
 
+function prepareResultReview(){
+  const panel=$('.discussion-panel'),input=$('#discussion-prompt'),note=$('#task-quick-note');
+  if(!current||!panel||panel.hidden){if(note)note.textContent='已有可用结果后，才能核对结果与研究目标。';return;}
+  if(!input.value.trim())input.value='请依据本任务已冻结的研究条件和已经核验的计算结果，逐项核对：计算方法是否符合研究目标；关键数值、单位、收敛与异常是否有证据；目前能确认什么、还缺什么。每项引用具体数据或说明证据缺失。不要把调度结束或数值处理完成说成科学验收通过，也不要发起新计算。';
+  panel.scrollIntoView({block:'start',behavior:'smooth'});input.focus();
+  $('#discussion-status').textContent='请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
+  if(note)note.textContent='已打开结果核对问题，请检查后发送。';
+}
 function renderNextAction(){
   const button=$('#next-action'),note=$('#next-action-note'),previous=$('#previous-step');
   if(!button||!current)return;
@@ -890,6 +898,10 @@ function renderNextAction(){
       jump('查看计算进度','#execution-flow',note.textContent);return;
     }
     if(job.state==='analyzed'){
+      if(!$('.discussion-panel')?.hidden){
+        button.textContent='核对结果与研究目标';button.hidden=false;button.onclick=prepareResultReview;
+        note.textContent='应用内 AI 可解释已有证据；正式科学验收尚未完成。';return;
+      }
       jump('查看数据与图表','#research-results','结果已保存；科学结论仍待核验。');return;
     }
     if(job.state==='completed'){
@@ -2253,6 +2265,8 @@ bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-pa
 bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
 const taskQuickLinks=$('#task-quick-links');
 if(taskQuickLinks)taskQuickLinks.onclick=event=>{
+  const review=event.target.closest('button[data-task-action="review-results"]');
+  if(review&&taskQuickLinks.contains(review)){prepareResultReview();return;}
   const button=event.target.closest('button[data-task-target]');
   if(!button||!taskQuickLinks.contains(button))return;
   const target=$(button.dataset.taskTarget),note=$('#task-quick-note');
@@ -2329,7 +2343,7 @@ $('#home-start').onclick=()=>{const prompt=$('#home-prompt').value;showNew();$('
 $('#home-guide').onclick=()=>{$('#home-start').click();};$('#home-cases').onclick=()=>requestRoute('#papers');
 $('#paper-search').oninput=()=>action(refreshPapers);
 for(const [title,text] of [['合金拉伸响应','研究 300 K 下 NbTiZrMoV 合金的单轴拉伸响应。请整理需要确认的初始结构、势函数和加载条件，输出应力–应变曲线与缺陷分析。'],['晶体弹性性质','计算 SiC 晶体的弹性性质。请先确认晶型、温度和势函数，给出弹性常数与分析图表。'],['点缺陷形成能','研究 W 晶体中的空位形成能。请明确参考体系、边界条件及弛豫方案，保留结构与能量来源。']]){const b=node('button',undefined,'example-task');b.append(node('strong',title),node('small',text));b.onclick=()=>{$('#create-form [name=prompt]').value=text;$('#create-form [name=prompt]').focus();};$('#task-examples').append(b);}
-const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存，尚未确定的科学条件需要进一步明确。当前通用自动执行尚未开放。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
+const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存。按任务页“当前进展”的下一步，依次核对条件、确认方案、查看 HPC 计算和结果；尚未确定的科学条件会明确显示。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
 function renderHelp(){const query=$('#help-search').value.trim().toLowerCase(),box=$('#help-articles');box.replaceChildren();for(const [title,body] of helpItems.filter(r=>r.join(' ').toLowerCase().includes(query))){const d=node('details',undefined,'panel help-article');d.open=title==='快速开始';d.append(node('summary',title),node('p',body));box.append(d);}if(!box.children.length)box.append(emptyState('未找到相关说明','试试“模型”“计算”或“结果”等关键词。'));}
 $('#help-search').oninput=renderHelp;
 function renderPlotGallery(report,box){
@@ -2376,6 +2390,7 @@ $('#discussion-open-plots').onclick=()=>{
  for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='可视化图表'));
  renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});
 };
+$('#discussion-review-results').onclick=prepareResultReview;
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
 let chartRequest=null;
 $('#discussion-ai-chart').onclick=()=>action(async()=>{

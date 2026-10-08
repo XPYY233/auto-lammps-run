@@ -268,7 +268,7 @@ test('a saved job controls the next action instead of an older prepared plan',()
  const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
  vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research'}, activityData=null, candidateRecord={state:'prepared'}, executionState={job:{state:'failed',can_retry:false}};",c);
- vm.runInContext(source.slice(source.indexOf('function renderNextAction(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+ vm.runInContext(source.slice(source.indexOf('function prepareResultReview(){'),source.indexOf('function scheduleActivityRefresh(')),c);
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看失败原因与记录');
  assert.match($('#next-action-note').textContent,/已有提交与费用记录保留/);
@@ -277,6 +277,16 @@ test('a saved job controls the next action instead of an older prepared plan',()
  assert.equal($('#next-action').textContent,'查看回收与分析进度');
  assert.doesNotMatch($('#next-action-note').textContent,/结果已保存/);
  vm.runInContext("executionState.job={state:'analyzed',can_retry:false}",c);
+ c.renderNextAction();
+ assert.equal($('#next-action').textContent,'核对结果与研究目标');
+ let opened=false,focused=false;
+ $('.discussion-panel').scrollIntoView=()=>{opened=true;};
+ $('#discussion-prompt').focus=()=>{focused=true;};
+ $('#next-action').onclick();
+ assert.equal(opened&&focused,true);
+ assert.match($('#discussion-prompt').value,/关键数值、单位、收敛与异常/);
+ assert.match($('#discussion-status').textContent,/正式科学验收状态不会因此改变/);
+ $('.discussion-panel').hidden=true;
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看数据与图表');
 });
