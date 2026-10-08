@@ -38,11 +38,37 @@ test('queued route is restored after a failed action, including the previously d
  await hold;await flush();assert.equal(c.visits.at(-1),'#home');assert.equal(c.visits.length,2);assert.deepEqual(c.errors,['request failed']);
 });
 test('stale task-open response cannot publish task content after a new navigation request',async()=>{
- const c=setup();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ const c=setup(),elements=new Map();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ c.$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ c.$('#ai-current-title').textContent='Old task status';
  vm.runInContext('let current=null;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
- const hold=c.action(()=>c.openTask('a'.repeat(32)));c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
+ const hold=c.action(()=>c.openTask('a'.repeat(32)));await flush();
+ assert.equal(elements.get('#task-view').hidden,true,'old task must disappear before the new GET returns');
+ assert.equal(elements.get('#task-loading').hidden,false);
+ assert.equal(elements.get('#ai-current-title').textContent,'正在读取当前任务进度…');
+ c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
  assert.equal(vm.runInContext('current',c),null);assert.equal(c.visits.at(-1),'#help');assert.equal(c.location.hash,'#help');
+});
+
+test('one unavailable task section leaves later saved progress and discussion readable',async()=>{
+ const id='c'.repeat(32),elements=new Map(),reads=[],messages=[];
+ const $=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ const c=vm.createContext({$,pendingRoute:null,window:{scrollTo(){}},
+  api:async()=>({id}),clearCandidateView(){},renderWorkspaceResults(){},recordRoute(){},render(){},
+  listTasks:async()=>reads.push('list'),renderHistory:async()=>{reads.push('history');throw new Error('temporary read error');},
+  refreshCandidate:async()=>reads.push('candidate'),refreshGuidance:async()=>reads.push('guidance'),
+  refreshPlanReview:async()=>reads.push('plan'),refreshActivity:async()=>reads.push('activity'),
+  refreshResults:async()=>reads.push('results'),refreshReferenceHistory:async()=>reads.push('reference'),
+  refreshWorkspace:async()=>reads.push('workspace'),refreshDiscussion:async()=>reads.push('discussion'),
+  notice:(message)=>messages.push(message),
+ });
+ vm.runInContext('let current=null, initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryLoading=false, initialGeometryRead=0, normalResult=null, workspaceReport=null, rawResult=null, executionState=null, referenceProgress=null, activityData=null, workspaceGeneration=0, workspaceState=null;',c);
+ vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
+ await c.openTask(id);
+ assert.deepEqual(reads,['list','history','candidate','guidance','plan','activity','results','reference','workspace','discussion']);
+ assert.match(messages[0],/修订记录.*刷新状态/);
+ assert.equal($('#task-view').hidden,false);
 });
 
 function element(tag){
@@ -141,7 +167,7 @@ function setupTaskList(tasks){
  const elements=new Map(),c=vm.createContext({
   document:{createElement:element},current:null,taskCache:tasks,taskFilter:'all',
   $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
-  api:async()=>({tasks}),statsFor(){},requestRoute(){},removalButton:label=>element(label),notice(){},
+  api:async()=>({tasks}),statsFor(){},requestRoute(){},removalButton:label=>{const button=element('button');button.textContent=label;return button;},notice(){},
  });
  vm.runInContext(source.slice(source.indexOf('function node(tag, value, className) {'),source.indexOf('function notice(')),c);
  vm.runInContext(source.slice(source.indexOf('function taskFinished(t)'),source.indexOf('function statsFor(')),c);
@@ -187,6 +213,72 @@ test('a reference with retained submissions and no receipt cannot inherit an old
   const text=textContent(elements.get(container));assert.match(text,/作者参考 A · 暂无作业回执/);assert.doesNotMatch(text,/尚未提交|未提交/);
  }
  assert.match(textContent(elements.get('#task-cards')),/A 提交：2 次（含失败）/);
+});
+
+test('task filters expose approvals and clarifications without calling them failures',async()=>{
+ const tasks=[
+  {id:OLD,title:'Plan needs approval',status:'conditions_frozen',preparation_state:'prepared'},
+  {id:NEXT,title:'AI asks a question',status:'conditions_frozen',preparation_state:'clarification'},
+  {id:'c'.repeat(32),title:'Plan failed',status:'conditions_frozen',preparation_state:'failed'},
+  {id:'d'.repeat(32),title:'Job is running',status:'conditions_frozen',execution_state:'running'},
+ ];
+ const {c,elements}=setupTaskList(tasks);await c.listTasks();
+ c.taskFilter='attention';c.taskCards();
+ const attention=textContent(elements.get('#task-cards'));
+ assert.match(attention,/Plan needs approval/);assert.match(attention,/AI asks a question/);
+ assert.match(attention,/Plan failed/);assert.doesNotMatch(attention,/Job is running/);
+ c.taskFilter='draft';c.taskCards();
+ const preparing=textContent(elements.get('#task-cards'));
+ assert.match(preparing,/Plan needs approval/);assert.match(preparing,/AI asks a question/);
+ assert.doesNotMatch(preparing,/Plan failed/);
+ c.taskFilter='failed';c.taskCards();
+ const failed=textContent(elements.get('#task-cards'));
+ assert.match(failed,/Plan failed/);assert.doesNotMatch(failed,/AI asks a question/);
+});
+
+test('completed author A cannot replace an unstarted B next step',async()=>{
+ const task={id:OLD,title:'A complete, B draft',mode:'reproduction',status:'draft',reference_state:'completed',reference_job_id:'123'};
+ const {c,elements}=setupTaskList([task]);await c.listTasks();c.taskCards();
+ assert.equal(c.taskState(task),'draft');
+ assert.equal(c.taskNextLabel(task),'整理需求');
+ const phases=c.taskPhaseLabels(task);
+ assert.equal(phases[0].label,'作者参考 A · 计算结束 · 科学结果待核验');
+ assert.equal(phases[1].label,'B 方案 · 待准备');
+ c.taskFilter='attention';c.taskCards();
+ assert.match(textContent(elements.get('#task-cards')),/A complete, B draft/);
+});
+
+test('task list offers record closure only after active work and uncertain submissions settle',async()=>{
+ const tasks=[
+  {id:OLD,title:'Running job',status:'conditions_frozen',execution_state:'running'},
+  {id:NEXT,title:'Unknown submission',status:'conditions_frozen',execution_state:'unknown'},
+  {id:'c'.repeat(32),title:'Finished job',status:'conditions_frozen',execution_state:'completed'},
+ ];
+ const {c,elements}=setupTaskList(tasks);await c.listTasks();c.taskCards();
+ const rows=elements.get('#task-cards').children[0].children[1].children;
+ const running=textContent(rows[0]),unknown=textContent(rows[1]),completed=textContent(rows[2]);
+ assert.match(running,/任务仍在准备或计算/);
+ assert.match(unknown,/运行记录待核对/);
+ assert.doesNotMatch(running+unknown,/确认任务结束|删除任务记录/);
+ assert.match(completed,/确认任务结束/);
+ assert.match(completed,/删除任务记录/);
+});
+
+test('a saved job controls the next action instead of an older prepared plan',()=>{
+ const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
+ vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research'}, activityData=null, candidateRecord={state:'prepared'}, executionState={job:{state:'failed',can_retry:false}};",c);
+ vm.runInContext(source.slice(source.indexOf('function renderNextAction(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+ c.renderNextAction();
+ assert.equal($('#next-action').textContent,'查看失败原因与记录');
+ assert.match($('#next-action-note').textContent,/已有提交与费用记录保留/);
+ vm.runInContext("executionState.job={state:'completed',can_retry:false}",c);
+ c.renderNextAction();
+ assert.equal($('#next-action').textContent,'查看回收与分析进度');
+ assert.doesNotMatch($('#next-action-note').textContent,/结果已保存/);
+ vm.runInContext("executionState.job={state:'analyzed',can_retry:false}",c);
+ c.renderNextAction();
+ assert.equal($('#next-action').textContent,'查看数据与图表');
 });
 
 function setupAfterChange(){
@@ -384,4 +476,34 @@ test('a removed tab button cannot change the latest paper selection on the next 
  let view=redrawPaper(state,structuredClone(report));view.tabs.children[1].onclick();assertSelectedPaper(view,'second','second.png');
  oldFirst.onclick();assertSelectedPaper(view,'second','second.png');
  view=redrawPaper(state,structuredClone(report));assertSelectedPaper(view,'second','second.png');
+});
+
+test('task list refresh reads saved progress and keeps the visible rows on a temporary read failure',async()=>{
+ const elements=new Map(),calls=[];
+ const $=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ $('#tasks-view').hidden=false;$('#home-view').hidden=true;
+ $('#tasks-view').contains=()=>false;
+ const c=vm.createContext({$,document:{hidden:false,activeElement:{},querySelector:()=>null},busy:false,
+  listTasks:async()=>{calls.push('read');},taskCards:()=>calls.push('render'),statsFor:()=>{},taskState:()=>'',
+  taskCache:[],setInterval:()=>{},Date,console});
+ vm.runInContext(source.slice(source.indexOf('function markTaskListFresh(){'),source.indexOf("let resourceFilter='all'")),c);
+ await c.refreshVisibleTaskSummaries();
+ assert.deepEqual(calls,['read','render']);assert.match($('#tasks-last-sync').textContent,/状态更新于/);
+ c.listTasks=async()=>{calls.push('failed read');throw new Error('connection interrupted');};
+ await c.refreshVisibleTaskSummaries();
+ assert.deepEqual(calls,['read','render','failed read']);
+ assert.match($('#tasks-last-sync').textContent,/状态暂未更新.*connection interrupted/);
+});
+
+test('automatic list refresh waits while a user operates the list, while manual refresh still works',async()=>{
+ const elements=new Map(),calls=[];
+ const $=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ $('#tasks-view').hidden=false;$('#home-view').hidden=true;
+ $('#tasks-view').contains=()=>true;
+ const c=vm.createContext({$,document:{hidden:false,activeElement:{},querySelector:()=>null},busy:false,
+  listTasks:async()=>calls.push('read'),taskCards:()=>calls.push('render'),statsFor:()=>{},taskState:()=>'',
+  taskCache:[],setInterval:()=>{},Date,console});
+ vm.runInContext(source.slice(source.indexOf('function markTaskListFresh(){'),source.indexOf("let resourceFilter='all'")),c);
+ await c.refreshVisibleTaskSummaries();assert.deepEqual(calls,[]);
+ await $('#tasks-refresh').onclick();assert.deepEqual(calls,['read','render']);
 });

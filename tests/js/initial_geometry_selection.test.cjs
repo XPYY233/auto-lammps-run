@@ -15,7 +15,7 @@ function setup({selected=false,frozen=false}={}){
     append(...items){this.children.push(...items);},replaceChildren(...items){this.children=[...items];},
     setAttribute(name,value){this[name]=value;},
     before(item){elements.set('#'+item.id,item);}};}
-  elements.set('#execution-flow',element('div'));
+  elements.set('#conditions',element('div'));
   const context=vm.createContext({
     current:{id:TASK,revision:9,status:frozen?'conditions_frozen':'conditions_draft',
       ...(selected?{initial_geometry:{catalog_sha256:CATALOG,entry:clone(entry)}}:{})},

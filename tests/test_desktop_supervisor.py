@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -115,16 +117,48 @@ class SuperviseTests(unittest.TestCase):
     def receipt(self):
         return json.loads((self.state / 'last-desktop-entry.json').read_text(encoding='utf-8'))
 
-    def test_close_beacon_stops_the_service_through_the_shared_stopper(self):
+    def test_close_beacon_preserves_service_for_background_research(self):
         closed = {'sessions': {}, 'closed_session': 'tok'}
         code, launch, browser = self.run_supervise(
             started=True, activity=closed,
             snapshots=[{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}])
         self.assertEqual(code, 0)
-        self.assertEqual(self.stops, [self.resolved_config()])
+        self.assertEqual(self.stops, [])
         self.assertEqual(self.receipt()['reason'], 'page_closed')
-        self.assertTrue(self.receipt()['stopped'])
+        self.assertFalse(self.receipt()['stopped'])
         self.assertFalse(browser.called)  # --no-browser keeps the test headless
+
+    def test_close_leaves_an_isolated_real_service_process_alive(self):
+        """A real local listener must outlive the entry when the page closes."""
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        code = ('from http.server import BaseHTTPRequestHandler, HTTPServer; '
+                'import sys; HTTPServer(("127.0.0.1", int(sys.argv[1])), BaseHTTPRequestHandler).serve_forever()')
+        service = subprocess.Popen([sys.executable, '-c', code, str(port)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (service.terminate(), service.wait(timeout=5)) if service.poll() is None else None)
+        for _ in range(100):
+            if supervisor.port_listening(port):
+                break
+            time.sleep(0.02)
+        self.assertTrue(supervisor.port_listening(port))
+        config={'port':port,'state_directory':str(self.state),'args':[],'release':'synthetic-test'}
+        first=iter([{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}])
+        closed={'sessions': {}, 'closed_session': 'tok'}
+        with mock.patch.object(supervisor.launch_local, 'read_config', return_value=config), \
+             mock.patch.object(supervisor.launch_local, 'launch',
+                               return_value={'started':True,'url':f'http://127.0.0.1:{port}/#home'}), \
+             mock.patch.object(supervisor, 'activity_enabled', return_value={'enabled':True}), \
+             mock.patch.object(supervisor, 'read_activity', side_effect=lambda _: next(first, closed)), \
+             mock.patch.object(supervisor, 'stop_service') as stopper:
+            result=supervisor.supervise(self.args(no_browser=True))
+        self.assertEqual(result,0)
+        self.assertEqual(self.receipt()['reason'],'page_closed')
+        stopper.assert_not_called()
+        self.assertIsNone(service.poll())
+        self.assertTrue(supervisor.port_listening(port))
 
     def test_started_service_is_stopped_when_the_page_never_connects(self):
         code, launch, browser = self.run_supervise(started=True, activity={'sessions': {}})
@@ -145,11 +179,8 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertEqual(self.receipt()['monitoring'], 'unavailable')
 
-    def test_no_stop_flag_keeps_the_service_running(self):
-        closed = {'sessions': {}, 'closed_session': 'tok'}
-        code, launch, browser = self.run_supervise(
-            started=True, activity=closed,
-            snapshots=[{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}], no_stop=True)
+    def test_no_stop_flag_keeps_unopened_service_running_for_offline_tests(self):
+        code, launch, browser = self.run_supervise(started=True, activity={'sessions': {}}, no_stop=True)
         self.assertEqual(code, 0)
         self.assertEqual(self.stops, [])
         self.assertFalse(self.receipt()['stopped'])
@@ -157,16 +188,17 @@ class SuperviseTests(unittest.TestCase):
     def test_the_page_is_opened_by_a_separate_process(self):
         """The stdlib waits for a generic browser process; supervision must not wait with it."""
         closed = {'sessions': {}, 'closed_session': 'tok'}
+        first = iter([{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}])
         with mock.patch.object(supervisor.subprocess, 'Popen') as opener, \
              mock.patch.object(supervisor.launch_local, 'launch',
                                return_value={'started': True, 'url': 'http://127.0.0.1:8799/?release=abc#home'}), \
              mock.patch.object(supervisor, 'activity_enabled', return_value={'enabled': True}), \
              mock.patch.object(supervisor, 'port_listening', return_value=True), \
-             mock.patch.object(supervisor, 'read_activity', return_value=closed), \
+             mock.patch.object(supervisor, 'read_activity', side_effect=lambda _: next(first, closed)), \
              mock.patch.object(supervisor, 'stop_service', side_effect=lambda path: (self.stops.append(str(path)), (0, '已停止'))[1]):
             code = supervisor.supervise(self.args(no_browser=False))
         self.assertEqual(code, 0)
-        self.assertEqual(self.stops, [self.resolved_config()])
+        self.assertEqual(self.stops, [])
         self.assertIn('session=', opener.call_args.args[0][-1])
         self.assertTrue(opener.call_args.kwargs['start_new_session'])
 

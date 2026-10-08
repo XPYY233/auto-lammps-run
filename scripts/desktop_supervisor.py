@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Supervise one desktop entry: start/reuse the local service, open the page, stop on close.
+"""Supervise one desktop entry: start/reuse the local service and open the page.
 
 The entry bundle runs this process in the foreground, so the entry stays alive while the page
-is open. It starts or reuses exactly the configured service through `scripts/launch_local.py`
-and stops it through `scripts/stop_local.py` (identity-checked) - this file never kills a
-process itself. The page reports itself through `/api/session/*` into one small activity file:
-when this entry's page sends its close beacon, or stops reporting, the service is stopped and
-the entry exits. Task records, the ledger, candidate snapshots and run records are never
-touched, the older 8785 instance is never affected, and a service that does not support the
-activity endpoints is left running instead of being guessed at.
+is open. It starts or reuses exactly the configured service through `scripts/launch_local.py`.
+Closing the page or desktop entry leaves that service running: its in-process research,
+execution, collection and analysis workers must survive browser closure. The entry exits
+after the page's close beacon. Only an entry whose page never connected stops a service it
+just started, through the identity-checked `scripts/stop_local.py`. Task records and ledgers
+are untouched. An older service without activity endpoints is left running.
 
 用法：python3 scripts/desktop_supervisor.py --config <产品部署/本地启动器/current.json>
 """
@@ -134,7 +133,7 @@ def announce(title, message, *, alert=False, quiet=False):
 
 
 def parse(argv=None):
-    parser = argparse.ArgumentParser(description='监督桌面入口：启动/复用本地服务，页面关闭后停止服务')
+    parser = argparse.ArgumentParser(description='监督桌面入口：启动/复用本地服务，关页后保留后台工作')
     parser.add_argument('--config', required=True, type=Path, help='启动器 current.json 路径')
     parser.add_argument('--activity-file', type=Path, help='页面活动文件；默认放在运行记录目录')
     parser.add_argument('--session-token', help='本次入口的页面标识；默认随机生成')
@@ -257,9 +256,8 @@ def supervise(args):
         open_page(url, journal)
     watcher = Watch(token, visible_stale=args.stale_seconds, hidden_stale=args.hidden_stale_seconds,
                     close_grace=args.close_grace_seconds)
-    # From here the entry owns this run: any exit must not leave the service behind. A reused
-    # service is adopted as soon as its page really reports, so a page that never appears
-    # cannot cause an unrelated running service to be stopped.
+    # Keep the service after a real page has connected: its workers are independent of the
+    # browser. A page that never appears may only clean up a service started by this entry.
     owner = {'stop': bool(result['started'])}
     save(role='supervisor', started=result['started'], url=url, session=token,
          monitoring='active', adopted=owner['stop'], stopped=False)
@@ -269,7 +267,7 @@ def supervise(args):
 
     def request_exit(signum, frame):
         asked['exit'] = True
-        journal.write(f'收到退出信号 {signum}，准备停止服务。')
+        journal.write(f'收到退出信号 {signum}；本地后台服务继续运行。')
 
     previous = {name: signal.signal(getattr(signal, name), request_exit)
                 for name in ('SIGINT', 'SIGTERM', 'SIGHUP')}
@@ -279,7 +277,7 @@ def supervise(args):
     finally:
         for name, handler in previous.items():
             signal.signal(getattr(signal, name), handler)
-        if not args.no_stop and owner['stop']:
+        if not args.no_stop and owner['stop'] and outcome['reason'] == 'page_never_connected':
             try:
                 code, output = stop_service(config_path)
                 outcome['stopped'] = code == 0
@@ -290,9 +288,9 @@ def supervise(args):
 
     reason = outcome['reason']
     messages = {
-        'page_closed': '已检测到网页关闭，本地服务已停止。任务记录、账本与运行记录保留；HPC 作业未受影响。',
+        'page_closed': '已检测到网页关闭，本地服务继续跟进任务。重新打开应用即可查看进度和结果。',
         'page_never_connected': '页面在宽限期内没有连接，本次启动的本地服务已停止，没有留下后台进程。',
-        'app_exit': '应用已退出，本地服务已停止，没有留下后台进程。',
+        'app_exit': '桌面入口已退出，本地服务继续跟进任务。重新打开应用即可查看进度和结果。',
         'service_gone': '本地服务已自行退出或异常结束，入口随之关闭；任务记录、账本与运行记录保留。',
     }
     if reason == 'reused_page_missing':
@@ -304,7 +302,7 @@ def supervise(args):
         return 0
     text = messages.get(reason, f'监督结束：{reason}')
     journal.write(text)
-    announce('Auto-LAMMPS 本地服务已结束' if reason == 'service_gone' else 'Auto-LAMMPS 已停止',
+    announce('Auto-LAMMPS 本地服务已结束' if reason in {'service_gone', 'page_never_connected'} else 'Auto-LAMMPS 后台继续运行',
              text, alert=reason in {'service_gone', 'page_never_connected'}, quiet=quiet)
     save(role='supervisor', started=result['started'], url=url, session=token, monitoring='active',
          reason=reason, stopped=outcome['stopped'], stopper=outcome['stopper'])
