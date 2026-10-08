@@ -876,7 +876,7 @@ function renderCurrentActivity(){
     if(generate)generate.textContent=condition.recovery_required&&!condition.reconstructed?'恢复已返回的条件（不新增调用）':'根据需求整理条件';
   }else{
     title.textContent=taskActivity?.now||'等待准备计算方案';
-    detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':'应用按已确认的研究需求组织方案。';
+    detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':current?.status==='conditions_frozen'?'应用按已确认的研究条件组织方案。':'需求已保存；先整理并确认必要条件，应用才会准备计算方案。';
     meta.textContent='进度来自应用记录；刷新页面不会重新生成方案或提交计算。';
   }
   renderNextAction();

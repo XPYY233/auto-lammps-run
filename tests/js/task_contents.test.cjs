@@ -70,3 +70,15 @@ test('a saved baseline comparison replaces stale preparation progress with a res
   s.$('#next-action').onclick();
   assert.deepEqual(s.scrolled,['#research-results']);
 });
+
+test('a newly saved draft does not claim its research conditions are already confirmed',()=>{
+  const s=setup();
+  const c=vm.createContext({$:s.$,current:{id:'task',status:'draft',mode:'research'},workspaceReport:null,
+    normalResult:null,executionState:null,activityData:{task_id:'task',now:'已收到你的需求',steps:[]},
+    candidateRecord:null,ordinaryExecutionJob:()=>null});
+  vm.runInContext(source.slice(source.indexOf('function renderCurrentActivity(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+  c.renderNextAction=()=>{};
+  c.renderCurrentActivity();
+  assert.match(s.$('#ai-current-detail').textContent,/先整理并确认必要条件/);
+  assert.doesNotMatch(s.$('#ai-current-detail').textContent,/已确认的研究条件/);
+});
