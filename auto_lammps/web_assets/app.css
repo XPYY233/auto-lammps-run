@@ -861,3 +861,37 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 .paper-workbench .evidence-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .paper-workbench .target-group {padding:12px;border-bottom:1px solid #dbe2ea}
 @media(max-width:900px) {.paper-workbench .evidence-grid {grid-template-columns:1fr}}
+
+/* A task-local contents menu keeps the saved scientific result within one click. */
+@media(min-width:1120px){
+ #task-view .research-layout{grid-template-columns:180px minmax(0,1fr) 250px;gap:18px}
+ #task-view .task-contents{position:sticky;top:92px;max-height:calc(100vh - 108px);overflow-y:auto}
+}
+#task-view .task-contents{min-width:0;padding:15px 11px;align-self:start}
+#task-view .task-contents>strong{display:block;padding:2px 9px 9px;color:#526884;font-size:12px}
+#task-view .task-contents button{display:block;width:100%;padding:8px 9px;text-align:left;border-radius:7px;color:#38516f;font-size:12px;line-height:1.35}
+#task-view .task-contents button:hover,#task-view .task-contents button:focus-visible{background:var(--blue-soft);color:var(--blue)}
+#task-view .task-contents .task-contents-primary{display:flex;justify-content:space-between;align-items:center;background:var(--blue-soft);color:#1854ac;font-weight:700;font-size:14px;margin-bottom:3px}
+#task-view .task-contents-group{padding-left:10px}
+#task-view .task-contents-group button{font-size:11px;color:#5b6e89}
+#task-view .task-contents-divider{height:1px;background:var(--line);margin:10px 8px}
+#task-view .result-workspace-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 0}
+#task-view .result-workspace-heading h2{font-size:20px;margin:3px 0 0}
+#task-view #result-priority-note{margin:2px 0 0;text-align:right;max-width:340px}
+#task-view.results-first .task-hero{order:-3}
+#task-view.results-first .result-workspace{order:-2}
+#task-view.results-first .ai-current{order:-1}
+#task-view #research-results,#task-view #reference-progress,#task-view #execution-flow,#task-view #task-files,#task-view #advanced-task,#task-view .discussion-panel,#task-view #ai-current-title{scroll-margin-top:100px}
+@media(max-width:1119px){
+ #task-view .research-layout{grid-template-columns:minmax(0,1fr)}
+ #task-view .task-contents{position:sticky;top:76px;z-index:11;display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;padding:8px 10px}
+ #task-view .task-contents>strong,#task-view .task-contents-divider{display:none}
+ #task-view .task-contents-group{display:flex;padding:0}
+ #task-view .task-contents button{width:auto;flex:none;padding:7px 10px}
+ #task-view .task-contents .task-contents-primary{margin:0}
+}
+@media(max-width:760px){
+ #task-view .task-contents{top:98px}
+ #task-view .result-workspace-heading{display:block}
+ #task-view #result-priority-note{text-align:left;margin:4px 0 0}
+}

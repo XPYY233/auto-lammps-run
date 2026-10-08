@@ -101,6 +101,8 @@ async function openTask(id) {
   $('#previous-step').textContent='正在读取上一条记录…';
   $('#next-action').hidden=true;$('#next-action-note').textContent='';
   $('#task-quick-note').textContent='';
+  $('#task-view').classList?.remove('results-first');
+  $('#result-priority-note').textContent='正在读取结果记录…';
   $('#plan-review-panel').hidden=true;
   $('#ai-activity').replaceChildren();$('#discussion-history').replaceChildren();
   const discussionSubmit=$('#discussion-form button[type=submit]');
@@ -116,7 +118,7 @@ async function openTask(id) {
   clearCandidateView();
   initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
   $('#advanced-task').open=false;
-  normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;
+  normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;resultTab='overview';
   $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
   activityData=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
@@ -142,6 +144,7 @@ async function openTask(id) {
   }
   if(current?.id===id&&pendingRoute===null&&generation===openTask.generation&&failures.length)
     notice('部分记录暂未读取：'+failures.join('、')+'。已显示可读取的内容；点击任务顶部“刷新状态”重试。',true);
+  if(current?.id===id&&pendingRoute===null&&generation===openTask.generation&&typeof updateTaskContents==='function')updateTaskContents();
 }
 function showNew(){requestRoute('#new');}
 async function renderNew() {
@@ -2078,7 +2081,7 @@ async function refreshWorkspace(){
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?(r.evaluation?.attempt_scope==='week_one_reference_development'?'作者参考 A · 第一周人工辅助验证记录':'作者参考 A · 来源见任务信息'):(schema?.model_calls_enabled?'应用模型已连接 · 生成与用量见活动记录':'模型状态见设置');
- const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();};tabs.append(b);}renderWorkspaceResults();
+ const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('data-result-tab',key);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();if(typeof updateTaskContents==='function')updateTaskContents();};tabs.append(b);}renderWorkspaceResults();
  renderRawFiles(raw);
  if(current?.id!==id)return;
  if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
@@ -2089,6 +2092,7 @@ async function refreshWorkspace(){
   $('#execution-flow').replaceChildren(node('h2','计算记录'),node('p','原始输出已回收，可下载查看。完整执行阶段及分析报告尚未接入。','flow-note'));
  }
  renderExecutionControls();renderReferenceProgress();renderWorkspaceResults();
+ if(typeof updateTaskContents==='function')updateTaskContents();
  await refreshPlanReview();await refreshActivity();
  if(!$('.discussion-panel').hidden)await refreshDiscussion();
 }
@@ -2278,6 +2282,37 @@ if(taskQuickLinks)taskQuickLinks.onclick=event=>{
   }
   if(button.dataset.taskExpand)$(button.dataset.taskExpand).open=true;
   note.textContent='';target.scrollIntoView({block:'start',behavior:'smooth'});
+};
+const taskContents=$('#task-contents');
+function updateTaskContents(){
+  if(!current||!taskContents)return;
+  const hasReport=Boolean(workspaceReport||normalResult?.evaluations?.some(e=>e.requests?.some(q=>q.reports?.length)));
+  $('#task-view').classList.toggle('results-first',hasReport);
+  $('#result-workspace-heading').textContent=current.mode==='reproduction'?'复现结果':'计算结果';
+  taskContents.querySelector('.task-contents-primary').firstChild.textContent=current.mode==='reproduction'?'复现结果 ':'计算结果 ';
+  $('#result-priority-note').textContent=hasReport?'以下内容来自已保存的计算与分析记录；科学结论以核验状态为准。':'尚无可展示的计算结果；可以查看当前进展与计算记录。';
+  for(const button of taskContents.querySelectorAll('button[data-contents-target]')){
+    const target=$(button.dataset.contentsTarget),tab=button.dataset.resultTab;
+    button.hidden=Boolean((tab&&!['overview','history'].includes(tab)&&!hasReport)||(tab==='targets'&&!workspaceReport?.closeout)||
+      target?.closest('[hidden]')||(button.dataset.contentsTarget==='#reference-progress'&&target?.hidden)||
+      (button.dataset.contentsTarget==='#execution-flow'&&!target?.children.length)||
+      (button.dataset.contentsTarget==='#plan-review-panel'&&target?.hidden));
+    if(tab)button.setAttribute('aria-current',tab===resultTab?'location':'false');
+  }
+}
+if(taskContents)taskContents.onclick=event=>{
+  const button=event.target.closest('button[data-contents-target]');
+  if(!button||!taskContents.contains(button)||button.hidden)return;
+  const target=$(button.dataset.contentsTarget);
+  if(!target||target.closest('[hidden]'))return;
+  if(button.dataset.contentsExpand)$(button.dataset.contentsExpand).open=true;
+  if(button.dataset.resultTab){
+    resultTab=button.dataset.resultTab;
+    for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.dataset.resultTab===resultTab));
+    renderWorkspaceResults();
+  }
+  updateTaskContents();
+  target.scrollIntoView({block:'start',behavior:'smooth'});
 };
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();refreshActivity();});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
