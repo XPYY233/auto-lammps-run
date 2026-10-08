@@ -100,6 +100,7 @@ async function openTask(id) {
   $('#ai-current-detail').textContent='';$('#ai-current-meta').textContent='';
   $('#previous-step').textContent='正在读取上一条记录…';
   $('#next-action').hidden=true;$('#next-action-note').textContent='';
+  $('#task-quick-note').textContent='';
   $('#plan-review-panel').hidden=true;
   $('#ai-activity').replaceChildren();$('#discussion-history').replaceChildren();
   let task;
@@ -112,7 +113,7 @@ async function openTask(id) {
   current=task;
   clearCandidateView();
   initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
-  $('#advanced-task').open=task.status!=='conditions_frozen';
+  $('#advanced-task').open=false;
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;
   $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
   activityData=null;
@@ -185,7 +186,7 @@ async function readInitialGeometryCatalog() {
   }
 }
 function renderInitialGeometry() {
-  const anchor=$('#execution-flow');
+  const anchor=$('#conditions');
   if(!anchor || !current)return;
   let panel=document.getElementById('initial-geometry-panel');
   if(!panel){panel=node('section',undefined,'panel');panel.id='initial-geometry-panel';panel.setAttribute('aria-label','选择固定初始结构');anchor.before(panel);}
@@ -267,10 +268,11 @@ function render() {
   if (batches.length) {
     const questions = batches[batches.length-1].questions.filter(q=>conditionStatus(current.fields[q.field]) !== 'confirmed');
     if (questions.length) {
-      $('#generation-questions').append(node('p','最近整理时发现的待明确事项：'));
+      const details=node('details');
+      details.append(node('summary',`查看 AI 整理的 ${questions.length} 项待明确事项`));
       const list=node('ul');
       for (const q of questions) list.append(node('li',q.question));
-      $('#generation-questions').append(list);
+      details.append(list);$('#generation-questions').append(details);
     }
   }
   $('#conditions').replaceChildren();
@@ -704,7 +706,7 @@ function renderCandidateClarification(job) {
 async function copyClarificationAnswers() {
   const text=clarificationAnswersText();
   if(!text) {notice('尚未填写答复，没有可复制的内容。',true);return;}
-  try {await navigator.clipboard.writeText(text);notice('澄清答复已复制，可交给控制端处理新一轮准备。');}
+  try {await navigator.clipboard.writeText(text);notice('澄清答复已复制。要在本任务继续，请点击“记录澄清答复”。');}
   catch(error) {notice('无法自动写入剪贴板，请在页面中手动选择答复文本。',true);}
 }
 async function saveClarificationAnswers() {
@@ -912,10 +914,34 @@ function renderNextAction(){
     }else note.textContent='正在读取准备服务状态；可在下方查看具体原因。';
     return;
   }
-  const fields=Object.values(current.fields||{});
-  const allSelected=fields.length&&fields.every(field=>field.selected);
-  if(allSelected){jump('核对并确认研究条件','#advanced-task','确认条件后，应用内 AI 才会准备计算方案。','#advanced-task');return;}
-  if(Object.keys(current.generated_batches||{}).length){jump('核对 AI 整理的条件','#advanced-task','尚未确认的条件会标出来源或待澄清问题。','#advanced-task');return;}
+  const fields=Object.entries(current.fields||{}).filter(([key])=>key!=='reference'||current.mode==='reproduction').map(([,field])=>field);
+  const missing=fields.filter(field=>!field.selected).length;
+  const unconfirmed=fields.filter(field=>field.selected&&!field.confirmed).length;
+  const condition=activityData?.task_id===current.id?activityData.condition_preparation:null;
+  if(['generating','validating','repairing','awaiting_import'].includes(condition?.state)){
+    note.textContent='应用内 AI 正在整理研究条件；完成后会显示需要你核对的内容。';return;
+  }
+  if(!missing&&!unconfirmed){
+    const freeze=$('#freeze');
+    if(freeze&&!freeze.disabled){
+      button.textContent='确认条件并进入方案准备';button.hidden=false;
+      button.onclick=()=>{ $('#advanced-task').open=true;$('#freeze').scrollIntoView({block:'center'});};
+      note.textContent='请核对条件锁定说明；锁定后不能覆盖。';
+    }else jump('查看尚待处理的条件','#advanced-task','应用保留缺项或矛盾的原因；请查看条件摘要。','#advanced-task');
+    return;
+  }
+  if(!missing&&unconfirmed){
+    jump('核对 AI 建议并确认','#advanced-task',`${unconfirmed} 项条件需要你确认；应用不会替你作科学决定。`,'#advanced-task');return;
+  }
+  const complete=$('#complete-conditions');
+  if(Object.keys(current.generated_batches||{}).length&&complete&&!complete.disabled){
+    button.textContent='让应用 AI 补齐未指定条件';button.hidden=false;button.onclick=()=>complete.click();
+    note.textContent=`还有 ${missing} 项未确定；AI 会提出有来源的建议，供你审核。`;
+    return;
+  }
+  if(Object.keys(current.generated_batches||{}).length&&!schema.model_calls_enabled){
+    jump('查看条件与 AI 状态','#advanced-task',`${missing} 项仍未确定；请查看模型额度或失败记录。`,'#advanced-task');return;
+  }
   const generate=$('#generate-conditions');
   if(generate&&!generate.disabled){
     button.textContent='让应用 AI 整理需求';button.hidden=false;button.onclick=()=>generate.click();
@@ -1726,7 +1752,7 @@ async function showResources(){
    ['去重资源包',String(discovered.bundle_count??'—'),'拆行不增加论文数'],
    ['仓库（含镜像）',String(discovered.repository_count),'含外部注册表来源'],
    ['论文 DOI',String(discovered.paper_doi_count??'—'),`已核验关联 ${discovered.verified_doi_count??'—'}`]];
-  discoveryLibraryNote=`发现目录：${dRows} 条资源行 · 去重资源包 ${discovered.bundle_count??'未提供'} · 仓库 ${discovered.repository_count}（含镜像）· 论文 DOI ${discovered.paper_doi_count??'未提供'}（已核验关联 ${discovered.verified_doi_count??'未提供'}）· 交接时间 ${discovered.source.generated} · 来源版本 ${discovered.source.sha256.slice(0,12)}。候选分级与关联均来自发现方，尚未获得控制端运行验证。`;
+  discoveryLibraryNote=`发现目录：${dRows} 条资源行 · 去重资源包 ${discovered.bundle_count??'未提供'} · 仓库 ${discovered.repository_count}（含镜像）· 论文 DOI ${discovered.paper_doi_count??'未提供'}（已核验关联 ${discovered.verified_doi_count??'未提供'}）· 更新时间 ${discovered.source.generated} · 来源版本 ${discovered.source.sha256.slice(0,12)}。候选分级与关联来自资源发现记录，尚未完成应用内运行验证。`;
   const roleType={author_source:'论文源码（发现候选）',validation_tests:'验证测试（发现候选）',example_suite:'示例集（发现候选）',artifact:'论文 artifact（发现候选）',potential_library:'势函数库（发现候选）'};
   const doiNote={verified_association:'题名与 DOI 关联已核验',candidate_unverified:'DOI 为候选关联，待核验',artifact_or_dataset:'所附为 artifact/数据集 DOI，不代表论文',absent:'缺论文 DOI'};
   for(const d of discovered.entries){
@@ -2158,6 +2184,19 @@ checkForUpdate();setInterval(checkForUpdate,30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkForUpdate();});
 bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-panel').scrollIntoView({block:'start',behavior:'smooth'});refreshActivity();});
 bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
+const taskQuickLinks=$('#task-quick-links');
+if(taskQuickLinks)taskQuickLinks.onclick=event=>{
+  const button=event.target.closest('button[data-task-target]');
+  if(!button||!taskQuickLinks.contains(button))return;
+  const target=$(button.dataset.taskTarget),note=$('#task-quick-note');
+  if(!target||target.closest('[hidden]')){
+    note.textContent=button.dataset.taskTarget==='#plan-review-panel'?'方案尚未准备好；先按上方的下一步继续。':
+      button.dataset.taskTarget==='.discussion-panel'?'已有可用结果后，才能围绕数据向应用内 AI 提问。':'这一步尚无记录；请查看上方当前进展。';
+    return;
+  }
+  if(button.dataset.taskExpand)$(button.dataset.taskExpand).open=true;
+  note.textContent='';target.scrollIntoView({block:'start',behavior:'smooth'});
+};
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();refreshActivity();});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
 $("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
