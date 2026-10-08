@@ -9,7 +9,7 @@ function setup(job,review={state:'prepared',approved:true,files:[]},rich=false){
  window:{markdownit:MarkdownIt},document:{createElement:el},
  $:s=>{if(!elements.has(s))elements.set(s,el());return elements.get(s)},
  api:async(path,body)=>{calls.push({path,body});if(path.endsWith('/plan'))return review;if(path.endsWith('/execution')&&!body)return {job};if(path==='/api/tasks/task')return {id:'task',revision:7};return {};},
- notice:()=>{},action:fn=>fn(),afterChange:async()=>{},refreshCandidate:async()=>{},refreshActivity:async()=>{}});
+ notice:()=>{},action:fn=>fn(),afterChange:async()=>{},refreshCandidate:async()=>{},refreshActivity:async()=>{},renderNextAction:()=>{}});
  if(rich)vm.runInContext(fs.readFileSync('auto_lammps/web_assets/markdown-view.js','utf8'),c);
  vm.runInContext(source.slice(source.indexOf('function researchText('),source.indexOf('function renderCurrentActivity(')),c);
  vm.runInContext(source.slice(source.indexOf('function renderPlanSummary('),source.indexOf('async function refreshCandidate()')),c);

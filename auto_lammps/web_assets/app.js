@@ -89,8 +89,26 @@ async function listTasks() {
   }
 }
 async function openTask(id) {
-  const task = await api('/api/tasks/'+id);
-  if(pendingRoute!==null)return;
+  const generation=openTask.generation=(openTask.generation||0)+1;
+  // Remove the previous task before the new response arrives. Background reads
+  // use current.id to reject a response from the task we just left.
+  current=null;
+  $('#task-view').hidden=true;
+  $('#task-loading').hidden=false;
+  $('#task-loading').textContent='正在打开任务并读取最新记录…';
+  $('#ai-current-title').textContent='正在读取当前任务进度…';
+  $('#ai-current-detail').textContent='';$('#ai-current-meta').textContent='';
+  $('#previous-step').textContent='正在读取上一条记录…';
+  $('#next-action').hidden=true;$('#next-action-note').textContent='';
+  $('#plan-review-panel').hidden=true;
+  $('#ai-activity').replaceChildren();$('#discussion-history').replaceChildren();
+  let task;
+  try { task=await api('/api/tasks/'+id); }
+  catch(error) {
+    if(generation===openTask.generation)$('#task-loading').textContent='任务暂时无法打开，请稍后重试或返回“我的任务”。';
+    throw error;
+  }
+  if(pendingRoute!==null||generation!==openTask.generation)return;
   current=task;
   clearCandidateView();
   initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
@@ -103,6 +121,8 @@ async function openTask(id) {
   renderWorkspaceResults();
   recordRoute('#'+id);
   render();
+  $('#task-view').hidden=false;
+  $('#task-loading').hidden=true;
   $('#results-content').replaceChildren();
   $('#results-status').textContent='正在读取记录…';
   window.scrollTo({top:0});
@@ -838,6 +858,69 @@ function renderCurrentActivity(){
     detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':'应用按已确认的研究需求组织方案。';
     meta.textContent='进度来自应用记录；刷新页面不会重新生成方案或提交计算。';
   }
+  renderNextAction();
+}
+
+function renderNextAction(){
+  const button=$('#next-action'),note=$('#next-action-note'),previous=$('#previous-step');
+  if(!button||!current)return;
+  const steps=activityData?.task_id===current.id?(activityData.steps||[]):[];
+  const prior=steps.length>1?steps[steps.length-2]:null;
+  previous.textContent=prior?`上一条记录：${prior.title||'阶段记录'} · ${new Date(prior.at).toLocaleString('zh-CN')}`:'还没有可核对的上一条阶段记录。';
+  button.hidden=true;button.disabled=false;button.onclick=null;note.textContent='';
+  const jump=(label,selector,explain,expand)=>{
+    const target=$(selector);
+    if(!target||target.hidden){note.textContent=explain||'正在读取下一步入口…';return;}
+    button.textContent=label;button.hidden=false;note.textContent=explain||'';
+    button.onclick=()=>{if(expand)$(expand).open=true;target.scrollIntoView({block:'start'});};
+  };
+  const job=executionState?.job||ordinaryExecutionJob();
+  if(job){
+    if(['queued','running','waiting','dispatching','collecting','analyzing'].includes(job.state)){
+      note.textContent=`应用正在后台跟进${job.job_id?'作业 '+job.job_id:'提交'}；可关闭页面，稍后再来查看。`;
+      jump('查看计算进度','#execution-flow',note.textContent);return;
+    }
+    if(job.state==='analyzed'||job.state==='completed'){
+      jump('查看数据与图表','#research-results','结果已保存；科学结论仍待核验。');return;
+    }
+    if(job.state==='attention'||job.can_retry){
+      jump('查看问题与恢复操作','#execution-flow','应用保留了本次作业和费用记录；请先查看原因。');return;
+    }
+  }
+  if(candidateRecord){
+    if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state)){
+      note.textContent='应用内 AI 正在准备方案，后台会继续处理。';return;
+    }
+    if(candidateRecord.state==='clarification'){
+      jump('回答 AI 的问题','#candidate-attention','答复会进入下一轮方案准备；剩余轮次见准备记录。');return;
+    }
+    if(['failed','interrupted','configuration_changed'].includes(candidateRecord.state)){
+      jump('查看未完成原因','#candidate-attention',proposalRoundsExhausted(candidateRecord)?'三轮方案机会已用完；已有记录保留，不会自动追加调用。':'先查看失败原因，再决定如何继续。');return;
+    }
+    if(candidateRecord.state==='prepared'){
+      jump('查看并确认计算方案','#plan-review-panel','请先核对方案，再决定是否提交计算。');return;
+    }
+  }
+  if(current.mode==='reproduction'&&current.status==='conditions_frozen'){
+    jump('查看 P–A–B 进度','#reference-progress','作者参考 A 与独立方案 B 分开记录。');return;
+  }
+  if(current.status==='conditions_frozen'){
+    const prepare=$('#prepare-candidate');
+    if(prepare&&!prepare.hidden&&!prepare.disabled){
+      button.textContent='让应用 AI 准备方案';button.hidden=false;
+      button.onclick=()=>prepare.click();note.textContent='准备方案不会提交 HPC 计算。';
+    }else note.textContent='正在读取准备服务状态；可在下方查看具体原因。';
+    return;
+  }
+  const fields=Object.values(current.fields||{});
+  const allSelected=fields.length&&fields.every(field=>field.selected);
+  if(allSelected){jump('核对并确认研究条件','#advanced-task','确认条件后，应用内 AI 才会准备计算方案。','#advanced-task');return;}
+  if(Object.keys(current.generated_batches||{}).length){jump('核对 AI 整理的条件','#advanced-task','尚未确认的条件会标出来源或待澄清问题。','#advanced-task');return;}
+  const generate=$('#generate-conditions');
+  if(generate&&!generate.disabled){
+    button.textContent='让应用 AI 整理需求';button.hidden=false;button.onclick=()=>generate.click();
+    note.textContent='应用会保留你的原文和条件来源。';
+  }else{button.textContent='配置应用内 AI';button.hidden=false;button.onclick=()=>$('#open-model').click();note.textContent='模型尚未就绪或当前任务额度已用完，请查看设置与工作记录。';}
 }
 
 function scheduleActivityRefresh(){
@@ -958,7 +1041,7 @@ async function refreshPlanReview(){
   if(current?.id!==id)return;
   const plan=review.workspace?.current;
   const prepared=review.state==='prepared'&&(!review.workspace||(plan&&!plan.historical));
-  panel.hidden=!prepared&&!plan;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden)return;
+  panel.hidden=!prepared&&!plan;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden){renderNextAction();return;}
   $('#plan-version').textContent=(plan?`第 ${plan.version} 版${plan.historical?' · 上一份已准备方案':''}`:'已准备')+' · '+proposalRoundLabel(review);
   $('#plan-status').textContent=prepared?(review.approved?'当前方案已批准。':'方案已准备，等待你确认。'):'应用正在处理下一版；下方保留最近一版方案供查看，暂不能批准。';
   renderPlanSummary(review);renderPlanVersions(review);
@@ -1008,6 +1091,7 @@ async function refreshPlanReview(){
     await afterChange('修改意见已交给应用内 AI；完成后会显示新版与差异，需要重新确认。');
     await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
+  renderNextAction();
 }
 
 function clearCandidateView() {
@@ -1108,7 +1192,7 @@ async function refreshCandidate() {
   $('#candidate-outcome').textContent=candidateOutcome||'';
   if(automatic && schema.task_resource_policy) summary.append(node('p',schema.task_resource_policy.description));
   if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件生成并核对方案；你批准后才提交 HPC 和分析结果。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
-  if(!candidate) {renderCandidateClarification(null);return;}
+  if(!candidate) {renderCandidateClarification(null);renderNextAction();return;}
   const result=candidate.result||{};
   if(result.summary) summary.append(node('p',result.summary));
   if(candidate.state==='failed') {
@@ -1130,6 +1214,7 @@ async function refreshCandidate() {
     }
     $('#candidate-downloads').append(node('p','文件来自已准备的方案快照；下载不代表已提交计算，也不代表科学验证通过。','form-note'));
   }
+  renderNextAction();
 }
 $('#prepare-candidate').onclick=()=>action(async()=>{
   const id=current.id, before=candidateTask===id?candidateRecord:null;
@@ -1390,7 +1475,7 @@ function paperCard(p,statuses,availableTasks) {
 setInterval(()=>{if(location.hash==='#papers'&&!busy&&!document.querySelector('dialog[open]')&&!$('#papers-view').contains(document.activeElement))action(refreshPapers);},15000);
 
 // Researcher workspace. Views read existing evidence; no controls dispatch jobs.
-function hideViews(show){$('#go-home').setAttribute('aria-current',show==='home-view'?'page':'false');$('.search-box').hidden=false;for(const id of ['home-view','welcome','tasks-view','papers-view','resources-view','help-view','task-view']) $('#'+id).hidden=id!==show;}
+function hideViews(show){$('#go-home').setAttribute('aria-current',show==='home-view'?'page':'false');$('.search-box').hidden=false;$('#task-loading').hidden=true;for(const id of ['home-view','welcome','tasks-view','papers-view','resources-view','help-view','task-view']) $('#'+id).hidden=id!==show;}
 function selectNavigation(name){
   for(const [id,key] of Object.entries({'top-new':'new','top-tasks':'tasks','top-papers':'papers','top-resources':'resources','top-help':'help'})){
     $('#'+id).classList.toggle('selected',name===key);
@@ -1414,12 +1499,22 @@ function taskPhaseLabels(task){
   {state:taskState(independent),label:(task.execution_state?'B 计算 · ':'B 方案 · ')+taskStateLabel(independent)},
  ];
 }
+function taskNextLabel(task){
+ const state=taskState(task);
+ if(['running','queued','accepted','dispatching','preparing','understanding'].includes(state))return '查看进度';
+ if(['completed','validated'].includes(state))return '查看结果';
+ if(['failed','timeout','preparation_failed','condition_failed','condition_attention','clarification','reconcile_required','unknown'].includes(state))return '查看问题';
+ if(state==='prepared')return '确认方案';
+ if(state==='draft')return '整理需求';
+ if(state==='frozen')return task.mode==='reproduction'?'查看 P–A–B 进度':'准备方案';
+ return '查看任务';
+}
 function taskCards(){
  const box=$('#task-cards');box.replaceChildren();statsFor(taskCache,$('#task-stats'));
  const filters=$('#task-filters');filters.replaceChildren();for(const [key,label] of Object.entries({all:'全部任务',running:'运行中',queued:'排队中',completed:'计算结束',validated:'验收通过',finished:'已确认结束',failed:'失败',draft:'待准备'})){const b=node('button',label,taskFilter===key?'primary':'quiet');b.onclick=()=>{taskFilter=key;taskCards();};filters.append(b);}
  const tasks=taskCache.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase())&&(taskFilter==='all'||(taskFilter==='finished'?taskFinished(t):taskFilter==='failed'?['failed','timeout','preparation_failed','clarification'].includes(taskState(t)):taskState(t)===taskFilter)));
  if(!tasks.length){box.append(emptyState('此分类暂无任务','新建一项研究，或调整搜索条件。'));return;}
- const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['任务','当前阶段','作业 / 提交次数','最近更新','操作'])hr.append(node('th',label));head.append(hr);table.append(head,body);
+ const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['任务','当前阶段','下一步','作业 / 提交次数','最近更新','操作'])hr.append(node('th',label));head.append(hr);table.append(head,body);
  for(const t of tasks){
  const tr=node('tr'),info=node('td'),title=node('strong',t.title);
  info.append(title,node('small',t.mode==='reproduction'?'文献验证':'科研计算'));
@@ -1430,6 +1525,7 @@ function taskCards(){
   progress.append(line);
  }
  if(taskState(t)==='validated'&&taskFinished(t))progress.append(node('small','已确认结束'));
+ const next=node('td'),nextButton=node('button',taskNextLabel(t)+' →','task-next-link');nextButton.onclick=()=>requestRoute('#'+t.id);next.append(nextButton);
  const counts=node('td');
  if(phases.length>1){
   counts.append(node('strong',t.reference_job_id?'A 作业 '+t.reference_job_id:'A 作业号待核对'),node('small',`A 提交：${t.reference_submission_count??'待核对'} 次（含失败）`),node('small',t.job_id?'B 作业 '+t.job_id:'B 暂无作业回执'));
@@ -1439,7 +1535,7 @@ function taskCards(){
  const manage=async operation=>{await api(`/api/tasks/${t.id}/lifecycle`,{revision:t.revision,lifecycle_revision:t.lifecycle_revision||0,action:operation});await listTasks();taskCards();notice(operation==='delete'?'任务已从列表删除；计算账本和费用记录保留。':'已记录你确认任务结束；科学验收结论保持独立。');};
  if(!taskFinished(t))actions.append(removalButton('确认任务结束','再次点击确认结束',()=>manage('finish')));
  actions.append(removalButton('删除任务记录','确认从列表删除',()=>manage('delete')));
- tr.append(info,progress,counts,changed,actions);body.append(tr);}box.append(table);
+ tr.append(info,progress,next,counts,changed,actions);body.append(tr);}box.append(table);
 
 }
 async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');recordRoute('#tasks');await listTasks();taskCards();}

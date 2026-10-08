@@ -38,10 +38,16 @@ test('queued route is restored after a failed action, including the previously d
  await hold;await flush();assert.equal(c.visits.at(-1),'#home');assert.equal(c.visits.length,2);assert.deepEqual(c.errors,['request failed']);
 });
 test('stale task-open response cannot publish task content after a new navigation request',async()=>{
- const c=setup();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ const c=setup(),elements=new Map();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ c.$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ c.$('#ai-current-title').textContent='Old task status';
  vm.runInContext('let current=null;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
- const hold=c.action(()=>c.openTask('a'.repeat(32)));c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
+ const hold=c.action(()=>c.openTask('a'.repeat(32)));await flush();
+ assert.equal(elements.get('#task-view').hidden,true,'old task must disappear before the new GET returns');
+ assert.equal(elements.get('#task-loading').hidden,false);
+ assert.equal(elements.get('#ai-current-title').textContent,'正在读取当前任务进度…');
+ c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
  assert.equal(vm.runInContext('current',c),null);assert.equal(c.visits.at(-1),'#help');assert.equal(c.location.hash,'#help');
 });
 
