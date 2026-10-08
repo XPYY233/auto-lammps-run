@@ -859,6 +859,10 @@ function renderCurrentActivity(){
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
       (job.state==='analyzed'?'数值结果已保存。可让应用内 AI 对照研究目标指出已满足的条件与缺少的证据；科学结论仍待独立核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
     meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState?.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
+  }else if(typeof workspaceReport!=='undefined'&&workspaceReport?.closeout){
+    title.textContent='基准工况 P–A–B 结果已保存';
+    detail.textContent='查看论文 P、作者 A 与独立计算 B 的真实对比；全篇其他工况和正式盲测状态以结果证据为准。';
+    meta.textContent='已有计算与分析记录可直接查看；不需要为这份结果重新准备方案。';
   }else if(current?.status!=='conditions_frozen'&&taskActivity?.condition_preparation){
     const condition=taskActivity.condition_preparation;
     title.textContent=condition.label||'正在核对需求中的条件';
@@ -937,6 +941,9 @@ function renderNextAction(){
     if(candidateRecord.state==='prepared'){
       jump('查看并确认计算方案','#plan-review-panel','请先核对方案，再决定是否提交计算。');return;
     }
+  }
+  if(typeof workspaceReport!=='undefined'&&workspaceReport?.closeout){
+    jump('查看基准复现结果','#research-results','P–A–B 基准对比已保存；全篇未覆盖范围见结果限制。');return;
   }
   if(current.mode==='reproduction'&&current.status==='conditions_frozen'){
     jump('查看 P–A–B 进度','#reference-progress','作者参考 A 与独立方案 B 分开记录。');return;

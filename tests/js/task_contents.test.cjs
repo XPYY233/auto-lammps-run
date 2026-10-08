@@ -55,3 +55,18 @@ test('without saved results the directory keeps history but hides empty plot and
   s.$('#task-contents').onclick({target:s.plots});
   assert.equal(s.renders(),0);assert.deepEqual(s.scrolled,[]);
 });
+
+test('a saved baseline comparison replaces stale preparation progress with a result entry',()=>{
+  const s=setup();
+  const c=vm.createContext({$:s.$,current:{id:'task',status:'conditions_frozen',mode:'reproduction'},
+    workspaceReport:{closeout:{acceptance:{scope:'baseline'}}},normalResult:null,executionState:null,
+    activityData:{task_id:'task',now:'条件已冻结，可以开始准备计算方案',steps:[]},candidateRecord:null,
+    ordinaryExecutionJob:()=>null});
+  vm.runInContext(source.slice(source.indexOf('function renderCurrentActivity(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+  c.renderCurrentActivity();
+  assert.equal(s.$('#ai-current-title').textContent,'基准工况 P–A–B 结果已保存');
+  assert.equal(s.$('#next-action').textContent,'查看基准复现结果');
+  assert.match(s.$('#next-action-note').textContent,/全篇未覆盖范围/);
+  s.$('#next-action').onclick();
+  assert.deepEqual(s.scrolled,['#research-results']);
+});
