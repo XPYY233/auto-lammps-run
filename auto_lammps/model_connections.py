@@ -62,8 +62,8 @@ def official_request(provider, key, method, path, payload=None):
 
 
 class ModelConnections:
-    def __init__(self, tasks, *, transport=official_request, assistant_enabled=False, credentials_directory=None, calls=None):
-        self.tasks, self.transport, self.assistant_enabled = tasks, transport, assistant_enabled
+    def __init__(self, tasks, *, transport=official_request, assistant_enabled=None, credentials_directory=None, calls=None):
+        self.tasks, self.transport, self._assistant_policy = tasks, transport, assistant_enabled
         self.calls=calls
         self.directory = private_directory(Path(credentials_directory) if credentials_directory is not None else tasks.path.parent / 'model-connections')
         with tasks.transaction() as db:
@@ -84,6 +84,17 @@ class ModelConnections:
         if not path.exists():
             return None
         return json.loads(read_regular(path, 16384, private=True))
+
+    def available(self, provider):
+        """A saved, selected connection enables explicit result questions on this instance."""
+        if self._assistant_policy is False:
+            return False
+        value = self._read(provider)
+        return bool(value and MODEL_ID.fullmatch(value.get('model', '')))
+
+    @property
+    def assistant_enabled(self):
+        return any(self.available(provider) for provider in PROVIDERS)
 
     def status(self):
         connections = {}
@@ -178,8 +189,8 @@ class ModelConnections:
 
     def discuss(self, identifier, request_id, provider, question, context):
         task_id(request_id); self.tasks.get(identifier)
-        if not self.assistant_enabled:
-            raise TaskError('结果助手尚未启用；可先下载数据或保存模型连接。')
+        if not self.available(provider):
+            raise TaskError('请先在模型设置中保存所选模型的 API 密钥和模型 ID。')
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 4000:
             raise TaskError('请用 4000 字以内描述分析需求。')
         value = self._read(provider)

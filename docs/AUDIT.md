@@ -2129,3 +2129,10 @@ FeAl在原任务普通页面恢复后已真实调用首版，收到六项澄清�
 - 验证：8 个公开文件最终树与本地 HEAD 树 SHA `8b438d1` 一致；`gh api` 对远端旧头即时核对后，以 `force=false` 从 `3ccd52d` 快进到 `a20a9be`。草稿 PR #161 已创建，三个 CI 作业启动。随后的 PR 文件清单检查发现对 `main` 比较有约 101 个变更文件，包含先于 UX 分支的 P–A–B 基础提交；原因是 UX 分支从尚未进入 main 的 `cdc21e5` 之后建立。此 PR 当前比较范围过宽，不能让它接受审查或合并。
 - 纠正：用 `cdc21e5` 这个已存在的共同基线建立仅供堆叠审查的远端基线分支，把 PR #161 的 base 改到该基线；本地对该基线比较只有 16 个 UX 文件。核对 PR 实际文件清单后再声明范围正确。P–A–B 基线未合并 main 前，PR 继续草稿待审；不把基线分支当 main 发布。
 - 复验：已创建只作审查基线的 `codex/ux-review-base-pab`，指向原共同祖先 `cdc21e5`；PR #161 改为该 base 后 GitHub 回报可合并、16 个文件，文件清单只含本轮 UX、桌面入口、文档与检查。PR 描述明确依赖 P–A–B 基线及日后重定 base；三个 CI 作业（offline-checks、macOS/Ubuntu portable-analysis）均通过。它仍是待审草稿，未进入 main 或当前安装版，也不能直接合并到该审查基线。
+# 2026-10-08：结果助手测试调用方式错误
+
+- 证据：新改动后用 `python3 -m unittest tests.test_model_connections tests.test_results tests.test_mandatory_adapters -v` 运行，前六项通过，后两项因 `ModuleNotFoundError: test_analysis` 与 `test_deepseek` 在测试模块导入阶段失败。
+- 影响：测试入口错误导致这两组尚未执行；没有调用模型、HPC 或改变研究任务。不能把这次错误计作产品功能失败或通过。
+- 原因：这两组测试依赖 `tests/` 作为顶层导入目录；直接用包名调用未设置该目录。
+- 纠正与验证状态：改用项目规定的 `python3 -m unittest discover -s tests -v`，完成后记录真实结果；不修改被测产品代码来掩盖导入路径。
+- 修正后验证：项目标准 discovery 执行 1156 项，全部通过（29 项跳过）；JS 126/126、公开树 282 文件零发现，差异检查无空白错误。仅为离线与合成连接验证，未调用真实 API 或 HPC；安装版仍待整合。

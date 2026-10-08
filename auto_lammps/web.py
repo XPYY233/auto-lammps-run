@@ -236,7 +236,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -479,7 +479,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/discussion')
     def discussion_history(identifier: str):
-        return {'messages': connections.history(identifier), 'enabled': connections.assistant_enabled}
+        provider = preferences.get()['provider']
+        return {'messages': connections.history(identifier), 'enabled': connections.available(provider),
+                'provider': provider}
 
     @app.post('/api/tasks/{identifier}/discussion')
     def discuss_result(identifier: str, data: DiscussionInput):
@@ -1299,7 +1301,7 @@ def main():
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
-    parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
+    parser.add_argument('--enable-result-assistant', action='store_true', help='Legacy option; saving a model connection enables explicit result questions')
     parser.add_argument('--session-activity-file', help='Desktop entry only: record page heartbeat/close activity in this file; otherwise no page activity is recorded')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
@@ -1312,7 +1314,7 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
-    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant or bool(model_client),
+    connections=ModelConnections(store,assistant_enabled=True if args.enable_result_assistant else None,
                                  credentials_directory=args.model_connections_directory,
                                  calls=model_client.calls if model_client else None)
     if model_client is not None:
@@ -1365,7 +1367,7 @@ def main():
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
                           model_connections=connections,
-                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
+                          result_assistant_enabled=True if args.enable_result_assistant else None,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

@@ -77,7 +77,9 @@ Issue #81 更新。浅蓝白色布局按新六张参考图统一，全球导航�
 [OpenAI](https://developers.openai.com/api/reference/resources/models/methods/list)、
 [GLM](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)。
 
-管理员以 `--enable-result-assistant` 启用独立结果讨论。用户发送问题后，服务固定所选
+用户在模型设置中保存所选模型的具体 ID 与 API 密钥后，即可在有真实结果的任务中主动提问；
+不再要求管理员额外设置 `--enable-result-assistant`。保存连接本身不发送模型请求，移除密钥会立即关闭对应入口。
+用户发送问题后，服务固定所选
 提供方和模型，保存不可覆盖的请求与上下文摘要，再请求解读当前已核验的结果。
 已有请求 ID 不重复发送，未知/失败回执和令牌用量保留。模型不能写账本、执行代码或提交
 HPC；此能力仅用于结果解读，自动执行新分析和绘图方案仍待接入。
