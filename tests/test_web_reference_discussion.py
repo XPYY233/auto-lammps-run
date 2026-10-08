@@ -67,4 +67,12 @@ class WebReferenceDiscussionTests(unittest.TestCase):
         response=self.client.get('/api/tasks/'+other['id']+'/reference-discussion')
         self.assertFalse(response.json()['enabled'])
         self.assertEqual(response.json()['messages'],[])
+        report = self.client.get('/api/tasks/'+other['id']+'/reference-evidence')
+        self.assertEqual(report.status_code, 200)
+        self.assertIsNone(report.json()['report'])
         self.transport.assert_not_called()
+
+
+class WebOrdinaryReferenceDiscussionTests(WebReferenceDiscussionTests):
+    """An independent research task may link a human-only author reference."""
+    task_mode = 'research'

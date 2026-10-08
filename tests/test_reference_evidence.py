@@ -22,7 +22,8 @@ class ReferenceEvidenceTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.tasks = TaskStore(self.root / 'tasks.sqlite')
-        self.task = self.tasks.create('Human reference', 'B_FROZEN_PRIVATE_CANARY', 'reproduction')
+        self.task = self.tasks.create('Human reference', 'B_FROZEN_PRIVATE_CANARY',
+                                      getattr(self, 'task_mode', 'reproduction'))
         self.ledger = Ledger(self.root / 'ledger.sqlite')
         self.ledger.create_campaign('synthetic', replace(POLICY, total_storage_bytes=100000))
         self.papers = PaperStore(self.tasks, ledger=self.ledger)

@@ -943,7 +943,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/reference-evidence')
     def reference_history(identifier: str):
-        requests = store.reference_requests(identifier)
+        document = store.get(identifier)
+        requests = store.reference_requests(identifier) if document['mode'] == 'reproduction' else []
         binding = accounting_binding(reference_model_client) if reference_model_client else None
         for item in requests:
             record_binding = item.pop('accounting_sha256')
