@@ -15,7 +15,7 @@ function setup({selected=false,frozen=false}={}){
     append(...items){this.children.push(...items);},replaceChildren(...items){this.children=[...items];},
     setAttribute(name,value){this[name]=value;},
     before(item){elements.set('#'+item.id,item);}};}
-  elements.set('#execution-flow',element('div'));
+  elements.set('#conditions',element('div'));
   const context=vm.createContext({
     current:{id:TASK,revision:9,status:frozen?'conditions_frozen':'conditions_draft',
       ...(selected?{initial_geometry:{catalog_sha256:CATALOG,entry:clone(entry)}}:{})},
@@ -103,6 +103,7 @@ test('clear selection uses current revision and no resource or workflow payload'
 test('geometry selection and invalidation history explain saved events in ordinary language',async()=>{
   const c=setup();c.context.schema={fields:{material:'材料与成分'}};
   c.elements.set('#history-list',c.context.node('ol'));
+  c.elements.set('#task-view',c.context.node('section'));
   vm.runInContext(source.slice(source.indexOf('async function renderHistory() {'),source.indexOf('async function afterChange(')),c.context);
   const reading=c.context.renderHistory();
   c.pending.shift().resolve({events:[

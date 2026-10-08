@@ -24,7 +24,12 @@ function setupPanel({status='conditions_frozen',automatic=false,candidatePrepara
   const elements=new Map(),calls=[],notices=[],documents=[];
   const context=vm.createContext({
     console,
-    document:{createElement:tag=>element(tag)},
+    document:{createElement:tag=>element(tag),querySelectorAll(selector){
+      if(selector!=='#candidate-attention textarea[data-question-index]')return [];
+      const find=item=>[...(item.tagName==='textarea'&&item.dataset.questionIndex!==undefined?[item]:[]),
+        ...item.children.flatMap(child=>typeof child==='object'?find(child):[])];
+      return find(context.$('#candidate-attention'));
+    }},
     Option:function Option(text,value){const option=element('option');option.textContent=text;option.value=value;return option;},
     navigator:{clipboard:{writeText:async()=>{}}},
     schema:{fields:{initialization:'初始化与随机种子',size:'尺寸与晶向',stages:'平衡与生产阶段',
@@ -36,7 +41,7 @@ function setupPanel({status='conditions_frozen',automatic=false,candidatePrepara
     $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
     api:(path,data)=>{calls.push({path,data});return Promise.resolve(documents.length?documents.shift():{id:TASK,revision:22});},
     notice:(message,error)=>{notices.push({message,error:Boolean(error)});},
-    renderHistory:async()=>{},refreshModelStatus:async()=>{},refreshWorkspace:async()=>{},
+    renderHistory:async()=>{},refreshModelStatus:async()=>{},refreshWorkspace:async()=>{},renderNextAction:()=>{},
     number:(value,digits=4)=>String(value),
     duration:seconds=>String(seconds),
     action:async work=>work(),

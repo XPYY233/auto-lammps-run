@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from fastapi import FastAPI, Request
@@ -27,6 +28,8 @@ from .agent_candidates import CandidateError, PlanIterationLimit
 from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .paper_evidence import PaperEvidenceViews
+from .reference_evidence import ReferenceEvidenceViews
+from .paper_workflow import PaperWorkflowService
 from .model_connections import ModelConnections
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
@@ -208,6 +211,10 @@ class DiscussionInput(ProviderInput):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class ReferenceDiscussionInput(DiscussionInput):
+    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$', min_length=64, max_length=64)
+
+
 class HPCInput(Input):
     connection_id: str | None = None
     as_new: bool = False
@@ -234,9 +241,15 @@ class HPCManagementInput(Input):
 class HPCCheckInput(Input):
     revision: StrictInt = Field(ge=1)
 
+class WorkbenchExtractionInput(Input):
+    request_id: str
+    source_sha256: str
+    force_rescan: bool = False
+    repair_visuals: bool = False
+
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -256,6 +269,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     papers = PaperStore(store) if papers is None else papers
     if paper_evidence_views is None and reference_views is not None:
         paper_evidence_views = PaperEvidenceViews(reference_views.directory, papers)
+    if reference_evidence_views is None and reference_views is not None:
+        reference_evidence_views = ReferenceEvidenceViews(reference_views.directory, papers)
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
     hpc = hpc_connections or HPCConnections(store)
@@ -270,6 +285,40 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
     from .discovery_library import DiscoveryLibrary
     discoveries = discovery_library or DiscoveryLibrary()
+    def workbench_binding(identifier):
+        store.get(identifier)
+        with store.transaction() as db:
+            rows = db.execute('SELECT paper_id FROM paper_tasks WHERE task_id=?', (identifier,)).fetchall()
+        if len(rows) != 1 or not workbench_bindings:
+            return None
+        return workbench_bindings.get(rows[0]['paper_id'])
+
+    def workbench_status(identifier):
+        binding = workbench_binding(identifier)
+        life = store.lifecycle(identifier)
+        enabled = bool(workbench_bridge and binding and model_client and connections.assistant_enabled
+            and connections.status()['connections']['deepseek-official']['configured']
+            and not life['deleted'] and not life['user_finished'])
+        reason = '' if enabled else ('请先配置本项目模型连接。' if workbench_bridge and binding
+            else '这篇论文的既有文献工作台全文绑定尚未配置；已有 P 图表仍可查看。')
+        if life['deleted'] or life['user_finished']:
+            reason = '任务已结束；提取历史仍可查看。'
+        evidence = None
+        if workbench_bridge and binding:
+            try:
+                evidence = workbench_bridge.evidence(identifier, binding)
+            except (TaskError, ValueError, OSError):
+                enabled = False
+                reason = '工作台全文来源尚未通过核验；既有 P/A 记录仍可查看。'
+        return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
+            source_sha256=binding.pdf_sha256 if binding else None,
+            messages=workbench_bridge.history(identifier) if workbench_bridge and binding else [],
+            evidence=evidence,
+            execution_authorized=False)
+    paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
+        discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
+        source_discovery=source_discovery, reference_views=reference_evidence_views,
+        closeout_views=closeouts, workbench_status=workbench_status)
     preparations = CandidateHistory(store)
     if candidate_service and (candidate_service.tasks.path != store.path or candidate_service.client is not model_client):
         raise ValueError('Candidate service must share the task store and model policy')
@@ -480,6 +529,62 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/discussion')
     def discussion_history(identifier: str):
         return {'messages': connections.history(identifier), 'enabled': connections.assistant_enabled}
+
+    def author_reference_report(identifier):
+        store.get(identifier)
+        return reference_evidence_views.get(identifier) if reference_evidence_views else None
+
+    @app.get('/api/tasks/{identifier}/reference-discussion')
+    def reference_discussion_history(identifier: str):
+        try:
+            report = author_reference_report(identifier)
+            if report is None:
+                return dict(task_id=identifier, source_sha256=None, messages=[], enabled=False,
+                    disabled_reason='作者 A 的核验数据尚未接入，不能请求 AI 解释。')
+            source = report['source_sha256']
+            messages = connections.history(identifier, channel='author_reference', evidence_sha256=source)
+            enabled = connections.assistant_enabled
+            return dict(task_id=identifier, source_sha256=source, messages=messages, enabled=enabled,
+                disabled_reason='' if enabled else '请启用已配置的结果 AI 服务；已有数据与下载不受影响。')
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            return JSONResponse({'detail':'作者 A 的来源或计算记录尚未通过核验。'}, status_code=409)
+
+    @app.post('/api/tasks/{identifier}/reference-discussion')
+    def discuss_author_reference(identifier: str, data: ReferenceDiscussionInput):
+        # Browser supplies a question and identity, never scientific context.
+        # Reference data cannot enter the ordinary B discussion or generation.
+        life = store.lifecycle(identifier)
+        if life['deleted']:
+            raise TaskError('任务记录已删除，不能发起新的分析请求。')
+        try:
+            report = author_reference_report(identifier)
+            if report is None or report['source_sha256'] != data.source_sha256:
+                raise StaleTask('作者 A 的来源已更新，请刷新后重新查看；未发送模型请求。')
+            context = reference_evidence_views.assistant_context(identifier)
+            if context['source_sha256'] != data.source_sha256:
+                raise StaleTask('作者 A 的来源在读取时发生变化；未发送模型请求。')
+        except TaskError:
+            raise
+        except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+            raise TaskError('作者 A 的数据未通过核验，未发送模型请求。') from None
+        return connections.discuss(identifier, data.request_id, data.provider, data.question, context,
+            channel='author_reference', evidence_sha256=data.source_sha256)
+
+    @app.get('/api/tasks/{identifier}/reference-evidence/files/{name}')
+    def reference_evidence_file(identifier: str, name: str, source_sha256: str):
+        try:
+            report = author_reference_report(identifier)
+            if report is None or report['source_sha256'] != source_sha256:
+                raise TaskError('作者 A 的来源已更新，请刷新后下载。')
+            data = reference_evidence_views.download(identifier, name)
+            if author_reference_report(identifier)['source_sha256'] != source_sha256:
+                raise TaskError('作者 A 的来源在读取时发生变化。')
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            return JSONResponse({'detail':'文件不在当前已核验的作者 A 数据中。'}, status_code=409)
+        media = {'.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.pdf':'application/pdf',
+                 '.csv':'text/csv; charset=utf-8', '.json':'application/json', '.md':'text/markdown; charset=utf-8'}
+        return Response(data, media_type=media.get(Path(name).suffix, 'application/octet-stream'),
+                        headers={'Content-Disposition':'inline; filename="'+name+'"'})
 
     @app.post('/api/tasks/{identifier}/discussion')
     def discuss_result(identifier: str, data: DiscussionInput):
@@ -851,8 +956,73 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                              'unknown':'模型请求状态不明', 'not_sent':'模型请求未发出',
                              'rejected':'模型服务拒绝请求', 'response_invalid':'模型返回格式无效',
                              'unresolved':'尚无可核对的完成记录'}.get(state, '整理状态待核对')
-        return {'requests': requests, 'configured': reference_model_client is not None,
+        try:
+            report = author_reference_report(identifier)
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            return JSONResponse({'detail':'作者 A 分析产物未通过来源核验，已有任务不变。'}, status_code=409)
+        return {'requests': requests, 'report': report, 'configured': reference_model_client is not None,
                 'execution_authorized': False}
+
+    @app.get('/api/tasks/{identifier}/paper-workflow')
+    def human_paper_workflow(identifier: str):
+        return paper_workflow.get(identifier)
+
+    @app.post('/api/tasks/{identifier}/paper-workflow/resources')
+    def human_paper_resources(identifier: str, data: Revision):
+        return paper_workflow.prepare_resources(identifier, data.revision)
+
+    @app.post('/api/tasks/{identifier}/paper-workflow/search')
+    def human_paper_search(identifier: str, data: Revision):
+        return paper_workflow.search_github(identifier, data.revision)
+
+    @app.get('/api/tasks/{identifier}/paper-workflow/b-draft')
+    def human_B_draft(identifier: str):
+        return paper_workflow.get_B_draft(identifier)
+
+    @app.get('/api/tasks/{identifier}/workbench')
+    def get_workbench(identifier: str):
+        return workbench_status(identifier)
+
+    @app.post('/api/tasks/{identifier}/workbench/extract')
+    def extract_workbench(identifier: str, data: WorkbenchExtractionInput):
+        status = workbench_status(identifier)
+        if not status['enabled']:
+            raise TaskError(status['disabled_reason'])
+        binding = workbench_binding(identifier)
+        if data.source_sha256 != binding.pdf_sha256:
+            raise StaleTask('论文全文已更新，请刷新后再提取；未发送模型请求。')
+        client = connections.client('deepseek-official', calls=model_client.calls)
+        # Connection events are append-only; a changed model or credential has
+        # a new revision, and cannot replay an older extraction identity.
+        with store.transaction() as db:
+            revision = db.execute('SELECT COUNT(*) FROM connection_events WHERE provider=?',
+                ('deepseek-official',)).fetchone()[0]
+        return workbench_bridge.extract(identifier, data.request_id, binding, client,
+            force_rescan=data.force_rescan, repair_visuals=data.repair_visuals,
+            connection_revision=max(1, revision), credential_generation=max(1, revision))
+
+    @app.get('/api/tasks/{identifier}/workbench/images/{entity_uid}')
+    def workbench_image(identifier: str, entity_uid: str, source_sha256: str):
+        binding = workbench_binding(identifier)
+        if not workbench_bridge or not binding or source_sha256 != binding.pdf_sha256:
+            raise TaskError('论文原图的来源绑定已变化。')
+        return Response(workbench_bridge.image(identifier, binding, entity_uid=entity_uid), media_type='image/png')
+
+    @app.get('/api/tasks/{identifier}/workbench/export/{kind}/{entity_uid}')
+    def workbench_export(identifier: str, kind: str, entity_uid: str, source_sha256: str):
+        binding = workbench_binding(identifier)
+        if not workbench_bridge or not binding or source_sha256 != binding.pdf_sha256:
+            raise TaskError('论文数据的来源绑定已变化。')
+        artifact = workbench_bridge.export(identifier, binding, entity_type=kind, entity_uid=entity_uid)
+        content = getattr(artifact, 'content', None)
+        filename = getattr(artifact, 'filename', None)
+        content_type = getattr(artifact, 'content_type', None)
+        if (not isinstance(content, bytes) or not isinstance(filename, str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\.csv', filename)
+                or content_type not in {'text/csv', 'text/csv; charset=utf-8'}):
+            raise TaskError('工作台导出产物尚未通过格式核验。')
+        return Response(content, media_type='text/csv; charset=utf-8',
+            headers={'Content-Disposition': 'attachment; filename="' + filename + '"'})
 
     @app.post('/api/tasks/{identifier}/reference-evidence/{request_id}/recover')
     def reference_recover(identifier: str, request_id: str, data: Revision):
@@ -1296,6 +1466,7 @@ def main():
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
+    parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
@@ -1359,12 +1530,17 @@ def main():
         if candidate_service and candidate_service.snapshots!=execution_jobs.controller.snapshots:
             parser.error('Candidate and execution services must share snapshots')
     papers=PaperStore(store,ledger=ledger)
+    workbench_bridge, workbench_bindings = None, None
+    if args.workbench_config:
+        from .workbench_runtime import assemble_private_workbench
+        workbench_bridge, workbench_bindings = assemble_private_workbench(papers, args.workbench_config)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
     from .discovery_library import DiscoveryLibrary
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
                           model_connections=connections,
+                          workbench_bridge=workbench_bridge,workbench_bindings=workbench_bindings,
                           result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,

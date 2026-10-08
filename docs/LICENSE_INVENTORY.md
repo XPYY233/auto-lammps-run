@@ -48,3 +48,7 @@ and original license. SHA-256 values are in `web_assets/markdown/manifest.json`.
 Raw HTML and automatic image requests are disabled; only explicit HTTP(S) links
 are rendered. Math expressions are preserved for the existing local KaTeX renderer.
 No CDN, model request or external upload is used to display saved answers.
+
+### Separately installed literature workbench
+
+The optional local bridge imports the existing Auto Research literature modules; it does not copy their extraction or verification algorithms into this repository. The installed source revision and dependency receipts remain local. The workbench and PyMuPDF/PDF-processing dependencies keep their own rights; the project's Apache-2.0 license does not relicense them. Public installer redistribution and website deployment still require the recorded licensing review. Local extraction uses this project's credentials and its own persistent encrypted storage, never another application's secrets or database.

@@ -38,10 +38,15 @@ test('queued route is restored after a failed action, including the previously d
  await hold;await flush();assert.equal(c.visits.at(-1),'#home');assert.equal(c.visits.length,2);assert.deepEqual(c.errors,['request failed']);
 });
 test('stale task-open response cannot publish task content after a new navigation request',async()=>{
- const c=setup();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ const c=setup(),elements=new Map();let resolve;c.api=()=>new Promise(r=>resolve=r);
+ c.clearTaskView=()=>{};c.$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  vm.runInContext('let current=null;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
- const hold=c.action(()=>c.openTask('a'.repeat(32)));c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
+ const hold=c.action(()=>c.openTask('a'.repeat(32)));await flush();
+ assert.equal(elements.get('#task-view').hidden,true);
+ assert.equal(elements.get('#task-loading').hidden,false);
+ assert.match(elements.get('#task-loading').textContent,/正在打开任务/);
+ c.requestRoute('#help');resolve({id:'a'.repeat(32)});await hold;await flush();
  assert.equal(vm.runInContext('current',c),null);assert.equal(c.visits.at(-1),'#help');assert.equal(c.location.hash,'#help');
 });
 
@@ -49,6 +54,7 @@ function element(tag){
  return {tagName:tag,children:[],textContent:'',hidden:false,disabled:false,value:'',dataset:{},attributes:{},
   append(...items){this.children.push(...items);},
   replaceChildren(...items){this.children=[...items];this.textContent='';},
+  close(){this.open=false;},
   setAttribute(name,value){this.attributes[name]=String(value);},getAttribute(name){return this.attributes[name]??null;}};
 }
 function textContent(element){return [element.textContent,...element.children.map(child=>typeof child==='object'?textContent(child):child)].join(' ');}
@@ -56,12 +62,17 @@ const OLD='a'.repeat(32),NEXT='b'.repeat(32);
 function setupCandidateNavigation(){
  const elements=new Map(),calls=[],renders=[];
  const c=vm.createContext({
-  document:{createElement:element},window:{scrollTo(){}},pendingRoute:null,
+  document:{createElement:element,querySelectorAll(selector){
+   if(selector!=='#candidate-attention textarea[data-question-index]')return [];
+   const find=item=>[...(item.tagName==='textarea'&&item.dataset.questionIndex!==undefined?[item]:[]),...item.children.flatMap(child=>typeof child==='object'?find(child):[])];
+   return find(c.$('#candidate-attention'));
+  }},window:{scrollTo(){}},pendingRoute:null,clearTimeout(){},
   current:{id:OLD,title:'Old task',status:'conditions_frozen',mode:'research',revision:1},
   candidateState:'clarification',candidateTask:OLD,candidateRecord:{id:'old-record',task_id:OLD,state:'clarification',result:{questions:['old question']}},
   candidateAnswers:[{answer:'old answer'}],candidateOutcome:'old outcome',
   schema:{automatic_workflow:{configured:false},candidate_preparation:{enabled:true}},
-  normalResult:null,workspaceReport:null,rawResult:null,executionState:null,referenceProgress:null,activityData:null,
+  normalResult:null,workspaceReport:null,rawResult:null,executionState:null,referenceProgress:null,activityData:null,activityGeneration:0,activityTimer:null,
+  discussionRequest:null,resultTab:'overview',selectedPlot:'full',evidenceViewChoice:null,closeoutPlotChoice:'ab',targetPreviewGeneration:0,
   initialGeometryCatalog:null,initialGeometryCatalogTask:null,initialGeometryLoading:false,initialGeometryRead:0,
   workspaceGeneration:0,workspaceState:null,candidateStatuses:{},requestStates:{},
   $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
@@ -70,13 +81,14 @@ function setupCandidateNavigation(){
   refreshActivity:async()=>{},refreshResults:async()=>{},refreshReferenceHistory:async()=>{},refreshWorkspace:async()=>{},refreshDiscussion:async()=>{},
   renderWorkspaceResults(){},renderCandidateClarification(){},ordinaryExecutionJob:()=>null,
   candidateStatus:job=>({label:job.state}),candidateStageChip:job=>{const el=element('span');el.textContent=job.state;return el;},
-  proposalRoundsExhausted:()=>false,proposalRoundLabel:()=>'',number:String,duration:String,
+  proposalRoundsExhausted:()=>false,proposalRoundLabel:()=>'',number:String,duration:String,questionText:q=>typeof q==='string'?q:String(q?.question||''),
  });
  vm.runInContext(source.slice(source.indexOf('function node(tag, value, className) {'),source.indexOf('function notice(')),c);
  vm.runInContext(source.slice(source.indexOf('function renderCurrentActivity(){'),source.indexOf('function scheduleActivityRefresh(')),c);
  vm.runInContext(source.slice(source.indexOf('function clearCandidateView('),source.indexOf("$('#prepare-candidate').onclick=")),c);
- vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
- c.render=()=>{renders.push({state:c.candidateState,task:c.candidateTask,record:c.candidateRecord,answers:c.candidateAnswers.length,outcome:c.candidateOutcome});c.renderCurrentActivity();};
+ vm.runInContext(source.slice(source.indexOf('function clearTaskView('),source.indexOf('function showNew(')),c);
+ c.clearTaskView.taskId=OLD;
+ c.render=()=>{renders.push({state:c.candidateState,task:c.candidateTask,record:c.candidateRecord,answers:c.candidateAnswers.length,outcome:c.candidateOutcome});c.$('#task-view').hidden=false;c.renderCurrentActivity();};
  for(const selector of ['#candidate-attention','#candidate-clarification','#candidate-summary','#candidate-downloads','#candidate-stage']){
   const old=element('span');old.textContent='old task content';c.$(selector).append(old);
  }
@@ -169,6 +181,8 @@ test('reference-only metadata does not leak A failure into B, and ordinary resea
   {id:NEXT,title:'Ordinary research',status:'conditions_frozen',mode:'research',preparation_state:'failed'}];
  const {c,elements}=setupTaskList(tasks);await c.listTasks();c.taskCards();
  const labels=c.taskPhaseLabels(tasks[0]);assert.equal(labels[0].label,'作者参考 A · 计算失败');assert.equal(labels[1].label,'B 方案 · 待准备');
+ assert.equal(c.taskState(tasks[0]),'draft');
+ assert.equal(c.taskState({...tasks[0],reference_state:'completed'}),'draft');
  assert.equal(c.taskPhaseLabels(tasks[1]).length,1);assert.equal(c.taskPhaseLabels(tasks[1])[0].label,'方案准备失败');
  const ordinaryRow=elements.get('#task-list').children[1];assert.doesNotMatch(textContent(ordinaryRow),/作者参考|B 方案|B 计算/);
 });
@@ -384,4 +398,164 @@ test('a removed tab button cannot change the latest paper selection on the next 
  let view=redrawPaper(state,structuredClone(report));view.tabs.children[1].onclick();assertSelectedPaper(view,'second','second.png');
  oldFirst.onclick();assertSelectedPaper(view,'second','second.png');
  view=redrawPaper(state,structuredClone(report));assertSelectedPaper(view,'second','second.png');
+});
+
+function taskFixture(id=NEXT,status='draft',mode='research'){
+ return {id,title:id===OLD?'Earlier synthetic task':'New synthetic task',prompt:'Synthetic research request',
+  status,mode,revision:1,updated_at:'2026-01-01T00:00:00Z',fields:{},issues:[],generated_batches:{}};
+}
+function setupTaskTransition(){
+ const state=setupCandidateNavigation(),{c}=state;
+ c.schema.fields={};c.schema.model_calls_enabled=false;
+ c.hideViews=()=>{};c.selectNavigation=()=>{};c.researchContent=value=>c.node('div',value);
+ c.renderInitialGeometry=()=>{};c.renderReference=()=>{};c.renderTargetPlanning=()=>{};
+ c.emptyState=(title,detail)=>c.node('div',title+' '+detail);
+ vm.runInContext(source.slice(source.indexOf('function renderWorkspaceResults('),source.indexOf('function renderReferenceProgress(')),c);
+ vm.runInContext(source.slice(source.indexOf('function render() {'),source.indexOf('async function renderHistory(')),c);
+ return state;
+}
+const transitionContainers=['#task-tags','#task-information','#task-files','#task-resources','#execution-flow',
+ '#plan-summary','#plan-files','#plan-version-list','#guidance-list','#ai-activity','#discussion-history',
+ '#history-list','#reference-history','#results-content','#research-results','#result-tabs'];
+function seedPreviousTask(state){
+ const {c}=state;
+ for(const selector of transitionContainers){c.$(selector).replaceChildren(c.node('p','previous task marker'));}
+ for(const selector of ['#task-title','#task-model','#plan-version','#plan-status','#plan-note','#plan-revision-help',
+  '#ai-current-title','#ai-current-detail','#ai-current-meta','#ai-activity-note','#discussion-status','#workspace-refresh-status'])c.$(selector).textContent='previous task marker';
+ for(const selector of ['#discussion-prompt','#guidance-note','#plan-revision-note','#candidate-answers'])c.$(selector).value='previous task input';
+ for(const selector of ['#plan-review-panel','.discussion-panel'])c.$(selector).hidden=false;
+ for(const selector of ['#plan-approve','#plan-revise','#open-current-plan','#plan-revision-note',
+  '#discussion-form button[type=submit]','#guidance-note','#guidance-send','#task-pause'])c.$(selector).disabled=false;
+ c.$('#plan-approve').onclick=()=>{throw new Error('previous task action must be removed');};
+ c.$('#plan-revise').onclick=c.$('#plan-approve').onclick;
+ c.normalResult={message:'previous task result'};c.executionState={job:{job_id:'previous-job'}};
+ c.activityData={task_id:OLD,now:'previous task AI'};c.discussionRequest={task:OLD,question:'previous task question'};
+ c.resultTab='history';c.selectedPlot='pressure';c.activityTimer=77;c.clearTimeout=value=>{c.cancelledTimer=value;};
+ c.$('#condition-dialog').open=true;c.$('#resolve-dialog').open=true;c.$('#literature-dialog').open=true;
+}
+function assertPreviousTaskCleared(state){
+ const {c}=state;
+ for(const selector of transitionContainers)assert.doesNotMatch(textContent(c.$(selector)),/previous task marker/,selector);
+ for(const selector of ['#task-model','#plan-version','#plan-status','#plan-note','#plan-revision-help',
+  '#ai-current-title','#ai-current-detail','#ai-current-meta','#ai-activity-note','#discussion-status','#workspace-refresh-status'])assert.doesNotMatch(c.$(selector).textContent,/previous task marker/,selector);
+ for(const selector of ['#discussion-prompt','#guidance-note','#plan-revision-note','#candidate-answers'])assert.equal(c.$(selector).value,'',selector);
+ for(const selector of ['#plan-review-panel','.discussion-panel'])assert.equal(c.$(selector).hidden,true,selector);
+ for(const selector of ['#plan-approve','#plan-revise','#open-current-plan','#plan-revision-note',
+  '#discussion-form button[type=submit]','#guidance-note','#guidance-send','#task-pause'])assert.equal(c.$(selector).disabled,true,selector);
+ assert.equal(c.$('#plan-approve').onclick,null);assert.equal(c.$('#plan-revise').onclick,null);
+ assert.equal(c.normalResult,null);assert.equal(c.executionState,null);assert.equal(c.activityData,null);assert.equal(c.discussionRequest,null);
+ assert.equal(c.resultTab,'overview');assert.equal(c.selectedPlot,'full');assert.equal(c.activityTimer,null);assert.equal(c.cancelledTimer,77);
+ for(const selector of ['#condition-dialog','#resolve-dialog','#literature-dialog'])assert.equal(c.$(selector).open,false,selector);
+}
+test('the production task-opening path removes old details before the task read and while the new candidate read waits',async()=>{
+ const state=setupTaskTransition(),{c,calls}=state;seedPreviousTask(state);let taskRead,candidateRead;
+ c.api=(path,data)=>{calls.push({path,data});return new Promise(resolve=>{if(path.endsWith('/candidate'))candidateRead=resolve;else taskRead=resolve;});};
+ const opening=c.openTask(NEXT);
+ assert.equal(c.current,null);assert.equal(c.$('#task-view').hidden,true);assert.equal(c.$('#task-loading').hidden,false);assertPreviousTaskCleared(state);
+ assert.deepEqual(calls,[{path:'/api/tasks/'+NEXT,data:undefined}]);
+ taskRead(taskFixture(NEXT,'conditions_frozen'));await flush();
+ assert.equal(c.$('#task-title').textContent,'New synthetic task');assert.equal(c.$('#task-view').hidden,false);
+ assertPreviousTaskCleared(state);assertCandidateCleared(state);
+ candidateRead({candidate:{id:'new-candidate',task_id:NEXT,state:'prepared',revision:1,result:{}}});await opening;
+ assert.equal(c.candidateRecord.id,'new-candidate');assert.equal(calls.every(call=>call.data===undefined),true);
+});
+test('same-task opening preserves verified details and the latest unsent clarification while saved records refresh',async()=>{
+ const state=setupTaskTransition(),{c}=state;seedPreviousTask(state);let taskRead,candidateRead;
+ const answer=c.node('textarea');answer.dataset.questionIndex='0';answer.value='unsent same-task answer';c.$('#candidate-attention').append(answer);
+ c.api=path=>new Promise(resolve=>{if(path.endsWith('/candidate'))candidateRead=resolve;else taskRead=resolve;});
+ const opening=c.openTask(OLD);
+ assert.equal(c.$('#task-view').hidden,false);assert.equal(c.$('#guidance-note').value,'previous task input');
+ assert.match(textContent(c.$('#plan-summary')),/previous task marker/);assert.equal(c.cancelledTimer,undefined);
+ taskRead(taskFixture(OLD,'conditions_frozen'));await flush();answer.value='typed while the read was pending';
+ candidateRead({candidate:{id:'old-record',task_id:OLD,state:'clarification',revision:1,result:{questions:['old question']}}});await opening;
+ assert.equal(c.document.querySelectorAll('#candidate-attention textarea[data-question-index]')[0].value,'typed while the read was pending');
+ assert.equal(c.$('#candidate-answers').value,'previous task input');assert.equal(c.$('#guidance-note').value,'previous task input');
+ assert.match(textContent(c.$('#plan-summary')),/previous task marker/);assert.equal(c.cancelledTimer,undefined);
+});
+test('a different candidate or changed question cannot inherit a previous unsent clarification draft',async()=>{
+ for(const [id,question] of [['new-record','old question'],['old-record','changed question']]){
+  const {c}=setupTaskTransition();
+  const answer=c.node('textarea');answer.dataset.questionIndex='0';answer.value='answer to the previous question';c.$('#candidate-attention').append(answer);
+  c.api=async()=>({candidate:{id,task_id:OLD,state:'clarification',revision:1,result:{questions:[question]}}});
+  await c.refreshCandidate();
+  assert.equal(c.document.querySelectorAll('#candidate-attention textarea[data-question-index]')[0].value,'');
+ }
+});
+test('rendering a newly created task also clears the previous view without altering its task evidence',()=>{
+ const state=setupTaskTransition(),{c}=state;seedPreviousTask(state);
+ const evidence={task_id:NEXT,note:'synthetic human-only evidence'},task={...taskFixture(),paper_evidence:evidence};c.current=task;c.render();
+ assert.equal(c.current,task);assert.equal(c.current.paper_evidence,evidence);assert.equal(c.$('#task-title').textContent,'New synthetic task');
+ assertPreviousTaskCleared(state);assert.equal(state.calls.length,0);
+});
+test('an older task GET cannot publish after a newer task has opened, even without a queued route',async()=>{
+ const state=setupTaskTransition(),{c}=state;let oldRead,newRead;
+ c.api=path=>new Promise(resolve=>{if(path.endsWith(OLD))oldRead=resolve;else newRead=resolve;});
+ c.refreshCandidate=async()=>{};
+ const first=c.openTask(OLD),second=c.openTask(NEXT);newRead(taskFixture());await second;
+ oldRead(taskFixture(OLD));await first;
+ assert.equal(c.current.id,NEXT);assert.equal(c.$('#task-title').textContent,'New synthetic task');
+});
+
+function setupTaskReads(){
+ const state=setupTaskTransition(),{c}=state;
+ for(const [start,end] of [
+  ['async function renderHistory(', 'async function afterChange('],
+  ['async function refreshReferenceHistory(', "$('#refresh-reference').onclick="],
+  ['async function refreshResults(', "$('#refresh-results').onclick="],
+  ['async function refreshGuidance(', 'async function sendGuidance('],
+  ['async function refreshPlanReview(', 'function clearCandidateView('],
+  ['async function refreshDiscussion(', "$('#discussion-form').onsubmit="],
+ ])vm.runInContext(source.slice(source.indexOf(start),source.indexOf(end)),c);
+ c.renderPlanSummary=()=>{};c.renderPlanVersions=()=>{};
+ return state;
+}
+function readReply(path){
+ if(path.endsWith('/history'))return {events:[],preparation_events:[],lifecycle_events:[]};
+ if(path.endsWith('/reference-evidence'))return {requests:[]};
+ if(path.endsWith('/results'))return {message:'current result',evaluations:[]};
+ if(path.endsWith('/guidance'))return {paused:false,guidance:[]};
+ if(path.endsWith('/plan'))return {state:'queued',workspace:{current:null}};
+ if(path.endsWith('/discussion'))return {enabled:false,messages:[]};
+ if(path.endsWith('/execution'))return {configured:true,job:{}};
+ return taskFixture(path.split('/').at(-1),'draft','reproduction');
+}
+const lateReaders=[
+ ['renderHistory','/history','#history-list',{events:[],preparation_events:[{at:'2026-01-01',label:'old history'}]}],
+ ['refreshReferenceHistory','/reference-evidence','#reference-history',{requests:[{at:'2026-01-01',label:'old reference',state:'queued'}]}],
+ ['refreshResults','/results','#results-status',{message:'old result',evaluations:[]}],
+ ['refreshGuidance','/guidance','#guidance-list',{paused:true,guidance:[{sequence:1,note:'old guidance'}]}],
+ ['refreshPlanReview','/plan','#plan-review-panel',{state:'queued',workspace:{current:null}}],
+ ['refreshDiscussion','/discussion','#discussion-history',{enabled:true,messages:[{question:'old question',answer:'old answer',provider:'synthetic',model:'offline',at:'2026-01-01'}]}],
+];
+for(const [name,suffix,selector,reply] of lateReaders)test(`${name} rejects a previous visit's read after the production A to B to A route`,async()=>{
+ const state=setupTaskReads(),{c}=state;c.current=taskFixture(OLD,'draft','reproduction');let resolve,held=false;
+ c.api=async path=>{if(!held&&path==='/api/tasks/'+OLD+suffix){held=true;return new Promise(r=>resolve=r);}return readReply(path);};
+ const earlier=c[name]();await c.openTask(NEXT);await c.openTask(OLD);
+ const box=c.$(selector);box.replaceChildren(c.node('p','current visit marker'));box.hidden=false;
+ const before={text:textContent(box),hidden:box.hidden};resolve(reply);await earlier;
+ assert.deepEqual({text:textContent(box),hidden:box.hidden},before);
+ if(name==='refreshResults')assert.equal(c.normalResult.message,'current result');
+});
+for(const name of ['refreshGuidance','refreshPlanReview'])for(const departed of [false,true])test(`${name} ignores a late failure after ${departed?'another task opens':'the task page closes'}`,async()=>{
+ const state=setupTaskReads(),{c}=state;c.current=taskFixture(OLD);let reject,held=false;
+ c.api=async path=>{if(!held&&path.endsWith(name==='refreshGuidance'?'/guidance':'/plan')){held=true;return new Promise((_,r)=>reject=r);}return readReply(path);};
+ const earlier=c[name]();if(departed)await c.openTask(NEXT);else c.$('#task-view').hidden=true;
+ c.$('#plan-status').textContent='current status';c.$('#plan-approve').disabled=false;c.$('#plan-revise').disabled=false;
+ c.$('#guidance-list').replaceChildren(c.node('li','current guidance'));
+ reject(new Error('old task read failure'));await earlier;
+ assert.equal(c.$('#plan-status').textContent,'current status');assert.equal(c.$('#plan-approve').disabled,false);assert.equal(c.$('#plan-revise').disabled,false);
+ assert.match(textContent(c.$('#guidance-list')),/current guidance/);assert.doesNotMatch(textContent(c.$('#guidance-list')),/old task read failure/);
+});
+test('a previous plan execution receipt cannot restore old job actions after returning to the task',async()=>{
+ const state=setupTaskReads(),{c}=state;c.current=taskFixture(OLD);let receipt,first=true;
+ c.api=async path=>{
+  if(first&&path.endsWith('/plan')){first=false;return {state:'prepared',workspace:{current:{version:1,historical:false,files:[]}}};}
+  if(!receipt&&path==='/api/tasks/'+OLD+'/execution')return new Promise(resolve=>receipt=resolve);
+  return readReply(path);
+ };
+ const earlier=c.refreshPlanReview();await flush();assert.equal(typeof receipt,'function');
+ await c.openTask(NEXT);await c.openTask(OLD);
+ c.$('#plan-note').textContent='current visit note';c.$('#plan-approve').textContent='current visit action';c.$('#plan-approve').disabled=true;
+ receipt({configured:true,job:{job_id:'old-job',state:'completed',scheduler_state:'completed',dispatch_count:1,max_attempts:2}});await earlier;
+ assert.equal(c.$('#plan-note').textContent,'current visit note');assert.equal(c.$('#plan-approve').textContent,'current visit action');assert.equal(c.$('#plan-approve').disabled,true);
 });

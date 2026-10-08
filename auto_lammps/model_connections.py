@@ -70,7 +70,10 @@ class ModelConnections:
             db.execute('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY, provider TEXT, event TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS result_questions (id TEXT PRIMARY KEY, task_id TEXT, provider TEXT, model TEXT, question TEXT, context_sha256 TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS result_answers (id TEXT PRIMARY KEY REFERENCES result_questions(id), state TEXT, answer TEXT, usage TEXT)')
-            for table in ('connection_events', 'result_questions', 'result_answers'):
+            db.execute('CREATE TABLE IF NOT EXISTS reference_result_questions (id TEXT PRIMARY KEY, task_id TEXT, provider TEXT, model TEXT, question TEXT, context_sha256 TEXT, at TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS reference_result_answers (id TEXT PRIMARY KEY REFERENCES reference_result_questions(id), state TEXT, answer TEXT, usage TEXT)')
+            for table in ('connection_events', 'result_questions', 'result_answers',
+                          'reference_result_questions', 'reference_result_answers'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT, 'immutable model history'); END")
 
@@ -170,14 +173,34 @@ class ModelConnections:
         return {'ok': True, 'model': client.model, 'ledger': ledger,
                 'usage': {key: value for key, value in usage.items() if type(value) is int}}
 
-    def history(self, identifier):
+    def _discussion_storage(self, identifier, channel, evidence_sha256):
         self.tasks.get(identifier)
-        with self.tasks.transaction() as db:
-            rows = db.execute('SELECT q.*, a.state, a.answer, a.usage FROM result_questions q LEFT JOIN result_answers a ON q.id=a.id WHERE q.task_id=? ORDER BY q.at,q.id', (identifier,)).fetchall()
-        return [dict(row) | {'state': row['state'] or 'unknown', 'usage': json.loads(row['usage']) if row['usage'] else None} for row in rows]
+        if channel == 'research' and evidence_sha256 is None:
+            return identifier, 'result_questions', 'result_answers'
+        if (channel != 'author_reference' or not isinstance(evidence_sha256, str)
+                or re.fullmatch('[0-9a-f]{64}', evidence_sha256) is None):
+            raise TaskError('作者参考分析需要已核验的独立来源身份。')
+        namespace = sha256(canonical({'task':identifier, 'role':'author_reference',
+                                      'source_sha256':evidence_sha256}))[:32]
+        return namespace, 'reference_result_questions', 'reference_result_answers'
 
-    def discuss(self, identifier, request_id, provider, question, context):
-        task_id(request_id); self.tasks.get(identifier)
+    def history(self, identifier, *, channel='research', evidence_sha256=None):
+        namespace, questions, answers = self._discussion_storage(identifier, channel, evidence_sha256)
+        with self.tasks.transaction() as db:
+            rows = db.execute(f'SELECT q.*, a.state, a.answer, a.usage FROM {questions} q LEFT JOIN {answers} a ON q.id=a.id WHERE q.task_id=? ORDER BY q.at,q.id', (namespace,)).fetchall()
+        return [dict(row) | {'task_id':identifier, 'state': row['state'] or 'unknown',
+                            'usage': json.loads(row['usage']) if row['usage'] else None} for row in rows]
+
+    def discuss(self, identifier, request_id, provider, question, context, *,
+                channel='research', evidence_sha256=None):
+        task_id(request_id)
+        namespace, questions, answers = self._discussion_storage(identifier, channel, evidence_sha256)
+        history = lambda: self.history(identifier, channel=channel, evidence_sha256=evidence_sha256)
+        if channel == 'author_reference' and (
+                not isinstance(context, dict) or context.get('source_sha256') != evidence_sha256
+                or context.get('role') != 'author_reference_A_human_only'
+                or 'frozen_scientific_conditions' in context):
+            raise TaskError('作者参考上下文不可包含独立计算条件。')
         if not self.assistant_enabled:
             raise TaskError('结果助手尚未启用；可先下载数据或保存模型连接。')
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 4000:
@@ -188,13 +211,16 @@ class ModelConnections:
         if not MODEL_ID.fullmatch(value['model']):
             raise TaskError('密钥已保存，请先读取模型目录并选定模型 ID。')
         with self.tasks.transaction() as db:
-            prior = db.execute('SELECT * FROM result_questions WHERE id=?', (request_id,)).fetchone()
+            other_questions = 'result_questions' if channel == 'author_reference' else 'reference_result_questions'
+            if db.execute(f'SELECT 1 FROM {other_questions} WHERE id=?', (request_id,)).fetchone():
+                raise TaskError('请求标识已用于另一类结果分析。')
+            prior = db.execute(f'SELECT * FROM {questions} WHERE id=?', (request_id,)).fetchone()
             if prior:
-                if prior['task_id'] != identifier or prior['question'] != question or prior['provider'] != provider:
+                if prior['task_id'] != namespace or prior['question'] != question or prior['provider'] != provider:
                     raise TaskError('请求标识已用于其他内容。')
                 # Never resend after a crash, timeout, or changed connection.
         if prior:
-            return next(item for item in self.history(identifier) if item['id'] == request_id)
+            return next(item for item in history() if item['id'] == request_id)
         system = ('You are the researcher-facing result assistant, NOT the evaluation generator. '
             'Reply in concise Chinese using ONLY the supplied verified result data and conversation. '
             'Do not invent numbers, claim new calculations or pretend to have executed tools. '
@@ -205,7 +231,13 @@ class ModelConnections:
             'Verified current context takes precedence over earlier assistant statements. '
             'For new plots, explain which existing data support them; clearly distinguish suggestions from completed plots. '
             'Use LaTeX delimiters \\( ... \\) for inline equations and \\[ ... \\] for display equations.')
-        previous = [{'role': role, 'content': text} for item in self.history(identifier)[-9:]
+        if channel == 'author_reference':
+            system += (' This is author reference A analysis, separate from independent B. '
+                       'Only the supplied author-reference methods and A-only tables describe this run. '
+                       'Never infer the author method from the independent B task or a paper target. '
+                       'For a partial or failed run, distinguish available observations from missing scope; '
+                       'do not claim complete output or scientific reproduction success.')
+        previous = [{'role': role, 'content': text} for item in history()[-9:]
                     if item['id'] != request_id and item['state'] == 'completed'
                     for role, text in [('user', item['question']), ('assistant', item['answer'])]]
         messages = [{'role': 'system', 'content': system}] + previous + [
@@ -221,16 +253,18 @@ class ModelConnections:
         with self.tasks.transaction() as db:
             # A concurrent request may have reserved this identity while the
             # adapter was assembled. It is still never sent twice.
-            concurrent = db.execute('SELECT * FROM result_questions WHERE id=?', (request_id,)).fetchone()
+            if db.execute(f'SELECT 1 FROM {other_questions} WHERE id=?', (request_id,)).fetchone():
+                raise TaskError('请求标识已用于另一类结果分析。')
+            concurrent = db.execute(f'SELECT * FROM {questions} WHERE id=?', (request_id,)).fetchone()
             if concurrent:
-                if (concurrent['task_id'] != identifier or concurrent['question'] != question
+                if (concurrent['task_id'] != namespace or concurrent['question'] != question
                         or concurrent['provider'] != provider):
                     raise TaskError('请求标识已用于其他内容。')
             else:
-                db.execute('INSERT INTO result_questions VALUES (?,?,?,?,?,?,?)',
-                    (request_id, identifier, provider, value['model'], question, context_hash, datetime.now(timezone.utc).isoformat()))
+                db.execute(f'INSERT INTO {questions} VALUES (?,?,?,?,?,?,?)',
+                    (request_id, namespace, provider, value['model'], question, context_hash, datetime.now(timezone.utc).isoformat()))
         if concurrent:
-            return next(item for item in self.history(identifier) if item['id'] == request_id)
+            return next(item for item in history() if item['id'] == request_id)
         payload = dict(model=value['model'], messages=messages, stream=False)
         if provider == 'anthropic':
             payload.update(system=messages[0]['content'], messages=messages[1:], max_tokens=4096)
@@ -257,8 +291,9 @@ class ModelConnections:
             state, answer, usage = ('failed_or_unknown' if sent else 'not_sent'), ('请求未完成，未自动重试。请核对模型连接与账户记录。' if sent else '请求未发送；请核对已批准的模型调用额度及请求记录。'), {}
         if reserved:
             self.calls.record(request_id,dict(provider=provider,requested_model=value['model'],state=state,
-                request_sha256=sha256(canonical(payload)),usage=usage,purpose='result_discussion',transport_attempts=1,
+                request_sha256=sha256(canonical(payload)),usage=usage,
+                purpose='author_reference_discussion' if channel=='author_reference' else 'result_discussion',transport_attempts=1,
                 scientific_adapter={**adapter_proof,'output_check':'text_shape_only_prose_claims_not_verified'}))
         with self.tasks.transaction() as db:
-            db.execute('INSERT INTO result_answers VALUES (?,?,?,?)', (request_id, state, answer, json.dumps(usage)))
-        return next(item for item in self.history(identifier) if item['id'] == request_id)
+            db.execute(f'INSERT INTO {answers} VALUES (?,?,?,?)', (request_id, state, answer, json.dumps(usage)))
+        return next(item for item in history() if item['id'] == request_id)
