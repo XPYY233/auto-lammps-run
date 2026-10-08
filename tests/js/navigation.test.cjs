@@ -303,6 +303,29 @@ test('a saved job controls the next action instead of an older prepared plan',()
  assert.equal($('#next-action').textContent,'查看数据与图表');
 });
 
+test('active AI preparation offers a visible route to its progress',()=>{
+ const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ const destinations=[];
+ $('#candidate-panel').scrollIntoView=()=>destinations.push('candidate');
+ $('#ai-activity-panel').scrollIntoView=()=>destinations.push('activity');
+ const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
+ vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research',fields:{}}, activityData=null, candidateRecord={state:'running'}, executionState=null, workspaceReport=null, schema={model_calls_enabled:true};",c);
+ vm.runInContext(source.slice(source.indexOf('function askAIAboutResults('),source.indexOf('function scheduleActivityRefresh(')),c);
+ c.renderNextAction();
+ assert.equal($('#next-action').hidden,false);
+ assert.equal($('#next-action').textContent,'查看方案准备进度');
+ $('#next-action').onclick();
+ assert.equal($('#advanced-task').open,true);
+ assert.deepEqual(destinations,['candidate']);
+ vm.runInContext("current.status='draft';candidateRecord=null;activityData={task_id:current.id,condition_preparation:{state:'generating'}};",c);
+ c.renderNextAction();
+ assert.equal($('#next-action').hidden,false);
+ assert.equal($('#next-action').textContent,'查看条件整理进度');
+ $('#next-action').onclick();
+ assert.equal($('#ai-activity-panel').open,true);
+ assert.deepEqual(destinations,['candidate','activity']);
+});
+
 test('evidence explanation submits one prepared question but preserves an existing draft',()=>{
  const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  let submitted=0;

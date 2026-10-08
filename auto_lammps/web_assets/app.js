@@ -943,7 +943,7 @@ function renderNextAction(){
   }
   if(candidateRecord){
     if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state)){
-      note.textContent='应用内 AI 正在准备方案，后台会继续处理。';return;
+      jump('查看方案准备进度','#candidate-panel','应用内 AI 正在准备方案，后台会继续处理。','#advanced-task');return;
     }
     if(candidateRecord.state==='clarification'){
       jump('回答 AI 的问题','#candidate-attention','答复会进入下一轮方案准备；剩余轮次见准备记录。');return;
@@ -974,7 +974,7 @@ function renderNextAction(){
   const unconfirmed=fields.filter(field=>field.selected&&!field.confirmed).length;
   const condition=activityData?.task_id===current.id?activityData.condition_preparation:null;
   if(['generating','validating','repairing','awaiting_import'].includes(condition?.state)){
-    note.textContent='应用内 AI 正在整理研究条件；完成后会显示需要你核对的内容。';return;
+    jump('查看条件整理进度','#ai-activity-panel','应用内 AI 正在整理研究条件；完成后会显示需要你核对的内容。','#ai-activity-panel');return;
   }
   if(!missing&&!unconfirmed){
     const freeze=$('#freeze');
