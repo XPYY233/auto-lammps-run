@@ -2097,7 +2097,9 @@ async function refreshScientificReviews(id,results){
  const generation=++scientificReviewGeneration;
  const ids=[...new Set((results?.evaluations||[]).flatMap(group=>group.requests.flatMap(request=>request.reports.filter(report=>report.status==='analyzed').map(report=>report.id))))];
  if(!ids.length&&!results?.evaluations?.length){scientificReviewState={task:id,phase:'idle',reviews:[],error:''};renderScientificReviews();return;}
- scientificReviewState={task:id,phase:'loading',reviews:[],error:''};renderScientificReviews();
+ const previous=scientificReviewState.task===id?scientificReviewState:null;
+ scientificReviewState=previous?.reviews.length?{...previous,phase:'refreshing'}:{task:id,phase:'loading',reviews:[],error:''};
+ if(!previous?.reviews.length)renderScientificReviews();
  try{
   const response=await api(`/api/tasks/${id}/scientific-reviews`);
   if(current?.id!==id||generation!==scientificReviewGeneration)return;
@@ -2109,9 +2111,12 @@ async function refreshScientificReviews(id,results){
    catch(error){errors.push(error.message);}
    if(current?.id!==id||generation!==scientificReviewGeneration)return;
   }
-  scientificReviewState={task:id,phase:reviews.length||errors.length?'ready':'idle',reviews,error:errors.length?'有结果尚未通过来源核对：'+errors.join('；'):''};
+  const next={task:id,phase:reviews.length||errors.length?'ready':'idle',reviews,error:errors.length?'有结果尚未通过来源核对：'+errors.join('；'):''};
+  const changed=!previous||previous.phase==='idle'||previous.error!==next.error||JSON.stringify(previous.reviews)!==JSON.stringify(next.reviews);
+  scientificReviewState=next;
+  if(changed)renderScientificReviews();
  }catch(error){if(current?.id!==id||generation!==scientificReviewGeneration)return;scientificReviewState={task:id,phase:'error',reviews:[],error:'结果核验暂不可用：'+error.message};}
- renderScientificReviews();
+ if(scientificReviewState.phase==='error')renderScientificReviews();
 }
 async function refreshWorkspace(){
  if(!current)return;
