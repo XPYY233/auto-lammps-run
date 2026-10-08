@@ -2440,3 +2440,5 @@ FeAl在原任务普通页面恢复后已真实调用首版，收到六项澄清�
 完整合并检查：JS 全套通过；Python `unittest discover` 运行 1333 项后出现 1 个错误（53 skipped）：`test_reference_charts_user_flow` 试图修改 `ModelConnections.assistant_enabled`，但属性无 setter。影响仅为此合并测试未通过；原因是测试对开关的可写性与生产类定义不一致，需核对真实运行开关构造方式。未部署，未调用模型/HPC；修正测试夹具后仅重跑相关测试和必要回归。
 
 复验：JS 全套通过；将测试夹具改为模拟构造时的 `_assistant_policy` 后，作者 A 图表用户流 10 项全通过。尚需独立安装态浏览器验收；本次未将合并源码部署到 8787，也未触发真实模型或 HPC。
+
+最终离线复验：`node --test tests/js/*.test.cjs` 205/205；`PYTHONPATH="$PWD" python3 -m unittest discover -s tests -v` 1333 项通过（53 项依既有条件跳过）；`scripts/check_public_tree.py` 0 findings，前端语法与公开树检查通过。该证据证明源码整合通过离线检查，仍不代替安装态或真实科研流程验收。
