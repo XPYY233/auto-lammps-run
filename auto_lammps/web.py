@@ -25,7 +25,7 @@ from .reference_generation import accounting_binding, generate_reference_draft, 
 from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
 from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError, PlanIterationLimit
-from .results import ResultsReader
+from .results import ResultsReader, ResultUnavailable
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .paper_evidence import PaperEvidenceViews
 from .reference_evidence import ReferenceEvidenceViews
@@ -274,6 +274,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         reference_evidence_views = ReferenceEvidenceViews(reference_views.directory, papers)
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
+    from .result_charts import ResultCharts
+    from .reference_chart_sources import ReferenceChartSources
+    reference_charts = (ResultCharts(store, connections, None,
+        source_providers=(ReferenceChartSources(reference_evidence_views),), channel='author_reference')
+        if reference_evidence_views is not None else None)
     hpc = hpc_connections or HPCConnections(store)
     if results_reader and results_reader.tasks.path!=store.path:
         raise ValueError('Results must belong to the same task store')
@@ -545,6 +550,39 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def author_reference_report(identifier):
         store.get(identifier)
         return reference_evidence_views.get(identifier) if reference_evidence_views else None
+
+    @app.get('/api/tasks/{identifier}/reference-charts')
+    def reference_chart_history(identifier: str):
+        store.get(identifier)
+        return dict(charts=reference_charts.history(identifier) if reference_charts else [],
+                    configured=reference_charts is not None)
+
+    @app.post('/api/tasks/{identifier}/reference-charts')
+    def create_reference_chart(identifier: str, data: ReferenceDiscussionInput):
+        if store.lifecycle(identifier)['deleted']:
+            raise TaskError('任务记录已删除，不能发起新的分析请求。')
+        try:
+            report = author_reference_report(identifier)
+        except (ValueError, KeyError, TypeError, OSError, runtime_denied):
+            return JSONResponse({'detail':'作者 A 的来源或计算记录尚未通过核验，未发送选图请求。'}, status_code=409)
+        if reference_charts is None or report is None:
+            raise TaskError('作者 A 的已核验数值数据尚未接入。')
+        if report['source_sha256'] != data.source_sha256:
+            raise StaleTask('作者 A 的来源已更新，请刷新；未发送模型请求。')
+        try:
+            return reference_charts.create(identifier, data.request_id, data.provider, data.question)
+        except ResultUnavailable:
+            return JSONResponse({'detail':'作者 A 的来源在读取时已变化，未发送选图请求。'}, status_code=409)
+
+    @app.get('/api/tasks/{identifier}/reference-charts/{request_id}/download')
+    def download_reference_chart(identifier: str, request_id: str):
+        if reference_charts is None:
+            return JSONResponse({'detail':'作者 A 图表服务尚未配置。'}, status_code=404)
+        raw, chart = reference_charts.download(identifier, request_id)
+        return Response(raw, media_type='text/csv', headers={
+            'Content-Disposition':'attachment; filename="author-A-'+request_id+'.csv"',
+            'X-Data-Sha256':chart['csv_sha256'],
+            'Cache-Control':'no-store'})
 
     @app.get('/api/tasks/{identifier}/reference-discussion')
     def reference_discussion_history(identifier: str):

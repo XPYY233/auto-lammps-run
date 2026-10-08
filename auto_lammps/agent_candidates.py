@@ -26,7 +26,7 @@ from .coordination_analysis import GUIDE as STRUCTURAL_GUIDE
 from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
 
-GENERATOR_VERSION = 21
+GENERATOR_VERSION = 22
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
     'Preserve the scientific scope, material identity, every specified value and method, and any immutable initial geometry. '
@@ -886,6 +886,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         raise CandidateError('No allowlisted statically compatible potential; no model request sent')
     if type(max_atoms) is not int or not 1 <= max_atoms <= 1000000:
         raise CandidateError('Invalid geometry atom limit')
+    from .proposal_diagnostics import collect_proposal_diagnostics, VERSION as DIAGNOSTIC_VERSION
     if initial_geometry is not None:
         initial_geometry = validate_initial_geometry(initial_geometry, max_atoms=max_atoms, units=units)
         if initial_geometry['entry']['size'] > resources.storage_bytes - 262144:
@@ -918,6 +919,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'geometry_adapter':_geometry_context(max_atoms, initial_geometry),
                'workflow_adapter':workflow_tool_context(),
                'geometry_runtime': runtime, 'analysis_runtime': adapter_identity(),
+               'proposal_diagnostics': {'version': DIAGNOSTIC_VERSION,
+                   'implementation_sha256': sha256(Path(__file__).with_name('proposal_diagnostics.py').read_bytes())},
                'requested_model': getattr(client,'model',client.calls.config.model),
                'thinking': getattr(client, 'thinking', False),
                'condition_record_sha256': condition_record_sha256}
@@ -1139,6 +1142,18 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             raise
         except CandidateError as error:
             last_error = error
+            # Inspect the SAME rejected proposal. These deterministic diagnostics
+            # cannot change its contents, weaken a gate, or grant another round.
+            diagnostics = collect_proposal_diagnostics(proposal, max_atoms=max_atoms,
+                output_layout=output_layout, require_analysis_plan=require_analysis_plan,
+                packages=adapter.packages, initial_geometry=initial_geometry)
+            feedback = {'failure': str(error)[:6000],
+                        'diagnostics': [{**item, 'message': item['message'][:600]}
+                                        for item in diagnostics[:32]],
+                        'diagnostics_truncated': len(diagnostics) > 32}
+            if on_proposal:
+                on_proposal({'request_id': completion['request_id'], 'proposal_sha256': digest,
+                             'validation': feedback})
             if attempt == MAX_PROPOSAL_ROUNDS-1:
                 break
             repair_id = sha256(canonical({'base': request_id, 'repair': attempt + 1}))[:32]
@@ -1153,10 +1168,14 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                                   '数字操作的 x、y 必须取自该数字表声明的列名；'
                                   'lammps_dump 是结构来源，不要增加数字 columns 或 x/y/window；'
                                   '结构操作使用同版 structural_contract 的完整字段。不要改变科研范围。',
-                    'failure': str(error)[:6000]}).decode()}]
+                    **feedback}).decode()}]
             try:
                 if on_stage: on_stage('repairing_plan')
                 repaired = complete_proposal(repair_id, repair_messages, 'validation_repair')
+            except PlanIterationLimit as limit_error:
+                # A persistent cap can be reached earlier than this local loop
+                # (JSON repair, previous rounds). Keep the known cause visible.
+                raise PlanIterationLimit(str(limit_error)+' 最后检查问题：'+str(error)) from error
             except ModelError as model_error:
                 # If no repair was sent, the known validation error remains the cause.
                 # A real provider failure must not be disguised as that old diagnosis.
