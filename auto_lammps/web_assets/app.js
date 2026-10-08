@@ -1955,7 +1955,13 @@ function number(v,digits=4){return Number.isFinite(v)?v.toLocaleString('en-US',{
 function fileSize(bytes){if(bytes<1024)return number(bytes,0)+' B';if(bytes<1024**2)return number(bytes/1024,2)+' KiB';if(bytes<1024**3)return number(bytes/1024**2,2)+' MiB';return number(bytes/1024**3,2)+' GiB';}
 function currentRawFiles(){return rawResult?.task===current?.id?rawResult.files:[];}
 function duration(seconds){const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=Math.floor(seconds%60);return `${h} 小时 ${m} 分 ${s} 秒`;}
-function addInfo(label,value){$('#task-information').append(node('dt',label),node('dd',value));}
+function addInfo(label,value){
+ const box=$('#task-information'),items=[...box.children];
+ for(let i=0;i+1<items.length;i+=2){
+  if(items[i].textContent===label){items[i+1].textContent=String(value);return;}
+ }
+ box.append(node('dt',label),node('dd',value));
+}
 function acceptanceLabel(acceptance){
   const status=acceptance?.status;
   return {accepted_by_user:'基准工况 · 用户验收',accepted:'基准工况 · 已验收',pending:'验收待确认',rejected:'验收未通过'}[status]||('验收状态：'+(status||'未记录'));
@@ -1972,13 +1978,14 @@ function renderFlow(report){
 }
 function metricTable(metrics,compact=false){
  const table=node('table',undefined,'result-table'),head=node('thead'),tr=node('tr'),body=node('tbody');
- for(const label of compact?['性质 / GPa','P','A','|P−A|']:['性质 / 方法','P','A','abs(P−A)','相对差'])tr.append(node('th',label));head.append(tr);table.append(head,body);
- for(const m of metrics){const row=node('tr'),name=node('td',m.label,'metric-name');if(!compact)name.append(node('small',m.method));row.append(name,node('td',number(m.paper),'number'),node('td',number(m.reference),'number'),node('td',number(m.absolute_difference),'number'));if(!compact)row.append(node('td',m.relative_difference_percent===null?'未定义':number(m.relative_difference_percent,3)+'%','number'));body.append(row);}return table;
+ for(const label of compact?['性质 / 单位','P','A','|P−A|']:['性质 / 单位 / 方法','P','A','|P−A|','相对差'])tr.append(node('th',label));head.append(tr);table.append(head,body);
+ for(const m of metrics){const row=node('tr'),name=node('td',m.label,'metric-name');name.append(node('small',m.unit||'单位未记录'));if(!compact)name.append(node('small',m.method));row.append(name,node('td',number(m.paper),'number'),node('td',number(m.reference),'number'),node('td',number(m.absolute_difference),'number'));if(!compact)row.append(node('td',m.relative_difference_percent===null?'未定义':number(m.relative_difference_percent,3)+'%','number'));body.append(row);}return table;
 }
 function curvePlot(report){
  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 450 290');svg.setAttribute('class','plot-svg');svg.setAttribute('role','img');svg.setAttribute('aria-label','实际计算应力应变曲线：'+report.curves.map(c=>c.label).join('、'));
  const el=(tag,attrs,text)=>{const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;svg.append(e);return e;};
- const xmax=report.xmax||.5, curves=report.curves.map(c=>({...c,points:c.points.filter(p=>p[0]<=xmax)})),ys=curves.flatMap(c=>c.points.map(p=>p[1])),max=Math.ceil(Math.max(...ys,1)/2)*2,low=Math.min(0,Math.floor(Math.min(...ys))),left=52,right=430,top=18,bottom=244;
+ const observedX=report.curves.flatMap(c=>c.points.map(p=>p[0]));
+ const xmax=report.xmax||Math.max(...observedX,.01), curves=report.curves.map(c=>({...c,points:c.points.filter(p=>p[0]<=xmax)})),ys=curves.flatMap(c=>c.points.map(p=>p[1])),max=Math.ceil(Math.max(...ys,1)/2)*2,low=Math.min(0,Math.floor(Math.min(...ys,0))),left=52,right=430,top=18,bottom=244;
  const sx=x=>left+x/xmax*(right-left),sy=y=>bottom-(y-low)/(max-low)*(bottom-top);
  for(let i=0;i<=5;i++){const x=i*xmax/5;el('line',{x1:sx(x),y1:top,x2:sx(x),y2:bottom,stroke:'#edf1f7'});el('text',{x:sx(x),y:bottom+18,'text-anchor':'middle',fill:'#8c9ab1','font-size':10},number(x,3));}
  for(let i=0;i<=4;i++){const y=low+(max-low)*i/4;el('line',{x1:left,y1:sy(y),x2:right,y2:sy(y),stroke:'#e6edf7'});el('text',{x:left-10,y:sy(y)+4,'text-anchor':'end',fill:'#8c9ab1','font-size':10},number(y,1));}
@@ -2119,9 +2126,9 @@ function renderWorkspaceResults(){
  if(resultTab==='targets'){box.append(node('h2','论文图表与计算结果'));if(r.closeout){box.append(evidenceLegend());renderEvidenceGallery(r,box);box.append(closeoutCoverage(r.closeout));}else box.append(node('p','全文图表审计尚未接入。'));return;}
  if(r.closeout && ['overview','data','plots','report'].includes(resultTab)){renderCloseout(r,box);return;}
  if(resultTab==='overview'){
-  const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键结果 · GPa'),metricTable(r.metrics.slice(0,3),true),node('p','模量两行分别使用应变 0–0.05、0–0.06，尚未冻结唯一论文评分口径。','plot-caption'));plot.append(node('h3','作者参考 A · 应力–应变曲线'),node('p','当前图为 A 的实际输出；P 的完整曲线与 B 的比较不在此图中。','plot-caption'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(plot,values);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
+  const grid=node('div',undefined,'result-grid'),values=node('article',undefined,'result-widget'),plot=node('article',undefined,'result-widget');values.append(node('h3','P–A 关键数值'),metricTable(r.metrics.slice(0,3),true),node('p','每行保留报告所列单位与分析口径；科学解释见结果限制。','plot-caption'));plot.append(node('h3','作者参考 A · 已保存曲线'),node('p','当前曲线来自作者 A 的实际输出；P 的原图和 B 的结果须按各自来源另行核对。','plot-caption'),curvePlot(r));const legend=node('div',undefined,'plot-legend');for(const c of r.curves)legend.append(node('span',c.label));plot.append(legend);grid.append(plot,values);box.append(grid);const summary=node('div',undefined,'research-summary');summary.append(node('h3','结果说明'),node('p',r.summary));box.append(summary,limitations(r));
  }else if(resultTab==='data'){
-  box.append(node('h3','论文 P 与作者参考 A 的数值比较'));const scroll=node('div',undefined,'comparison-scroll');scroll.append(metricTable(r.metrics));box.append(scroll,node('p','单位均为 GPa；相对差 = abs(P−A) / abs(P)。本表为参考 A 的诊断结果。','plot-caption'),limitations(r));
+  box.append(node('h3','论文 P 与作者参考 A 的数值比较'));const scroll=node('div',undefined,'comparison-scroll');scroll.append(metricTable(r.metrics));box.append(scroll,node('p','各行单位见性质列；相对差 = |P−A| / |P|。本表为参考 A 的诊断结果。','plot-caption'),limitations(r));
  }else if(resultTab==='plots'){
   renderPlotGallery(r,box);
  }else if(resultTab==='structure'||resultTab==='trajectory'){
@@ -2256,7 +2263,7 @@ async function refreshWorkspace(){
  }
  renderFlow(r);$('#task-information').replaceChildren();$('#task-files').replaceChildren();$('#task-resources').replaceChildren();
  addInfo('状态',r?'A 已结束，B '+bState(r):current.status==='conditions_frozen'?'条件已保存':'需求已保存');addInfo('记录更新',new Date(current.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}));
- if(r){addInfo('A 运行时长',duration(r.runtime.elapsed_seconds));addInfo('A 使用核数',String(r.runtime.cores));addInfo('A 提交次数',`${r.evaluation.dispatch_claims} 次（含失败）`);addInfo('B 提交次数',bCount(r));addInfo('A 本次核时',number(r.runtime.core_hours,3));addInfo('B 资源额度','用户未设上限');addInfo('A 作业号',r.job_id);reportDownloads(r,$('#task-files'));const a=node('a','论文与 DOI ↗','resource-link');a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';a.append(node('small',r.title));$('#task-resources').append(a);}
+ if(r){addInfo('A 运行时长',duration(r.runtime.elapsed_seconds));addInfo('A 使用核数',String(r.runtime.cores));addInfo('A 提交次数',`${r.evaluation.dispatch_claims} 次（含失败）`);addInfo('B 提交次数',bCount(r));addInfo('A 本次核时',`${number(r.runtime.core_hours,4)} CPU 核时`);const policy=schema?.task_resource_policy;addInfo('B 资源额度',Number.isFinite(policy?.task_core_seconds)?`${number(policy.task_core_seconds/3600,0)} CPU 核时/任务（含失败与重试）`:'资源政策暂不可读，请在设置中核对');addInfo('A 作业号',r.job_id||'尚未确认');reportDownloads(r,$('#task-files'));const a=node('a','论文与 DOI ↗','resource-link');a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';a.append(node('small',r.title));$('#task-resources').append(a);}
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?(r.evaluation?.attempt_scope==='week_one_reference_development'?'作者参考 A · 第一周人工辅助验证记录':'作者参考 A · 来源见任务信息'):(schema?.model_calls_enabled?'应用模型已连接 · 生成与用量见活动记录':'模型状态见设置');
@@ -2570,9 +2577,13 @@ const helpItems=[['快速开始','点击“新建任务”，描述研究问题�
 function renderHelp(){const query=$('#help-search').value.trim().toLowerCase(),box=$('#help-articles');box.replaceChildren();for(const [title,body] of helpItems.filter(r=>r.join(' ').toLowerCase().includes(query))){const d=node('details',undefined,'panel help-article');d.open=title==='快速开始';d.append(node('summary',title),node('p',body));box.append(d);}if(!box.children.length)box.append(emptyState('未找到相关说明','试试“模型”“计算”或“结果”等关键词。'));}
 $('#help-search').oninput=renderHelp;
 function renderPlotGallery(report,box){
- const options={full:'完整拉伸曲线',virial:'固定体积位力应力',pressure:'瞬时压力口径',elastic05:'弹性区间 0–0.05',elastic06:'弹性区间 0–0.06'};
- const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const [key,value] of Object.entries(options))select.append(new Option(value,key));select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
- const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
+ const options=[{key:'full',label:'全部已保存曲线',curves:report.curves}];
+ report.curves.forEach((curve,index)=>options.push({key:'curve-'+index,label:curve.label,curves:[curve]}));
+ const windows=[...new Set(report.metrics.map(metric=>metric.window_end).filter(value=>Number.isFinite(value)&&value>0))].sort((a,b)=>a-b);
+ for(const windowEnd of windows)options.push({key:'window-'+windowEnd,label:`应变区间 0–${number(windowEnd,3)}`,curves:report.curves,xmax:windowEnd});
+ const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const option of options)select.append(new Option(option.label,option.key));
+ if(!options.some(option=>option.key===selectedPlot))selectedPlot='full';select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
+ const draw=()=>{selectedPlot=select.value;area.replaceChildren();const option=options.find(item=>item.key===selectedPlot)||options[0];area.append(node('h3',option.label),curvePlot({...report,curves:option.curves,xmax:option.xmax}));const legend=node('div',undefined,'plot-legend');for(const curve of option.curves)legend.append(node('span',curve.label));area.append(legend,node('p','图中仅显示报告已有曲线；切换和缩放不新增计算，也不证明整篇论文已复现。','plot-caption'));};select.onchange=draw;draw();
 }
 function renderAICharts(items,taskId,{box=$('#discussion-charts'),channel='charts',title='AI 绘图请求与结果'}={}){
  box.replaceChildren();if(!items.length)return;
