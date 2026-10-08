@@ -2441,7 +2441,8 @@ function appendWorkbenchEntry(box){
    const run=node('button',label,style);run.disabled=pending;content.append(run);
    run.onclick=()=>action(async()=>{
     if(!active()||pending||pendingRequest||latestRecord!==record)return;
-    pending=true;run.disabled=true;pendingRequest={request_id:uid(),source_sha256:record.source_sha256};draw(record);
+    const request={request_id:crypto.randomUUID().replaceAll('-',''),source_sha256:record.source_sha256};
+    pending=true;run.disabled=true;pendingRequest=request;draw(record);
     try{const reply=await api(`/api/tasks/${id}/workbench/extract`,{...pendingRequest,...options});if(terminal.includes(reply.state))pendingRequest=null;}
     finally{pending=false;if(active())await entry.loadWorkbench();}
    });

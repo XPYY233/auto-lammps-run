@@ -24,7 +24,7 @@ const report=(task=TASK)=>({task_id:task,role:'reference',title:'Synthetic autho
 function setup(){
  const main=element('main'),taskView=element('section'),target=element('section'),ai=element('section'),calls=[],pending=[];
  target.id='target-planning';main.append(ai,target);const constants=new Map([['#target-planning',target],['#task-view',taskView],['.ai-current',ai],['#research-results',element('section')]]);
- const c=vm.createContext({Date,Promise,crypto:{randomUUID:()=> '1'.repeat(32)},current:{id:TASK,revision:1,mode:'reproduction'},
+ const c=vm.createContext({Date,Promise,crypto:{randomUUID:()=> 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'},current:{id:TASK,revision:1,mode:'reproduction'},
   $:selector=>constants.get(selector)||descendants(main).find(node=>node.id===selector.slice(1))||null,node:element,
   researchContent:(value,className)=>element('div',value,className),evidenceSourceHeading:role=>element('span',role),
   action:fn=>fn(),notice(){},afterChange:async()=>{},renderWorkspaceResults(){},resultTab:'overview',
@@ -40,7 +40,7 @@ function publish(s,w=workflow(),r=report(),history={task_id:TASK,source_sha256:S
 }
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 test('workbench extraction is a genuine user action with a bound P source and no B inputs',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);
+ const s=setup();publish(s);
  const entry=s.c.$('#workbench-entry'),load=find(entry,n=>n.tag==='button');
  const read=load.onclick();assert.equal(s.calls[0].path,`/api/tasks/${TASK}/workbench`);
  s.pending[0].resolve({task_id:TASK,enabled:true,source_sha256:SHA,messages:[],evidence:{title:'Paper',doi:'10.1000/example',items:[],visuals:[]}});await read;
@@ -74,7 +74,7 @@ test('same-task refresh preserves a loaded workbench and its pending source read
  assert.equal(s.c.$('#workbench-entry'),entry);assert.match(text(entry),/复用文献工作台/);assert.equal(s.calls.length,1);
 });
 test('same-task workflow refresh preserves pending extraction and displays its completed receipt',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s);
+ const s=setup();publish(s);const entry=await readWorkbench(s);
  const run=find(entry,n=>n.textContent==='让应用 AI 提取并核验论文'),request=run.onclick();await flush();
  s.c.refreshPaperWorkflow.generation++;s.c.renderPaperWorkflow();
  assert.equal(s.c.$('#workbench-entry'),entry);assert.match(text(entry),/正在提取并自动核验/);
@@ -86,7 +86,7 @@ test('same-task workflow refresh preserves pending extraction and displays its c
  assert.equal(s.calls.filter(call=>call.data).length,1);
 });
 test('workbench extraction cannot revive an old view after A to B to A navigation',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const old=await readWorkbench(s);
+ const s=setup();publish(s);const old=await readWorkbench(s);
  const button=find(old,n=>n.textContent==='让应用 AI 提取并核验论文'),request=button.onclick();await flush();
  s.c.current={id:OTHER,mode:'research'};s.c.clearPaperWorkflowView(OTHER);s.c.renderPaperWorkflow();
  s.c.current={id:TASK,mode:'reproduction'};s.c.clearPaperWorkflowView(TASK);publish(s);const renewed=s.c.$('#workbench-entry');
@@ -94,7 +94,7 @@ test('workbench extraction cannot revive an old view after A to B to A navigatio
  assert.equal(s.calls.length,2);assert.doesNotMatch(text(renewed),/已提取并保存|正在提取并自动核验/);
 });
 test('late workbench reads and retired buttons cannot reuse an old PDF source',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s),oldButton=find(entry,n=>n.textContent==='让应用 AI 提取并核验论文');
+ const s=setup();publish(s);const entry=await readWorkbench(s),oldButton=find(entry,n=>n.textContent==='让应用 AI 提取并核验论文');
  const oldRead=entry.loadWorkbench(),newRead=entry.loadWorkbench(),newSHA='f'.repeat(64);
  s.pending[2].resolve(workbenchRecord({source_sha256:newSHA}));await newRead;
  s.pending[1].resolve(workbenchRecord());await oldRead;await oldButton.onclick();
@@ -104,14 +104,14 @@ test('late workbench reads and retired buttons cannot reuse an old PDF source',a
  s.pending[3].resolve({state:'completed'});await flush();s.pending[4].resolve(workbenchRecord({source_sha256:newSHA,messages:[{state:'completed',request_id:'e'.repeat(32)}]}));await request;
 });
 test('an empty saved extraction exposes an explicit accounted full rescan',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'no_evidence_published',request_id:'old'}]}));
+ const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'no_evidence_published',request_id:'old'}]}));
  assert.match(text(entry),/新增模型调用并记账/);assert.equal(s.calls.filter(call=>call.data).length,0);
  const request=find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）').onclick();await flush();
  assert.deepEqual(JSON.parse(JSON.stringify(s.calls[1].data)),{request_id:'e'.repeat(32),source_sha256:SHA,force_rescan:true});
  s.pending[1].resolve({state:'completed'});await flush();s.pending[2].resolve(workbenchRecord({messages:[{state:'completed',request_id:'e'.repeat(32)}]}));await request;
 });
 test('a limited saved extraction exposes a separate accounted visual repair',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'completed_with_limitations',request_id:'old'}]}));
+ const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'completed_with_limitations',request_id:'old'}]}));
  assert.match(text(entry),/已有证据、请求和费用保留/);assert.equal(s.calls.filter(call=>call.data).length,0);
  const request=find(entry,n=>n.textContent==='修复图表提取（新增模型调用）').onclick();await flush();
  assert.deepEqual(JSON.parse(JSON.stringify(s.calls[1].data)),{request_id:'e'.repeat(32),source_sha256:SHA,repair_visuals:true});
@@ -123,7 +123,7 @@ test('a completed extraction with unavailable visuals still exposes explicit rep
  assert.equal(s.calls.filter(call=>call.data).length,0);
 });
 test('a known failure with an accounted model request requires an explicit full rescan',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:'old',model_request_ids:['accounted-native-call']}]}));
+ const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:'old',model_request_ids:['accounted-native-call']}]}));
  assert.equal(find(entry,n=>n.textContent==='让应用 AI 提取并核验论文'),undefined);
  const request=find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）').onclick();await flush();
  assert.deepEqual(JSON.parse(JSON.stringify(s.calls[1].data)),{request_id:'e'.repeat(32),source_sha256:SHA,force_rescan:true});
@@ -135,7 +135,7 @@ test('an unknown request blocks both rescan and visual repair even with older sa
  assert.match(text(entry),/不能换编号自动重提/);assert.equal(s.calls.length,1);
 });
 test('lost POST and history replies retain the original identity and prevent another paid request',async()=>{
- const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s);
+ const s=setup();publish(s);const entry=await readWorkbench(s);
  const request=find(entry,n=>n.textContent==='让应用 AI 提取并核验论文').onclick();await flush();
  s.pending[1].reject(new Error('synthetic lost POST'));await flush();s.pending[2].reject(new Error('synthetic lost history'));await assert.rejects(request);
  s.c.refreshPaperWorkflow.generation++;s.c.renderPaperWorkflow();await readWorkbench(s);
