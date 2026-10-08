@@ -216,6 +216,18 @@ test('task filters expose approvals and clarifications without calling them fail
  assert.match(failed,/Plan failed/);assert.doesNotMatch(failed,/AI asks a question/);
 });
 
+test('completed author A cannot replace an unstarted B next step',async()=>{
+ const task={id:OLD,title:'A complete, B draft',mode:'reproduction',status:'draft',reference_state:'completed',reference_job_id:'123'};
+ const {c,elements}=setupTaskList([task]);await c.listTasks();c.taskCards();
+ assert.equal(c.taskState(task),'draft');
+ assert.equal(c.taskNextLabel(task),'整理需求');
+ const phases=c.taskPhaseLabels(task);
+ assert.equal(phases[0].label,'作者参考 A · 计算结束 · 科学结果待核验');
+ assert.equal(phases[1].label,'B 方案 · 待准备');
+ c.taskFilter='attention';c.taskCards();
+ assert.match(textContent(elements.get('#task-cards')),/A complete, B draft/);
+});
+
 function setupAfterChange(){
  const state=setupCandidateNavigation(),{c,renders}=state,refreshes=[],notices=[];
  c.targetPreviewGeneration=0;

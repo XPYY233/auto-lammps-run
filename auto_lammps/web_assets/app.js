@@ -2258,7 +2258,7 @@ function taskState(t){
     if(['needs_reconciliation','uncertain'].includes(t.condition_preparation_state))return 'condition_attention';
     if(['prepared','generating','validating','repairing','awaiting_import'].includes(t.condition_preparation_state))return 'understanding';
   }
-  if(t.reference_state)return t.reference_state;
+  // A 的参考作业只在 A 栏显示，不能覆盖独立 B 的下一步和筛选。
   return t.status==='conditions_frozen'?'frozen':'draft';
 }
 function taskStateLabel(t){
