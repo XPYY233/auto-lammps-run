@@ -291,6 +291,19 @@ test('a saved job controls the next action instead of an older prepared plan',()
  assert.equal($('#next-action').textContent,'查看数据与图表');
 });
 
+test('draft execution heading names the next research step without implying a service outage',()=>{
+ const box=element('section');
+ const c=vm.createContext({$:()=>box,document:{createTextNode:value=>value},node:(tag,value)=>{const item=element(tag);item.textContent=value||'';return item;}});
+ vm.runInContext("let current={status:'draft'};",c);
+ vm.runInContext(source.slice(source.indexOf('function renderFlow(report){'),source.indexOf('function metricTable(')),c);
+ c.renderFlow(null);
+ assert.match(textContent(box),/需求已保存 · 核对研究条件/);
+ assert.doesNotMatch(textContent(box),/服务就绪/);
+ vm.runInContext("current.status='conditions_frozen'",c);
+ c.renderFlow(null);
+ assert.match(textContent(box),/条件已冻结 · 准备方案/);
+});
+
 function setupAfterChange(){
  const state=setupCandidateNavigation(),{c,renders}=state,refreshes=[],notices=[];
  c.targetPreviewGeneration=0;
