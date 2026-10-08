@@ -248,6 +248,13 @@ test('completed author A cannot replace an unstarted B next step',async()=>{
  assert.match(textContent(elements.get('#task-cards')),/A complete, B draft/);
 });
 
+test('a completed ordinary research task points to result review from the task list',()=>{
+ const task={id:OLD,title:'Saved numeric result',mode:'research',status:'conditions_frozen',execution_state:'completed'};
+ const {c}=setupTaskList([task]);
+ assert.equal(c.taskNextLabel(task),'核对结果');
+ assert.equal(c.taskNextLabel({...task,execution_state:'validated'}),'查看结果');
+});
+
 test('task list offers record closure only after active work and uncertain submissions settle',async()=>{
  const tasks=[
   {id:OLD,title:'Running job',status:'conditions_frozen',execution_state:'running'},

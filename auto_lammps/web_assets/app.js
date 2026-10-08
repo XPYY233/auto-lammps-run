@@ -1560,7 +1560,8 @@ function taskPhaseLabels(task){
 function taskNextLabel(task){
  const state=taskState(task);
  if(['running','queued','accepted','dispatching','preparing','understanding'].includes(state))return '查看进度';
- if(['completed','validated'].includes(state))return '查看结果';
+ if(state==='completed')return task.mode==='research'?'核对结果':'查看结果';
+ if(state==='validated')return '查看结果';
  if(['failed','timeout','preparation_failed','condition_failed','condition_attention','clarification','reconcile_required','unknown'].includes(state))return '查看问题';
  if(state==='prepared')return '确认方案';
  if(state==='draft')return task.condition_preparation_state==='imported'
