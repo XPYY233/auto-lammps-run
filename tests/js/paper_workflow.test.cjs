@@ -122,6 +122,13 @@ test('a completed extraction with unavailable visuals still exposes explicit rep
  assert.ok(find(entry,n=>n.textContent==='修复图表提取（新增模型调用）'));
  assert.equal(s.calls.filter(call=>call.data).length,0);
 });
+test('a known failure with an accounted model request requires an explicit full rescan',async()=>{
+ const s=setup();publish(s);s.c.uid=()=> 'e'.repeat(32);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:'old',model_request_ids:['accounted-native-call']}]}));
+ assert.equal(find(entry,n=>n.textContent==='让应用 AI 提取并核验论文'),undefined);
+ const request=find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）').onclick();await flush();
+ assert.deepEqual(JSON.parse(JSON.stringify(s.calls[1].data)),{request_id:'e'.repeat(32),source_sha256:SHA,force_rescan:true});
+ s.pending[1].resolve({state:'completed'});await flush();s.pending[2].resolve(workbenchRecord({messages:[{state:'completed',request_id:'e'.repeat(32)}]}));await request;
+});
 test('an unknown request blocks both rescan and visual repair even with older saved evidence',async()=>{
  const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'completed_with_limitations',request_id:'old'},{state:'unknown',request_id:'uncertain'}]}));
  assert.equal(find(entry,n=>/新增模型调用/.test(n.textContent)&&n.tag==='button'),undefined);

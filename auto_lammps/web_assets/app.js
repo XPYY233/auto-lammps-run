@@ -2436,7 +2436,7 @@ function appendWorkbenchEntry(box){
   const terminal=['completed','completed_with_limitations','no_evidence_published','failed'];
   if(!pending&&pendingRequest&&(record.messages||[]).some(message=>message.request_id===pendingRequest.request_id&&terminal.includes(message.state)))pendingRequest=null;
   const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state));
-  const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state));
+  const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state)||message.model_request_ids?.length>0);
   const runButton=(label,options={},style='quiet')=>{
    const run=node('button',label,style);run.disabled=pending;content.append(run);
    run.onclick=()=>action(async()=>{
