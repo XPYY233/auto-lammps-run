@@ -8,6 +8,8 @@ let pendingRoute=null, renderedRoute=null;
 let paperFilter='all';
 let taskCache=[], workspaceReport=null, resultTab='overview', modelPreference=null, normalResult=null, rawResult=null, executionState=null;
 let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:null};
+let scientificReviewState={task:null,phase:'idle',reviews:[],error:''};
+let scientificReviewGeneration=0;
 let referenceProgress=null;
 let initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryRead=0, initialGeometryLoading=false;
 let candidateState=null, candidateTask=null, candidatePolling=false;
@@ -119,6 +121,8 @@ async function openTask(id) {
   initialGeometryCatalog=null;initialGeometryCatalogTask=null;initialGeometryLoading=false;initialGeometryRead++;
   $('#advanced-task').open=false;
   normalResult=null;workspaceReport=null;rawResult=null;executionState=null;referenceProgress=null;resultTab='overview';
+  scientificReviewState={task:null,phase:'idle',reviews:[],error:''};
+  scientificReviewGeneration++;
   $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
   activityData=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
@@ -857,7 +861,7 @@ function renderCurrentActivity(){
     const state=job.scheduler_state;
     title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
-      (job.state==='analyzed'?'数值结果已保存。可让应用内 AI 对照研究目标指出已满足的条件与缺少的证据；科学结论仍待独立核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
+      (job.state==='analyzed'?'数值结果已保存。打开下方核验卡片，查看已核对的依据与尚缺的科学判据；也可让应用内 AI 解释数据。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
     meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState?.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
   }else if(typeof workspaceReport!=='undefined'&&workspaceReport?.closeout){
     title.textContent='基准工况 P–A–B 结果已保存';
@@ -877,13 +881,18 @@ function renderCurrentActivity(){
   renderNextAction();
 }
 
-function prepareResultReview(){
+function askAIAboutResults(){
   const panel=$('.discussion-panel'),input=$('#discussion-prompt'),note=$('#task-quick-note');
   if(!current||!panel||panel.hidden){if(note)note.textContent='已有可用结果后，才能核对结果与研究目标。';return;}
   if(!input.value.trim())input.value='请依据本任务已冻结的研究条件和已经核验的计算结果，逐项核对：计算方法是否符合研究目标；关键数值、单位、收敛与异常是否有证据；目前能确认什么、还缺什么。每项引用具体数据或说明证据缺失。不要把调度结束或数值处理完成说成科学验收通过，也不要发起新计算。';
   panel.scrollIntoView({block:'start',behavior:'smooth'});input.focus();
-  $('#discussion-status').textContent='请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
+  $('#discussion-status').textContent=$('#discussion-form button[type=submit]').disabled?'先从“设置”连接应用内模型，然后回到这里提问；已保存的结果核验记录仍可查看。':'请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
   if(note)note.textContent='已打开结果核对问题，请检查后发送。';
+}
+function prepareResultReview(){
+  const review=$('#scientific-review'),note=$('#task-quick-note');
+  if(review&&!review.hidden){review.scrollIntoView({block:'start',behavior:'smooth'});if(note)note.textContent='已打开结果核验。需要解释时，可在核验卡片中继续向 AI 提问。';return;}
+  askAIAboutResults();
 }
 function renderNextAction(){
   const button=$('#next-action'),note=$('#next-action-note'),previous=$('#previous-step');
@@ -907,7 +916,7 @@ function renderNextAction(){
     if(job.state==='analyzed'){
       if(!$('.discussion-panel')?.hidden){
         button.textContent='核对结果与研究目标';button.hidden=false;button.onclick=prepareResultReview;
-        note.textContent='应用内 AI 可解释已有证据；正式科学验收尚未完成。';return;
+        note.textContent='应用核对已保存的数据与来源；缺少的科学判据会明确显示。';return;
       }
       jump('查看数据与图表','#research-results','结果已保存；科学结论仍待核验。');return;
     }
@@ -2050,6 +2059,56 @@ function taskTagSummary(value,unit=''){
  const characters=Array.from(text);
  return characters.length>48?characters.slice(0,47).join('')+'…':text;
 }
+function renderScientificReviews(){
+ const box=$('#scientific-review'),state=scientificReviewState;
+ box.replaceChildren();box.hidden=state.phase==='idle';
+ if(box.hidden)return;
+ const heading=node('div',undefined,'scientific-review-heading');
+ heading.append(node('div',undefined,'scientific-review-title'));
+ heading.firstChild.append(node('span','结果核验','workspace-kicker'),node('h2','这些结果能说明什么？'));
+ box.append(heading);
+ if(state.phase==='loading'){box.append(node('p','正在核对已保存的计算、分析和原始数据…','form-note'));return;}
+ if(state.error)box.append(node('p',state.error,'scientific-review-warning'));
+ if(!state.reviews.length){box.append(node('p','尚无可用的结果核验记录。请查看分析报告与计算历史。','form-note'));return;}
+ const latest=[...state.reviews].sort((a,b)=>b.at.localeCompare(a.at))[0];
+ if(latest.state==='source_unavailable'){
+  box.append(node('p','原始来源或报告已经变化，旧核验记录仍保留；旧数值暂不展示。','scientific-review-warning'));
+ }else{
+  box.append(node('p',latest.summary,'scientific-review-summary'));
+  const checks=node('ul',undefined,'scientific-review-checks');
+  for(const check of latest.checks){const item=node('li');item.append(node('span',check.state==='verified'?'✓':'!','scientific-review-mark '+check.state),node('span',check.label));checks.append(item);}box.append(checks);
+  const e=latest.evidence;
+  box.append(node('p',`依据：作业 ${e.job_id}；${e.source_tables.length} 份数值来源；${e.numerical_results.length} 项数值分析；${e.structural_result_count} 项结构分析；${e.site_result_count} 项位点分析。`,'form-note'));
+  box.append(node('p',latest.next_step,'form-note'));
+ }
+ const actions=node('div',undefined,'scientific-review-actions');
+ if(latest.state!=='source_unavailable'){
+  const download=node('a','下载核验记录 ↓','quiet');download.href=`/api/tasks/${current.id}/scientific-reviews/${latest.id}/download`;actions.append(download);
+ }
+ if(!$('.discussion-panel').hidden){const ask=node('button','请应用内 AI 解释证据','quiet');ask.type='button';ask.onclick=askAIAboutResults;actions.append(ask);}
+ box.append(actions);
+ if(state.reviews.length>1){const history=node('details',undefined,'scientific-review-history');history.append(node('summary',`查看其他 ${state.reviews.length-1} 份核验记录`));for(const item of state.reviews.filter(item=>item.id!==latest.id)){const row=node('p',`${new Date(item.at).toLocaleString('zh-CN')} · ${item.state==='source_unavailable'?'来源已变化':'科学结论未判定'}`);if(item.state!=='source_unavailable'){const link=node('a','下载 ↓');link.href=`/api/tasks/${current.id}/scientific-reviews/${item.id}/download`;row.append(' ',link);}history.append(row);}box.append(history);}
+}
+async function refreshScientificReviews(id,results){
+ const generation=++scientificReviewGeneration;
+ const ids=[...new Set((results?.evaluations||[]).flatMap(group=>group.requests.flatMap(request=>request.reports.filter(report=>report.status==='analyzed').map(report=>report.id))))];
+ if(!ids.length&&!results?.evaluations?.length){scientificReviewState={task:id,phase:'idle',reviews:[],error:''};renderScientificReviews();return;}
+ scientificReviewState={task:id,phase:'loading',reviews:[],error:''};renderScientificReviews();
+ try{
+  const response=await api(`/api/tasks/${id}/scientific-reviews`);
+  if(current?.id!==id||generation!==scientificReviewGeneration)return;
+  if(!response.configured)throw new Error('结果核验服务尚未配置。');
+  const reviews=response.reviews,errors=[];
+  for(const analysis_id of ids){
+   if(reviews.some(item=>item.analysis_id===analysis_id))continue;
+   try{reviews.push(await api(`/api/tasks/${id}/scientific-reviews`,{analysis_id}));}
+   catch(error){errors.push(error.message);}
+   if(current?.id!==id||generation!==scientificReviewGeneration)return;
+  }
+  scientificReviewState={task:id,phase:reviews.length||errors.length?'ready':'idle',reviews,error:errors.length?'有结果尚未通过来源核对：'+errors.join('；'):''};
+ }catch(error){if(current?.id!==id||generation!==scientificReviewGeneration)return;scientificReviewState={task:id,phase:'error',reviews:[],error:'结果核验暂不可用：'+error.message};}
+ renderScientificReviews();
+}
 async function refreshWorkspace(){
  if(!current)return;
  const id=current.id, generation=++workspaceGeneration;
@@ -2066,6 +2125,7 @@ async function refreshWorkspace(){
  }
  const [reference,execution,raw,results,progress]=replies.map(r=>r.value);
  workspaceReport=reference.report;executionState=execution;rawResult={task:id,files:raw.files};normalResult=results;
+ refreshScientificReviews(id,results);
  referenceProgress=progress;
  workspaceState={task:id,phase:'ready',updated:new Date()};renderRefreshStatus();renderTargetPlanning();
  const r=workspaceReport;

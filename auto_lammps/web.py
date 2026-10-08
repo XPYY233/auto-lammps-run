@@ -29,6 +29,7 @@ from .operator_workspace import ModelPreferences, ReferenceViews
 from .paper_evidence import PaperEvidenceViews
 from .model_connections import ModelConnections
 from .result_charts import ResultCharts
+from .scientific_review import ScientificReview
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
@@ -214,6 +215,10 @@ class ChartInput(ProviderInput):
     question: str = Field(min_length=1, max_length=1000)
 
 
+class ScientificReviewInput(Input):
+    analysis_id: str = Field(min_length=64, max_length=64)
+
+
 class HPCInput(Input):
     connection_id: str | None = None
     as_new: bool = False
@@ -270,6 +275,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     if results_reader and collections_directory is not None and Path(collections_directory).absolute()!=results_reader.collections:
         raise ValueError('Raw downloads and results must share the same collection directory')
     charts = ResultCharts(store,connections,results_reader) if results_reader is not None else None
+    scientific_reviews = ScientificReview(store,results_reader) if results_reader is not None else None
     raw_outputs = RawOutputs(store,papers,
         collections=results_reader.collections if results_reader else collections_directory,
         ledger=results_reader.ledger if results_reader else None)
@@ -822,6 +828,29 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return results_reader.task(identifier)
         except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
             return JSONResponse({'detail':'结果记录暂不可读，请联系管理员核对。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/scientific-reviews')
+    def scientific_review_history(identifier: str):
+        store.get(identifier)
+        if scientific_reviews is None:return {'configured':False,'reviews':[]}
+        return {'configured':True,'reviews':scientific_reviews.history(identifier)}
+
+    @app.post('/api/tasks/{identifier}/scientific-reviews')
+    def create_scientific_review(identifier: str, data: ScientificReviewInput):
+        if scientific_reviews is None:raise TaskError('结果服务尚未配置，无法核对科学证据。')
+        try:return scientific_reviews.create(identifier,data.analysis_id)
+        except TaskError:raise
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'计算报告或来源尚未通过核验，未生成科学核验记录。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/scientific-reviews/{review_id}/download')
+    def download_scientific_review(identifier: str, review_id: str):
+        if scientific_reviews is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:data=scientific_reviews.download(identifier,review_id)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'核验记录或来源暂不可读，未提供下载。'},status_code=409)
+        return Response(data,media_type='application/json',headers={
+            'Content-Disposition':'attachment; filename="scientific-evidence-review.json"'})
 
     @app.get('/api/tasks/{identifier}/results/{analysis_id}/tables')
     def task_tables(identifier: str, analysis_id: str):

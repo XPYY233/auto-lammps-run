@@ -620,6 +620,17 @@ button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var
 .usage-steps li:nth-child(3) span{background:var(--orange-soft);color:var(--orange)}
 .usage-steps li:nth-child(4) span{background:var(--teal-soft);color:var(--teal)}
 .result-workspace{border-top:3px solid #54a8a6}.workspace-freshness.ready{color:#417878}
+.scientific-review{padding:20px 22px;background:#f6fbfa;border-bottom:1px solid #dcece9}
+.scientific-review[hidden]{display:none}
+.scientific-review h2{font-size:19px;margin:3px 0 10px;color:#1b3d47}
+.scientific-review-summary{font-size:15px;line-height:1.6;margin:0 0 12px;color:#244b52}
+.scientific-review-checks{list-style:none;padding:0;margin:0 0 12px;display:flex;flex-wrap:wrap;gap:8px}
+.scientific-review-checks li{display:flex;align-items:center;gap:6px;padding:6px 9px;background:white;border:1px solid #dcece9;border-radius:7px;font-size:12px}
+.scientific-review-mark{font-weight:700;color:#19765d}.scientific-review-mark.missing{color:#a56a16}
+.scientific-review-warning{background:#fff6e8;border:1px solid #f3d4a4;border-radius:7px;padding:10px 12px;color:#875b20}
+.scientific-review-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:13px}
+.scientific-review-actions a,.scientific-review-actions button{font-size:13px}
+.scientific-review-history{margin-top:16px;font-size:12px;color:var(--muted)}
 .discussion-panel{background:linear-gradient(120deg,#fff,#f6f3fc);border-color:#e6ddf1}
 .discussion-panel h2{color:#634796}.task-rail .panel:nth-child(2){border-top:3px solid #a092ca}
 .resource-tags .badge{background:var(--violet-soft);color:#66518d}

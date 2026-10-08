@@ -41,7 +41,7 @@ test('stale task-open response cannot publish task content after a new navigatio
  const c=setup(),elements=new Map();let resolve;c.api=()=>new Promise(r=>resolve=r);
  c.$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  c.$('#ai-current-title').textContent='Old task status';
- vm.runInContext('let current=null;',c);
+ vm.runInContext('let current=null,scientificReviewState=null,scientificReviewGeneration=0;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
  const hold=c.action(()=>c.openTask('a'.repeat(32)));await flush();
  assert.equal(elements.get('#task-view').hidden,true,'old task must disappear before the new GET returns');
@@ -63,7 +63,7 @@ test('one unavailable task section leaves later saved progress and discussion re
   refreshWorkspace:async()=>reads.push('workspace'),refreshDiscussion:async()=>reads.push('discussion'),
   notice:(message)=>messages.push(message),
  });
- vm.runInContext('let current=null, initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryLoading=false, initialGeometryRead=0, normalResult=null, workspaceReport=null, rawResult=null, executionState=null, referenceProgress=null, activityData=null, workspaceGeneration=0, workspaceState=null;',c);
+ vm.runInContext('let current=null, initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryLoading=false, initialGeometryRead=0, normalResult=null, workspaceReport=null, rawResult=null, executionState=null, referenceProgress=null, activityData=null, workspaceGeneration=0, workspaceState=null, scientificReviewState=null, scientificReviewGeneration=0;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
  await c.openTask(id);
  assert.deepEqual(reads,['list','history','candidate','guidance','plan','activity','results','reference','workspace','discussion']);
@@ -90,6 +90,7 @@ function setupCandidateNavigation(){
   normalResult:null,workspaceReport:null,rawResult:null,executionState:null,referenceProgress:null,activityData:null,
   initialGeometryCatalog:null,initialGeometryCatalogTask:null,initialGeometryLoading:false,initialGeometryRead:0,
   workspaceGeneration:0,workspaceState:null,candidateStatuses:{},requestStates:{},
+  scientificReviewGeneration:0,
   $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
   api:async(path,data)=>{calls.push({path,data});return {candidate:null};},
   recordRoute(){},listTasks:async()=>{},renderHistory:async()=>{},refreshGuidance:async()=>{},refreshPlanReview:async()=>{},
@@ -273,9 +274,10 @@ test('task list offers record closure only after active work and uncertain submi
 
 test('a saved job controls the next action instead of an older prepared plan',()=>{
  const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ $('#scientific-review').hidden=true;
  const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
  vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research'}, activityData=null, candidateRecord={state:'prepared'}, executionState={job:{state:'failed',can_retry:false}};",c);
- vm.runInContext(source.slice(source.indexOf('function prepareResultReview(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+ vm.runInContext(source.slice(source.indexOf('function askAIAboutResults(){'),source.indexOf('function scheduleActivityRefresh(')),c);
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看失败原因与记录');
  assert.match($('#next-action-note').textContent,/已有提交与费用记录保留/);
