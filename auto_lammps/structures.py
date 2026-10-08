@@ -43,7 +43,12 @@ def geometry_tool_context(max_atoms):
                                                   'cell': 'final replicated cell', 'interval': '[lower,upper)'}},
             'edit_order': ['composition', 'substitutions', 'vacancies'],
             'site_indices': 'zero-based original sites; x,y,z,basis replication order',
-            'missing_scientific_parameters': 'ask a specific clarification; never guess or change scope',
+            'missing_scientific_parameters': (
+                'preserve scientific scope, specified values and supplied geometry; ask for unresolved or conflicting '
+                'scientific intent, not every unspecified implementation number. For a complete goal, propose '
+                'unspecified lattice, mass, ordering, seed or layer choices only with a defensible permitted basis; '
+                'record actual values, rationale, assumptions and limitations in summary. Honor user delegation '
+                'within the same constraints; proposals are not source facts or physical verification'),
             'physical_evaluation': 'HPC only; this geometry adapter performs none',
             'scientific_success': 'not established by geometry preparation'}
 

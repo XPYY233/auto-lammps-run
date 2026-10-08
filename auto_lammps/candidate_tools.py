@@ -42,8 +42,11 @@ count must match ALL configured atom types. Use these exact variables as the MC 
 The native fix grammar still requires the literal types keyword BEFORE those variables:
 fix exchange all atom/swap 1 10 17311 450.0 types ${pair_i} ${pair_j} ke yes
 Here pair is a prefix previously declared by sample_swap_types in this SAME cycle.
-Numbers in this syntax example are illustrative, not task defaults; obtain all scientific
-parameters from confirmed conditions, and use a unique sampler prefix for each cycle.
+Numbers in this syntax example are illustrative, not task defaults. Preserve confirmed
+scientific conditions; actively propose unspecified implementation parameters, including
+seeds, in the complete plan and explain their actual values, rationale and limitations
+in summary. User delegation permits these choices within the same scope and constraints,
+not changing specified conditions or claiming source facts. Use a unique sampler prefix for each cycle.
 They are local to their cycle, must not be redefined/deleted manually and are deleted
 by the adapter at its end. All samplers in one workflow must use the SAME seed; native
 random()/normal() expressions cannot be mixed with this tool. LAMMPS equal-style RNG
@@ -127,7 +130,10 @@ ftol (force >=0), max_iterations, max_evaluations (positive integers), kinetic_e
 "zero", box:null (fixed cell) or {mode:"iso",pressure:<finite bar>,vmax:<positive finite>},
 convergence:{force_metric:"fnorm" or "fmax",force_tolerance:<finite nonnegative force>,
 pressure_target:<finite bar>,pressure_tolerance:<finite nonnegative bar>}.
-All scientific parameters and diagnostics criteria must be supplied explicitly.
+All parameters and diagnostics criteria must be explicit in the proposal. Preserve
+specified values; propose unspecified solver settings and numerical convergence criteria
+with rationale and limitations in summary. They need not be supplied by the user, and
+are not verified convergence or source facts. Unresolved scientific intent needs clarification.
 The same state is independently relaxed ONCE to a complete baseline; all sites and
 variants restore that exact baseline, including IDs/types/box. A compiler-owned
 single restart cache is overwritten once per state, while baseline_file retains ALL
@@ -162,8 +168,12 @@ run_schedule sampled 0 '[14,35,105]'
 save_state sampled states.dump steps '[14,35,105]'
 end_cycle observations
 unfix exchange
-These are synthetic syntax examples, NOT scientific defaults. Obtain the complete
-list, starting timestep and MC parameters from confirmed task conditions. Declare
+These are synthetic syntax examples, NOT scientific defaults. Preserve the confirmed
+sampling goal, specified MC parameters and timestep constraints. When count, range and
+sampling rule are defined, generate the complete explicit integer list yourself and
+explain count/range/rule and any rounding in summary; do not ask the user to hand-list
+every timestep. Propose unspecified numerical implementation parameters with rationale;
+ask only for unresolved scientific intent or incompatible constraints. Declare
 the states.dump output and scan_sites specification with states:"sampled" explicitly.
 Minimization leaves its actual timestep unknown before execution. Before a scheduled
 stage, explicitly establish the starting timestep (for example reset_timestep before

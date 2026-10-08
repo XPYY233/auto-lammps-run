@@ -77,13 +77,21 @@ temperatures_K:[positive values],beta_grid:{first:<positive eV^-1>,last,count},
 solver:{method:"safeguarded_newton_bisection_v1",chemical_potential_bounds_eV:
 [lower,upper],composition_tolerance,chemical_potential_tolerance_eV,max_iterations},
 models:[one or both of "two_state_host_vacancy","three_state_competing_species"],aggregation:
-"equal_state_site_weight". All scientific values/anchor choice are required;
-there are no default reservoir chemical potentials, tolerances or pressures.
+"equal_state_site_weight". Every numerical parameter and anchor choice must be
+explicit in the proposal; the adapter inserts no hidden defaults. Preserve all
+supplied scientific conditions. The model may propose unspecified solver bounds,
+tolerances and an anchor approximation within the user's research intent, with
+its rationale, assumptions and limitations declared in the proposal summary and
+the exact values implemented in this operation. These are proposed choices,
+never extracted paper facts, observed results or independently verified values.
 The composition constrains mu_1-mu_0 only. An absolute reservoir anchor is
 indispensable. The Euler enthalpy anchor explicitly neglects vibrational terms
 and anchors weighted mu to the relaxed baseline enthalpy per atom; it is an
 approximation, not an independently determined free energy. Explicit reference
-values must have permitted provenance. Missing choices require clarification.
+values must have permitted provenance; do not invent explicit reference chemical
+potentials or partial volumes. Missing or conflicting required scientific intent,
+unsupported methods or unavailable required reference evidence need clarification;
+unspecified numerical implementation parameters need not all be user-filled.
 H=E+pV. Local grand costs are H_variant-H_baseline-sum(delta_N*mu).
 Independent-site probabilities use stable logsumexp. The two-state vacancy model
 uses binary 0/1 composition-constrained chemical potentials then host/vacancy
