@@ -2188,7 +2188,14 @@ async function refreshWorkspace(){
  else{$('#task-files').append(node('p','计算及分析产生的文件会保存在这里。','subtle'));addInfo('提交次数','尚无已核验记录');}
  for(const [label,url] of [['LAMMPS 使用文档','https://docs.lammps.org/'],['OVITO 分析工具','https://www.ovito.org/']]){const a=node('a',label+' ↗','resource-link');a.href=url;a.target='_blank';a.rel='noopener noreferrer';$('#task-resources').append(a);}
  $('#task-model').textContent=r?(r.evaluation?.attempt_scope==='week_one_reference_development'?'作者参考 A · 第一周人工辅助验证记录':'作者参考 A · 来源见任务信息'):(schema?.model_calls_enabled?'应用模型已连接 · 生成与用量见活动记录':'模型状态见设置');
- const tabs=$('#result-tabs');tabs.replaceChildren();for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){const b=node('button',label);b.setAttribute('data-result-tab',key);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();if(typeof updateTaskContents==='function')updateTaskContents();};tabs.append(b);}renderWorkspaceResults();
+ const tabs=$('#result-tabs');tabs.replaceChildren();
+ const hasResult=Boolean(r||normalResult?.evaluations?.some(e=>e.requests?.some(q=>q.reports?.length)));
+ if((!hasResult&&!['overview','history'].includes(resultTab))||(resultTab==='targets'&&!r?.closeout))resultTab='overview';
+ for(const [key,label] of Object.entries({overview:'结果总览',targets:'论文目标',data:'关键数据',plots:'可视化图表',structure:'原子结构',trajectory:'轨迹动画',report:'分析报告',history:'历史记录'})){
+  if((!hasResult&&!['overview','history'].includes(key))||(key==='targets'&&!r?.closeout))continue;
+  const b=node('button',label);b.setAttribute('data-result-tab',key);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(key===resultTab));b.onclick=()=>{resultTab=key;for(const x of tabs.children)x.setAttribute('aria-selected',String(x===b));renderWorkspaceResults();if(typeof updateTaskContents==='function')updateTaskContents();};tabs.append(b);
+ }
+ renderWorkspaceResults();
  renderRawFiles(raw);
  if(current?.id!==id)return;
  if(!r&&currentRawFiles().length&&!normalResult?.evaluations?.length){
