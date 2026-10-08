@@ -892,7 +892,12 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 #task-view.results-first .task-hero{order:-3}
 #task-view.results-first .result-workspace{order:-2}
 #task-view.results-first .ai-current{order:-1}
-#task-view #research-results,#task-view #reference-progress,#task-view #execution-flow,#task-view #task-files,#task-view #advanced-task,#task-view .discussion-panel,#task-view #ai-current-title{scroll-margin-top:100px}
+#task-view #research-results,#task-view #reference-progress,#task-view #reference-ai-charts,#task-view #execution-flow,#task-view #task-files,#task-view #advanced-task,#task-view .discussion-panel,#task-view #ai-current-title{scroll-margin-top:100px}
+#task-view .reference-ai-charts{margin:18px 20px 20px;padding:18px;border:1px solid #d5e3f4;border-radius:10px;background:#f8fbff}
+#task-view .reference-ai-charts .section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+#task-view .reference-ai-charts h3{margin:4px 0 0;font-size:17px}
+#task-view .reference-ai-charts label{display:block;margin-top:14px;font-weight:600}
+#task-view .reference-ai-charts textarea{width:100%;margin-top:8px}
 @media(max-width:1119px){
  #task-view .research-layout{grid-template-columns:minmax(0,1fr)}
  #task-view .task-contents{position:sticky;top:76px;z-index:11;display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;padding:8px 10px}

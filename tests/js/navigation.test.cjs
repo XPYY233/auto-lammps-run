@@ -63,7 +63,7 @@ test('one unavailable task section leaves later saved progress and discussion re
   refreshWorkspace:async()=>reads.push('workspace'),refreshDiscussion:async()=>reads.push('discussion'),
   notice:(message)=>messages.push(message),
  });
- vm.runInContext('let current=null, initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryLoading=false, initialGeometryRead=0, normalResult=null, workspaceReport=null, rawResult=null, executionState=null, referenceProgress=null, activityData=null, workspaceGeneration=0, workspaceState=null, scientificReviewState=null, scientificReviewGeneration=0;',c);
+ vm.runInContext('let current=null, initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryLoading=false, initialGeometryRead=0, normalResult=null, workspaceReport=null, rawResult=null, executionState=null, referenceProgress=null, referenceChartSource=null, referenceChartRequest=null, referenceChartRead=0, activityData=null, workspaceGeneration=0, workspaceState=null, scientificReviewState=null, scientificReviewGeneration=0;',c);
  vm.runInContext(source.slice(source.indexOf('async function openTask('),source.indexOf('function showNew(')),c);
  await c.openTask(id);
  assert.deepEqual(reads,['list','history','candidate','guidance','plan','activity','results','reference','workspace','discussion']);
@@ -87,7 +87,7 @@ function setupCandidateNavigation(){
   candidateState:'clarification',candidateTask:OLD,candidateRecord:{id:'old-record',task_id:OLD,state:'clarification',result:{questions:['old question']}},
   candidateAnswers:[{answer:'old answer'}],candidateOutcome:'old outcome',
   schema:{automatic_workflow:{configured:false},candidate_preparation:{enabled:true}},
-  normalResult:null,workspaceReport:null,rawResult:null,executionState:null,referenceProgress:null,activityData:null,
+  normalResult:null,workspaceReport:null,rawResult:null,executionState:null,referenceProgress:null,referenceChartSource:null,referenceChartRequest:null,referenceChartRead:0,activityData:null,
   initialGeometryCatalog:null,initialGeometryCatalogTask:null,initialGeometryLoading:false,initialGeometryRead:0,
   workspaceGeneration:0,workspaceState:null,candidateStatuses:{},requestStates:{},
   scientificReviewGeneration:0,

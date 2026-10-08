@@ -11,6 +11,7 @@ let workspaceGeneration=0, workspaceState={task:null,phase:'loading',updated:nul
 let scientificReviewState={task:null,phase:'idle',reviews:[],error:''};
 let scientificReviewGeneration=0;
 let referenceProgress=null;
+let referenceChartSource=null,referenceChartRequest=null,referenceChartRead=0;
 let initialGeometryCatalog=null, initialGeometryCatalogTask=null, initialGeometryRead=0, initialGeometryLoading=false;
 let candidateState=null, candidateTask=null, candidatePolling=false;
 let candidateRecord=null, candidateAnswers=[], candidateOutcome='';
@@ -125,6 +126,10 @@ async function openTask(id) {
   scientificReviewState={task:null,phase:'idle',reviews:[],error:''};
   scientificReviewGeneration++;
   $('#reference-progress').replaceChildren();$('#reference-progress').hidden=true;
+  if(referenceChartSource?.task!==id){referenceChartSource=null;referenceChartRequest=null;$('#reference-ai-question').value='';}
+  referenceChartRead++;
+  $('#reference-ai-charts').hidden=true;$('#reference-ai-chart-history').replaceChildren();
+  $('#reference-ai-status').textContent='';
   activityData=null;
   workspaceGeneration++;workspaceState={task:id,phase:'loading',updated:null};
   for(const selector of ['#task-files','#task-information','#task-resources','#execution-flow'])$(selector).replaceChildren();
@@ -488,6 +493,40 @@ async function refreshReferenceHistory() {
     }
     $('#reference-history').append(row);
   }
+  await refreshReferenceCharts(result.report||null);
+}
+async function refreshReferenceCharts(report){
+  const panel=$('#reference-ai-charts'),id=current?.id,read=++referenceChartRead;
+  if(!panel)return;
+  const valid=current?.mode==='reproduction'&&report?.task_id===id&&report?.role==='reference'&&
+    /^[a-f0-9]{64}$/.test(report.source_sha256||'')&&/^[a-f0-9]{64}$/.test(report.manifest_sha256||'');
+  if(!valid){panel.hidden=true;referenceChartSource=null;referenceChartRequest=null;$('#reference-ai-chart-history').replaceChildren();if(typeof updateTaskContents==='function')updateTaskContents();return;}
+  if(referenceChartSource?.task!==id||referenceChartSource.sha!==report.source_sha256||referenceChartSource.manifest!==report.manifest_sha256){
+    referenceChartRequest=null;$('#reference-ai-question').value='';
+  }
+  referenceChartSource={task:id,sha:report.source_sha256,manifest:report.manifest_sha256};panel.hidden=false;
+  $('#reference-ai-scope').textContent=report.output_valid===true?
+    '只从作者 A 已核验的数值表选图；已有输出完整，图表仍不代表科学复现通过。':
+    '作者 A 目前仅有部分已核验数值；图表只覆盖这些数据，缺失曲线与工况不会补造。';
+  $('#reference-ai-status').textContent='正在读取已有图表记录…';
+  try{
+    const response=await api(`/api/tasks/${id}/reference-charts`);
+    if(current?.id!==id||read!==referenceChartRead||referenceChartSource?.sha!==report.source_sha256||referenceChartSource?.manifest!==report.manifest_sha256)return;
+    const items=(response.charts||[]).map(item=>item.state==='completed'&&(
+      item.chart?.role!=='reference'||item.chart?.source_identity?.task_id!==id||
+      item.chart?.source_identity?.source_sha256!==report.source_sha256||
+      item.chart?.source_identity?.manifest_sha256!==report.manifest_sha256)?{...item,state:'source_unavailable',chart:null}:item);
+    renderAICharts(items,id,{box:$('#reference-ai-chart-history'),channel:'reference-charts',title:'作者 A · 已保存的数据图'});
+    $('#reference-ai-submit').disabled=!response.configured;
+    $('#reference-ai-status').textContent=response.configured?
+      '描述想看的图，应用内 AI 只选择已有作者 A 数值列；不会运行新计算或判定科学通过。':
+      '作者 A 选图服务尚未接入；已有数据和报告仍可查看。';
+  }catch(error){
+    if(current?.id!==id||read!==referenceChartRead)return;
+    $('#reference-ai-submit').disabled=true;
+    $('#reference-ai-status').textContent='图表记录暂不可读取；请刷新后查看，已有请求不会自动重发。';
+  }
+  if(typeof updateTaskContents==='function')updateTaskContents();
 }
 $('#refresh-reference').onclick=()=>action(async()=>{
   const id=current.id;current=await api('/api/tasks/'+id);
@@ -2502,9 +2541,9 @@ function renderPlotGallery(report,box){
  const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const [key,value] of Object.entries(options))select.append(new Option(value,key));select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
  const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
 }
-function renderAICharts(items,taskId){
- const box=$('#discussion-charts');box.replaceChildren();if(!items.length)return;
- box.append(node('h3','AI 绘图请求与结果'));
+function renderAICharts(items,taskId,{box=$('#discussion-charts'),channel='charts',title='AI 绘图请求与结果'}={}){
+ box.replaceChildren();if(!items.length)return;
+ box.append(node('h3',title));
  for(const item of items){
   const row=node('article',undefined,'result-widget');row.append(node('h4',item.question));
   const chart=item.chart;
@@ -2513,13 +2552,14 @@ function renderAICharts(items,taskId){
   const xs=chart.preview.map(values=>values[0]);
   const svg=numericalPlot(table,{method:'raw_preview',x:chart.x,y:chart.y,window:[Math.min(...xs),Math.max(...xs)],values:{}});
   const metadata=document.createElementNS('http://www.w3.org/2000/svg','metadata');
-  metadata.textContent=JSON.stringify({task_id:taskId,analysis_id:chart.analysis_id,source_file:chart.file,
+  metadata.textContent=JSON.stringify({task_id:taskId,role:chart.role||'agent',analysis_id:chart.analysis_id,source_file:chart.file,
     source_sha256:chart.source_sha256,data_sha256:chart.csv_sha256,x:chart.x,y:chart.y,
-    total_rows:chart.rows,plotted_rows:chart.preview.length,sampled:chart.sampled});svg.append(metadata);
-  const csv=node('a','下载完整数据 CSV','quiet');csv.href=`/api/tasks/${encodeURIComponent(taskId)}/charts/${encodeURIComponent(item.id)}/download`;
+    total_rows:chart.rows,plotted_rows:chart.preview.length,sampled:chart.sampled,
+    output_status:chart.output_status||null,scientific_status:chart.scientific_status||null});svg.append(metadata);
+  const csv=node('a','下载完整数据 CSV','quiet');csv.href=`/api/tasks/${encodeURIComponent(taskId)}/${channel}/${encodeURIComponent(item.id)}/download`;
   const svgLink=node('a','下载图表 SVG','quiet');svgLink.download='auto-lammps-ai-chart.svg';svgLink.href='#';
   svgLink.onclick=()=>{svgLink.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));};
-  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部行'}。横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。仅重绘已有结果，科学结论尚待核验。`,'plot-caption'));
+  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部行'}。横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。${channel==='reference-charts'?(chart.output_valid===true?'作者 A 已有数值；':'作者 A 部分数值；'):'仅重绘已有结果，'}科学结论尚待核验。`,'plot-caption'));
   box.append(row);
  }
 }
@@ -2555,6 +2595,26 @@ $('#discussion-ai-chart').onclick=()=>action(async()=>{
   await refreshDiscussion();
   $('#discussion-status').textContent=result.state==='completed'?'数据图已生成，完整 CSV 和 SVG 可在上方下载。':result.chart?.message||'这次选图未完成；请求记录已保留。';
  }catch(error){if(current?.id===id)$('#discussion-status').textContent=error.message;throw error;}
+});
+$('#reference-ai-refresh').onclick=()=>action(refreshReferenceHistory);
+$('#reference-ai-submit').onclick=()=>action(async()=>{
+ const source=referenceChartSource,id=current?.id,question=$('#reference-ai-question').value.trim();
+ if(!source||source.task!==id||$('#reference-ai-charts').hidden)return;
+ if(!question||question.length>1000){$('#reference-ai-status').textContent='请用 1000 字以内描述想看的作者 A 数据图。';return;}
+ if(!referenceChartRequest||referenceChartRequest.task!==id||referenceChartRequest.sha!==source.sha||referenceChartRequest.manifest!==source.manifest||referenceChartRequest.question!==question)
+   referenceChartRequest={id:crypto.randomUUID().replaceAll('-',''),task:id,sha:source.sha,manifest:source.manifest,question};
+ const request=referenceChartRequest;
+ $('#reference-ai-submit').disabled=true;$('#reference-ai-status').textContent='应用内 AI 正在从作者 A 已核验的数值表选图…';
+ try{
+   const result=await api(`/api/tasks/${id}/reference-charts`,{request_id:request.id,provider:'deepseek-official',question,source_sha256:source.sha});
+   if(current?.id!==id||referenceChartSource?.sha!==source.sha||referenceChartSource?.manifest!==source.manifest)return;
+   if(result.state==='completed'){$('#reference-ai-question').value='';referenceChartRequest=null;}
+   await refreshReferenceHistory();
+   $('#reference-ai-status').textContent=result.state==='completed'?'作者 A 数据图已保存，可下载完整 CSV 和 SVG；科学状态仍待核验。':
+     '这次选图未完成，记录已保留。同一问题不会自动再次发送；可修改问题后新建请求。';
+ }catch(error){
+   if(current?.id===id&&referenceChartSource?.sha===source.sha&&referenceChartSource?.manifest===source.manifest)$('#reference-ai-status').textContent='请求结果待核对；请刷新记录，应用不会自动再次发送。';
+ }finally{if(current?.id===id&&referenceChartSource?.sha===source.sha&&referenceChartSource?.manifest===source.manifest)$('#reference-ai-submit').disabled=false;}
 });
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
 
