@@ -15,7 +15,7 @@ from .results import existing_private_directory, ResultUnavailable
 from .tasks import text
 
 
-def evidence_views(document, data, figures, metrics):
+def evidence_views(document, data, figures, metrics, *, allow_missing_cells=False):
     """Read display groupings only from hash-checked controller artifacts."""
     views, seen = document.get('views', []), set()
     if not isinstance(views, list) or len(views) > 32:
@@ -59,7 +59,7 @@ def evidence_views(document, data, figures, metrics):
             preview = rows if len(rows) <= 12 else rows[:6] + rows[-6:]
             rendered_tables.append(dict(name=name, role=item['role'], label=text(item['label'], 200),
                 columns=[dict(key=c['key'], label=text(c['label'], 100)) for c in columns],
-                rows=[[text(row[c['key']], 100) for c in columns] for row in preview],
+                rows=[[text(row[c['key']], 100, required=not allow_missing_cells) for c in columns] for row in preview],
                 total_rows=len(rows), truncated=len(preview) < len(rows)))
         result.append(dict(id=identifier, title=text(view['title'], 200),
             description=text(view['description'], 2000), figures=rendered_images,

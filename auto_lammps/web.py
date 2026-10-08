@@ -26,6 +26,7 @@ from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError, PlanIterationLimit
 from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
+from .paper_evidence import PaperEvidenceViews
 from .model_connections import ModelConnections
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
@@ -235,7 +236,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -253,6 +254,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             execution_jobs.on_failure=lambda identifier:candidate_service.enqueue(identifier,store.get(identifier)['revision'],
                 answers='应用自动恢复：读取本任务最新已核验失败日志，诊断并最小修改现有方案；保留全部需求。修订待批准，不自动再次提交。')
     papers = PaperStore(store) if papers is None else papers
+    if paper_evidence_views is None and reference_views is not None:
+        paper_evidence_views = PaperEvidenceViews(reference_views.directory, papers)
     preferences = ModelPreferences(store)
     connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
     hpc = hpc_connections or HPCConnections(store)
@@ -528,6 +531,32 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return {'report':report}
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'参考报告与原始记录未通过核验，暂不展示数值。'},status_code=409)
+
+    def paper_projection(identifier):
+        # Human-only route decoration: TaskStore/export/CandidateService remain
+        # unchanged, so paper figures and targets never become B model inputs.
+        return paper_evidence_views.get(identifier) if paper_evidence_views else None
+
+    @app.get('/api/tasks/{identifier}/paper-evidence')
+    def paper_evidence(identifier: str):
+        store.get(identifier)
+        try:
+            return {'report': paper_projection(identifier)}
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            return JSONResponse({'detail':'文献工作台证据未通过来源或文件核验，原任务保留。'}, status_code=409)
+
+    @app.get('/api/tasks/{identifier}/paper-evidence/files/{name}')
+    def paper_evidence_file(identifier: str, name: str):
+        if paper_evidence_views is None:
+            return JSONResponse({'detail':'文献工作台证据尚未接入。'}, status_code=404)
+        try:
+            data = paper_evidence_views.download(identifier, name)
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            return JSONResponse({'detail':'文件不在已核验的文献证据中。'}, status_code=409)
+        media = {'.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.pdf':'application/pdf',
+                 '.csv':'text/csv; charset=utf-8', '.json':'application/json', '.md':'text/markdown; charset=utf-8'}
+        return Response(data, media_type=media.get(Path(name).suffix, 'application/octet-stream'),
+                        headers={'Content-Disposition':'inline; filename="'+name+'"'})
 
     @app.get('/api/tasks/{identifier}/reference-result/files/{name}')
     def reference_file(identifier: str, name: str):
@@ -837,7 +866,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}')
     def get(identifier: str):
-        return store.get(identifier)
+        document = store.get(identifier)
+        try:
+            projection = paper_projection(identifier)
+            if projection is not None:
+                document['paper_evidence'] = projection
+        except (ValueError, KeyError, TypeError, OSError, TaskError, runtime_denied):
+            document['paper_evidence_error'] = '已登记文献证据暂未通过核验，请检查工作台来源；原任务保留。'
+        return document
 
     @app.get('/api/tasks/{identifier}/guidance')
     def task_guidance(identifier: str):
@@ -1176,6 +1212,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def clear_initial_geometry(identifier: str, data: Revision):
         require_open_task(identifier)
         return store.clear_initial_geometry(identifier, data.revision)
+
+    @app.post('/api/tasks/{identifier}/paper-evidence/import-targets')
+    @serialized_task_action
+    def import_workbench_targets(identifier: str, data: Revision):
+        # Only the preconfigured, hash-checked adapter supplies content. Browser
+        # input contains a revision, never an arbitrary inventory or local path.
+        require_open_task(identifier)
+        report = paper_projection(identifier)
+        if report is None or report['target_inventory'] is None:
+            raise TaskError('尚无已登记的文献工作台目标清单。')
+        return store.import_target_inventory(identifier, data.revision, report['target_inventory'])
 
     @app.post('/api/tasks/{identifier}/targets/preview')
     def preview_targets(identifier: str, data: TargetPreview):

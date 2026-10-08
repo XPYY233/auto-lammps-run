@@ -1939,3 +1939,35 @@ FeAl在原任务普通页面恢复后已真实调用首版，收到六项澄清�
 - 完整1144项回归首轮仅一项失败、两项Linux平台跳过：旧MEAM接线检查固定期待生成版本20，新提示职责已明确升级21，实际记录21符合变更身份。其余检查通过。先记录，再同步该版本断言并重验；不回退版本伪装旧契约或跳过原MEAM检查。
 
 - 版本断言同步后完整1144项Python通过，仅两项Linux专属跳过；新增六项涵盖首版/修订/审核实际消息、完整采样、固定初态、无来源澄清、坏能力零请求及三轮停止。前端未改，原92项结果保留。尚未安装新版或发生新模型/HPC；附加独立审查中断事实保留。
+
+
+## 2026-10-08：用户可复现流程与参考证据接线缺口
+
+- 事实：切换冻结 B 到草稿作者 A 后，候选状态与 attention 未清，refreshCandidate 对草稿直接返回；A 页因此显示上一任务的 B 澄清。任务列表以 B 方案失败作主徽章，A 完成另藏小字，用户误以为两套 A 均失败。
+- 影响：用户不能辨认当前任务、角色和真实进度，容易采取错误恢复动作。CoCrNi A 完整输出已核验、B 方案三轮失败未提交；FeAl A 完整范围输出缺失、B 尚未提交，四者不得合并为同一个失败状态。
+- 纠正：导航清理候选所有暂态，迟到响应绑定任务和刷新代次；列表并列标记作者 A 与独立 B 阶段，未知提交不得标为未提交。由并行前端代理实施，等待导航反例和安装验证。
+- P 展示事实：既有文献工作台的原图、数值与来源已保留，网页目标清单只读任务 inventory；旧 ReferenceViews 要求已完成 A 且指标限于拉伸，不能承接一般论文或未完成 A 的 P。参考提取记录也未自动产生目标 inventory。
+- 纠正：复用现有工作台和受信文件/摘要读取，增加通用 P 证据展示桥接；提取、资源就绪、用户选范围、冻结比较和科学通过分开。旧已冻结任务不追写事前计划，P/作者解法不进入 B 模型上下文。
+- 用户验收要求：普通科研和文献复现各有完整可操作入口；复现先查成套资源，工作台 P 按复现可行性和优先级显示图表，用户批准 A、调用分析，与原图对照；B 条件提示与 A 并行准备，经普通页面/项目 API 执行；结果可将 A/B 绘在同一坐标图，不能只提供私有开发脚本。未接通环节如实显示，不用按钮或清单冒称已验收。
+- 验证状态：只读实际源码和页面确认；产品修复进行中，未新增 API/HPC、重置次数或科学验收。
+
+同轮只读定位又猜测不存在的 reference_results.py 及旧 JS 测试文件，实际模块为 operator_workspace.py、实际测试以文件清单定位。无任务或结果改变；后续使用真实列表，不另建相同旧模块。新第三代理因会话线程容量拒绝，两名既有/新代理已实际运行，控制端并行承担P桥接，不反复创建。
+
+- 列表分角色窄审发现 server reference_stage 在有提交次数但暂无 request 回执时仍可能写“尚未提交”，前端若原样优先使用会误导。已保留的意图/次数不能当从未提交。修正按 reference_state 生成保守人话状态：prepared 暂无作业回执、unknown 提交结果待核对；新增 count>0 且旧 stage 尚未提交反例后验证，不改账本。
+
+- 通用P桥接独立静态审查发现新增POST使用了create_app中尚未定义的serialized_task_action，应用构造将UnboundLocalError；尚未安装或真实启动，不影响当前服务。移到锁定义后的目标路由并纳入生命周期检查；增加ASGI构造及已结束任务拒绝反例后验证。
+- 同次审查发现P人类projection仅装饰GET，用户POST后current替换成原TaskStore文档，afterChange不重取，P会消失。修正用户动作后的human projection读取和任务/路由保护，原候选服务仍读取未装饰TaskStore，P不进入B；补页面动作和来源失败保守保留检查。
+
+- P来源摘要初版仅格式校验，不能独立证明其指向实际工作台产物。增加已登记来源回执字节摘要及论文身份验证，不把结构校验称科学提取核验；回执不作为用户公开下载、模型输入或运行授权。既有A后导入仍标事后整理，不追授事前冻结。
+
+- P桥接首轮六项合成检查均在夹具初始化失败：macOS临时路径含/var符号别名，既有逐层NOFOLLOW目录检查正确拒绝；未触发页面/模型/HPC。合成目录改为解析后的真实临时路径，不放宽文件读取或安装路径规则，再重验。
+
+- 修正临时目录后六项检查五通过，一项符号文件反例正确由os.open(NO_FOLLOW)抛OSError而测试期待ExecutionDenied。仅测试异常类型断言错误，HTTP已统一拒绝两种错误。同步真实拒绝类型并补HTTP409检查，不放宽符号链接规则。
+
+- 2026-10-08 continuation: worker assumed a separate JavaScript paper-evidence test file existed while locating tests; the read failed because it did not. No model/HPC action or product mutation followed. Corrective action: use the verified navigation harness and actual file inventory; tests remain pending until executed.
+
+- 2026-10-08 closed-task regression test expected HTTP 409, but the existing TaskError contract returns 422 for lifecycle rejection. The finished/deleted guard correctly rejected the request before reading/importing evidence. Corrective action: assert the established 422 response and unchanged revision; do not weaken the lifecycle guard or change unrelated API semantics.
+
+- 2026-10-08 independent review found that the new afterChange visibility guard also rejects successful creation from the home/new-task page, where task-view is intentionally hidden. Impact: the ordinary user cannot enter the newly created task despite a successful save. Corrective action before retry: explicitly permit only the create handler to open its new task, retaining identity/navigation guards for all late background replies. Verification pending JavaScript create/navigation regression.
+
+- 2026-10-08 workbench integration check: existing paper digitization preserves occluded/unreadable samples as empty CSV cells. The shared result preview previously required every selected cell to be nonempty; applying it unchanged to P would reject honest missing measurements. Corrective action: add an explicit paper-only allowance for empty preview cells, preserve blanks/status and full CSV, and retain strict behavior for existing calculation views. This is representation handling, not interpolation or a scientific pass.
