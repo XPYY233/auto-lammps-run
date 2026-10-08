@@ -238,7 +238,7 @@ test('已删除的硬编码结论和反向的助手文案不再出现',async()=>
   assert.ok(!source.includes("'第一周已完成'"),'不得硬编码“第一周已完成”');
   assert.ok(!source.includes('基准已验收 · 用户确认'),'不得硬编码基准验收结论');
   assert.ok(source.includes("result.enabled?'可围绕已有数据提问"),'结果助手启用时应提示可提问');
-  assert.ok(source.includes('结果助手尚未启用'),'未启用时应如实说明');
+  assert.ok(source.includes('请先在“设置 → 模型 API”中保存当前所选模型的密钥和模型 ID'),'未配置时应给出应用内可执行的下一步');
 });
 
 test('逐条问答按问题组装答复，跳过空回答，并支持结构化问题',()=>{

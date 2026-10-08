@@ -248,6 +248,13 @@ test('completed author A cannot replace an unstarted B next step',async()=>{
  assert.match(textContent(elements.get('#task-cards')),/A complete, B draft/);
 });
 
+test('a completed ordinary research task points to result review from the task list',()=>{
+ const task={id:OLD,title:'Saved numeric result',mode:'research',status:'conditions_frozen',execution_state:'completed'};
+ const {c}=setupTaskList([task]);
+ assert.equal(c.taskNextLabel(task),'核对结果');
+ assert.equal(c.taskNextLabel({...task,execution_state:'validated'}),'查看结果');
+});
+
 test('task list offers record closure only after active work and uncertain submissions settle',async()=>{
  const tasks=[
   {id:OLD,title:'Running job',status:'conditions_frozen',execution_state:'running'},
@@ -268,7 +275,7 @@ test('a saved job controls the next action instead of an older prepared plan',()
  const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
  vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research'}, activityData=null, candidateRecord={state:'prepared'}, executionState={job:{state:'failed',can_retry:false}};",c);
- vm.runInContext(source.slice(source.indexOf('function renderNextAction(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+ vm.runInContext(source.slice(source.indexOf('function prepareResultReview(){'),source.indexOf('function scheduleActivityRefresh(')),c);
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看失败原因与记录');
  assert.match($('#next-action-note').textContent,/已有提交与费用记录保留/);
@@ -278,7 +285,30 @@ test('a saved job controls the next action instead of an older prepared plan',()
  assert.doesNotMatch($('#next-action-note').textContent,/结果已保存/);
  vm.runInContext("executionState.job={state:'analyzed',can_retry:false}",c);
  c.renderNextAction();
+ assert.equal($('#next-action').textContent,'核对结果与研究目标');
+ let opened=false,focused=false;
+ $('.discussion-panel').scrollIntoView=()=>{opened=true;};
+ $('#discussion-prompt').focus=()=>{focused=true;};
+ $('#next-action').onclick();
+ assert.equal(opened&&focused,true);
+ assert.match($('#discussion-prompt').value,/关键数值、单位、收敛与异常/);
+ assert.match($('#discussion-status').textContent,/正式科学验收状态不会因此改变/);
+ $('.discussion-panel').hidden=true;
+ c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看数据与图表');
+});
+
+test('draft execution heading names the next research step without implying a service outage',()=>{
+ const box=element('section');
+ const c=vm.createContext({$:()=>box,document:{createTextNode:value=>value},node:(tag,value)=>{const item=element(tag);item.textContent=value||'';return item;}});
+ vm.runInContext("let current={status:'draft'};",c);
+ vm.runInContext(source.slice(source.indexOf('function renderFlow(report){'),source.indexOf('function metricTable(')),c);
+ c.renderFlow(null);
+ assert.match(textContent(box),/需求已保存 · 核对研究条件/);
+ assert.doesNotMatch(textContent(box),/服务就绪/);
+ vm.runInContext("current.status='conditions_frozen'",c);
+ c.renderFlow(null);
+ assert.match(textContent(box),/条件已冻结 · 准备方案/);
 });
 
 function setupAfterChange(){

@@ -11,7 +11,7 @@ from pathlib import Path
 from .manifest import canonical, sha256
 
 VERSION = 2
-STAGES = {'condition_completion', 'failure_diagnosis', 'result_discussion',
+STAGES = {'condition_completion', 'failure_diagnosis', 'result_discussion', 'result_chart',
           'condition_extraction', 'reference_extraction', 'candidate_proposal', 'candidate_review'}
 MANDATORY_INSTRUCTION = (
     'The application supplies scientific_adapter in the final input. Apply its '
@@ -171,7 +171,7 @@ def _stage_context(stage, evidence):
         'site_thermodynamics_contract': site_thermodynamics.GUIDE,
         'saved_report_identity': 'the report frozen identity remains authoritative',
     }}
-    if stage != 'result_discussion':
+    if stage not in {'result_discussion','result_chart'}:
         from . import structures, candidate_tools
         # No deployment atom bound is known in these non-executing stages. Do
         # not substitute a guessed bound for the configured candidate service.
@@ -195,6 +195,12 @@ def _stage_context(stage, evidence):
         rules.update(output='minimal_repair_hypothesis_with_literal_log_evidence',
             frozen_conditions='unchanged', attempts='same_task_existing_persistent_limits',
             validation='diagnosis_does_not_verify_repair')
+    elif stage == 'result_chart':
+        rules.update(output='bounded_existing_numeric_source_and_axis_selection_json',
+            evidence='only_verified_supplied_report_table_metadata',
+            actions='trusted_application_rechecks_full_source_and_writes_complete_chart_data',
+            new_analysis='no_fit_or_scientific_verdict',
+            uncertainty='sampled_plot_preview_full_csv_available')
     else:
         rules.update(output='plain_markdown_result_discussion',
             evidence='only_verified_supplied_reports_and_frozen_conditions',

@@ -28,6 +28,7 @@ from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .paper_evidence import PaperEvidenceViews
 from .model_connections import ModelConnections
+from .result_charts import ResultCharts
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
@@ -208,6 +209,11 @@ class DiscussionInput(ProviderInput):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class ChartInput(ProviderInput):
+    request_id: str = Field(min_length=32, max_length=32)
+    question: str = Field(min_length=1, max_length=1000)
+
+
 class HPCInput(Input):
     connection_id: str | None = None
     as_new: bool = False
@@ -236,7 +242,7 @@ class HPCCheckInput(Input):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=False, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -263,6 +269,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         raise ValueError('Results must belong to the same task store')
     if results_reader and collections_directory is not None and Path(collections_directory).absolute()!=results_reader.collections:
         raise ValueError('Raw downloads and results must share the same collection directory')
+    charts = ResultCharts(store,connections,results_reader) if results_reader is not None else None
     raw_outputs = RawOutputs(store,papers,
         collections=results_reader.collections if results_reader else collections_directory,
         ledger=results_reader.ledger if results_reader else None)
@@ -479,7 +486,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/discussion')
     def discussion_history(identifier: str):
-        return {'messages': connections.history(identifier), 'enabled': connections.assistant_enabled}
+        provider = preferences.get()['provider']
+        return {'messages': connections.history(identifier), 'enabled': connections.available(provider),
+                'provider': provider}
 
     @app.post('/api/tasks/{identifier}/discussion')
     def discuss_result(identifier: str, data: DiscussionInput):
@@ -519,6 +528,26 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             context['frozen_scientific_conditions']=conditions
             context['condition_record_sha256']=document['record_sha256']
         return connections.discuss(identifier, data.request_id, data.provider, data.question, context)
+
+    @app.get('/api/tasks/{identifier}/charts')
+    def chart_history(identifier: str):
+        store.get(identifier)
+        return {'charts': charts.history(identifier) if charts else [], 'configured': charts is not None}
+
+    @app.post('/api/tasks/{identifier}/charts')
+    def create_chart(identifier: str, data: ChartInput):
+        if charts is None:raise TaskError('结果服务尚未配置，无法生成数据图。')
+        return charts.create(identifier,data.request_id,data.provider,data.question)
+
+    @app.get('/api/tasks/{identifier}/charts/{request_id}/download')
+    def download_chart(identifier: str, request_id: str):
+        if charts is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:raw,chart=charts.download(identifier,request_id)
+        except (TaskError,ValueError,KeyError,TypeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'绘图数据或来源未通过核验，未提供下载。'},status_code=409)
+        return Response(raw,media_type='text/csv',headers={
+            'Content-Disposition':'attachment; filename="ai-chart-data.csv"',
+            'X-Source-SHA256':chart['source_sha256'],'X-Data-SHA256':chart['csv_sha256']})
 
     @app.get('/api/tasks/{identifier}/reference-result')
     def reference_result(identifier: str):
@@ -801,6 +830,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return results_reader.tables(identifier,analysis_id)
         except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
             return JSONResponse({'detail':'原始数据或来源核验未通过，未展示数据与图表。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/results/{analysis_id}/chart-data')
+    def task_chart_data(identifier: str, analysis_id: str, file: str, x: str, y: str):
+        store.get(identifier)
+        if results_reader is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:value=results_reader.chart_data(identifier,analysis_id,file,x,y)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'数值表或来源核验未通过，未提供派生数据。'},status_code=409)
+        return Response(value['csv'],media_type='text/csv',headers={
+            'Content-Disposition':'attachment; filename="result-chart-data.csv"',
+            'X-Source-SHA256':value['source_sha256'], 'X-Data-SHA256':value['csv_sha256']})
 
     @app.get('/api/tasks/{identifier}/results/{analysis_id}/download')
     def task_report(identifier: str, analysis_id: str):
@@ -1299,7 +1339,7 @@ def main():
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
-    parser.add_argument('--enable-result-assistant', action='store_true', help='Allow explicit user requests to the separately configured result discussion model')
+    parser.add_argument('--enable-result-assistant', action='store_true', help='Legacy option; saving a model connection enables explicit result questions')
     parser.add_argument('--session-activity-file', help='Desktop entry only: record page heartbeat/close activity in this file; otherwise no page activity is recorded')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
@@ -1312,7 +1352,7 @@ def main():
         if not Path(args.ledger).is_file(): parser.error('Ledger must already exist')
         ledger = Ledger(Path(args.ledger))
     model_client = DeepSeekClient(ModelCalls.open_existing(args.model_ledger)) if args.model_ledger else None
-    connections=ModelConnections(store,assistant_enabled=args.enable_result_assistant or bool(model_client),
+    connections=ModelConnections(store,assistant_enabled=True if args.enable_result_assistant else None,
                                  credentials_directory=args.model_connections_directory,
                                  calls=model_client.calls if model_client else None)
     if model_client is not None:
@@ -1365,7 +1405,7 @@ def main():
                           candidate_service=candidate_service,results_reader=results_reader,
                           reference_model_client=reference_model_client,reference_views=reference_views,
                           model_connections=connections,
-                          result_assistant_enabled=args.enable_result_assistant,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
+                          result_assistant_enabled=True if args.enable_result_assistant else None,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

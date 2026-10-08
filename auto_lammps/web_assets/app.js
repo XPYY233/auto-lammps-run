@@ -854,7 +854,7 @@ function renderCurrentActivity(){
     const state=job.scheduler_state;
     title.textContent=job.job_id?('作业 '+job.job_id+' · '+(requestStates[state]||job.label)):job.label;
     detail.textContent=job.job_id&&['queued','running'].includes(state)?'方案已批准并提交。应用后台正在跟进，结束后回收输出并进行分析。':
-      (job.state==='analyzed'?'已保存分析结果，请查看下方结果；科学结论仍需核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
+      (job.state==='analyzed'?'数值结果已保存。可让应用内 AI 对照研究目标指出已满足的条件与缺少的证据；科学结论仍待独立核验。':job.state==='awaiting_approval'?'请审阅下方方案，确认后提交计算。':job.state==='attention'?'当前流程需要处理，请查看下方执行说明。':job.label);
     meta.textContent='提交次数 '+job.dispatch_count+' / '+job.max_attempts+' · '+(executionState?.worker_alive?'后台服务在线':'后台服务未运行')+' · 调度完成与科学核验分别记录';
   }else if(current?.status!=='conditions_frozen'&&taskActivity?.condition_preparation){
     const condition=taskActivity.condition_preparation;
@@ -870,6 +870,14 @@ function renderCurrentActivity(){
   renderNextAction();
 }
 
+function prepareResultReview(){
+  const panel=$('.discussion-panel'),input=$('#discussion-prompt'),note=$('#task-quick-note');
+  if(!current||!panel||panel.hidden){if(note)note.textContent='已有可用结果后，才能核对结果与研究目标。';return;}
+  if(!input.value.trim())input.value='请依据本任务已冻结的研究条件和已经核验的计算结果，逐项核对：计算方法是否符合研究目标；关键数值、单位、收敛与异常是否有证据；目前能确认什么、还缺什么。每项引用具体数据或说明证据缺失。不要把调度结束或数值处理完成说成科学验收通过，也不要发起新计算。';
+  panel.scrollIntoView({block:'start',behavior:'smooth'});input.focus();
+  $('#discussion-status').textContent='请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
+  if(note)note.textContent='已打开结果核对问题，请检查后发送。';
+}
 function renderNextAction(){
   const button=$('#next-action'),note=$('#next-action-note'),previous=$('#previous-step');
   if(!button||!current)return;
@@ -890,6 +898,10 @@ function renderNextAction(){
       jump('查看计算进度','#execution-flow',note.textContent);return;
     }
     if(job.state==='analyzed'){
+      if(!$('.discussion-panel')?.hidden){
+        button.textContent='核对结果与研究目标';button.hidden=false;button.onclick=prepareResultReview;
+        note.textContent='应用内 AI 可解释已有证据；正式科学验收尚未完成。';return;
+      }
       jump('查看数据与图表','#research-results','结果已保存；科学结论仍待核验。');return;
     }
     if(job.state==='completed'){
@@ -1548,7 +1560,8 @@ function taskPhaseLabels(task){
 function taskNextLabel(task){
  const state=taskState(task);
  if(['running','queued','accepted','dispatching','preparing','understanding'].includes(state))return '查看进度';
- if(['completed','validated'].includes(state))return '查看结果';
+ if(state==='completed')return task.mode==='research'?'核对结果':'查看结果';
+ if(state==='validated')return '查看结果';
  if(['failed','timeout','preparation_failed','condition_failed','condition_attention','clarification','reconcile_required','unknown'].includes(state))return '查看问题';
  if(state==='prepared')return '确认方案';
  if(state==='draft')return task.condition_preparation_state==='imported'
@@ -1858,7 +1871,7 @@ function scientificLabel(closeout){
 function bState(report){if(report.closeout)return acceptanceLabel(report.closeout.acceptance)+' · '+scientificLabel(report.closeout);return report.agent_progress?.stage || '记录暂不可核验';}
 function bCount(report){return report.agent_progress?.available ? `${report.agent_progress.dispatch_claims} / 2` : '暂不可核验';}
 function renderFlow(report){
- let box=$('#execution-flow');box.replaceChildren();if(report){const details=node('details',undefined,'reference-flow');details.append(node('summary','查看作者参考 A 的执行阶段'));box.append(details);box=details;}const head=node('div',undefined,'flow-heading');head.append(node('h2',report?'作者参考 A · 执行流程':'任务执行流程'),node('span',report?'完整运行 '+duration(report.runtime.elapsed_seconds):'等待模型与执行服务就绪'));box.append(head);
+ let box=$('#execution-flow');box.replaceChildren();if(report){const details=node('details',undefined,'reference-flow');details.append(node('summary','查看作者参考 A 的执行阶段'));box.append(details);box=details;}const head=node('div',undefined,'flow-heading');head.append(node('h2',report?'作者参考 A · 执行流程':'任务执行流程'),node('span',report?'完整运行 '+duration(report.runtime.elapsed_seconds):current?.status==='conditions_frozen'?'条件已冻结 · 准备方案':'需求已保存 · 核对研究条件'));box.append(head);
  const labels=['需求理解','结构准备','势函数','计算脚本','提交 HPC','运行结束','结果分析'];const steps=node('ol',undefined,'flow-steps');
  for(let i=0;i<labels.length;i++){const done=!!report&&report.stages[i]?.state==='completed';const li=node('li',undefined,done?'done':i===0?'current':'');li.append(node('span',done?'✓':String(i+1)),document.createTextNode(labels[i]));steps.append(li);}box.append(steps,node('p',report?`参考 A 已结束并完成诊断分析；B：${bState(report)}。${report.closeout?acceptanceLabel(report.closeout.acceptance)+'；该记录只覆盖上述范围，未覆盖工况不作为已复现。':'科学结论仍待核验。'}`:'需求已保存。缺项会集中说明；当前不会自动提交计算。','flow-note'));
 }
@@ -2215,7 +2228,7 @@ function selectModelEditor(provider){
 async function removeModelConnection(provider){
  connectionState=await api('/api/model-connections',{provider,model:'',remove:true});
  if(modelPreference.provider===provider)modelPreference=await api('/api/model-preference',{provider,model:'',revision:modelPreference.revision});
- selectModelEditor(provider);renderModelConnections();
+ selectModelEditor(provider);renderModelConnections();if(current)await refreshDiscussion();
 }
 function renderModelConnections(){
  const box=$('#saved-model-list');box.replaceChildren();
@@ -2232,7 +2245,7 @@ function renderModelConnections(){
 $('#new-model').onclick=()=>{const provider=Object.entries(connectionState.connections).find(([,c])=>!c.configured)?.[0];if(provider)selectModelEditor(provider);$('#model-editor-title').textContent=provider?'添加模型 API':'各模型商已有连接；可编辑或更换密钥';$('#provider-choice').focus();};
 function refreshConnectionLabel(){const c=connectionState?.connections[$('#provider-choice').value];$('#connection-status').textContent=c?.configured?'已保存密钥，留空可保留；连接可用性以实际响应为准。':'尚未保存该模型商的密钥。';$('#fetch-models').disabled=!c?.configured||!c?.model_listing;$('#remove-key').disabled=!c?.configured;if(c&&!c.model_listing)$('#connection-status').textContent+=' 此模型商请手动填写模型 ID。';}
 $('#provider-choice').onchange=()=>selectModelEditor($('#provider-choice').value);
-$('#model-form').onsubmit=e=>{e.preventDefault();action(async()=>{const provider=$('#provider-choice').value,model=$('#model-name').value.trim(),key=$('#model-key').value;try{connectionState=await api('/api/model-connections',{provider,model,api_key:key||null});}finally{$('#model-key').value='';}modelPreference=await api('/api/model-preference',{provider,model,revision:modelPreference.revision});$('#open-model').title='模型与计算连接 · '+modelPreference.providers[provider];refreshConnectionLabel();renderModelConnections();notice('模型连接已保存。可读取模型目录，或在结果页发送分析问题。保存本身不调用模型。');});};
+$('#model-form').onsubmit=e=>{e.preventDefault();action(async()=>{const provider=$('#provider-choice').value,model=$('#model-name').value.trim(),key=$('#model-key').value;try{connectionState=await api('/api/model-connections',{provider,model,api_key:key||null});}finally{$('#model-key').value='';}modelPreference=await api('/api/model-preference',{provider,model,revision:modelPreference.revision});$('#open-model').title='模型与计算连接 · '+modelPreference.providers[provider];refreshConnectionLabel();renderModelConnections();if(current)await refreshDiscussion();notice('模型连接已保存。现在可在有结果的任务中提问；保存本身不调用模型。');});};
 $('#fetch-models').onclick=()=>action(async()=>{const result=await api('/api/model-connections/models',{provider:$('#provider-choice').value});$('#available-models').replaceChildren(...result.models.map(id=>new Option(id,id)));$('#connection-status').textContent=`已取得 ${result.models.length} 个模型 ID${result.has_more?'（目录还有后续页，可手动输入）':''}。点击模型输入框选择。`});
 $('#remove-key').onclick=()=>{const provider=$('#provider-choice').value;const card=[...$('#saved-model-list').children].find(x=>x.querySelector('strong')?.textContent===connectionState.connections[provider].label);card?.querySelector('.connection-remove')?.focus();$('#connection-status').textContent='请在上方已保存连接中点击“移除连接”并确认。';};
 $('#close-model').onclick=()=>{$('#model-key').value='';$('#model-dialog').close();};for(const id of ['open-model','home-model','rail-model','discussion-model'])$('#'+id).onclick=()=>action(openModel);
@@ -2253,6 +2266,8 @@ bind('open-ai-records',()=>{$('#ai-activity-panel').open=true;$('#ai-activity-pa
 bind('open-current-plan',()=>{$('#plan-review-panel').scrollIntoView({block:'start',behavior:'smooth'});});
 const taskQuickLinks=$('#task-quick-links');
 if(taskQuickLinks)taskQuickLinks.onclick=event=>{
+  const review=event.target.closest('button[data-task-action="review-results"]');
+  if(review&&taskQuickLinks.contains(review)){prepareResultReview();return;}
   const button=event.target.closest('button[data-task-target]');
   if(!button||!taskQuickLinks.contains(button))return;
   const target=$(button.dataset.taskTarget),note=$('#task-quick-note');
@@ -2329,7 +2344,7 @@ $('#home-start').onclick=()=>{const prompt=$('#home-prompt').value;showNew();$('
 $('#home-guide').onclick=()=>{$('#home-start').click();};$('#home-cases').onclick=()=>requestRoute('#papers');
 $('#paper-search').oninput=()=>action(refreshPapers);
 for(const [title,text] of [['合金拉伸响应','研究 300 K 下 NbTiZrMoV 合金的单轴拉伸响应。请整理需要确认的初始结构、势函数和加载条件，输出应力–应变曲线与缺陷分析。'],['晶体弹性性质','计算 SiC 晶体的弹性性质。请先确认晶型、温度和势函数，给出弹性常数与分析图表。'],['点缺陷形成能','研究 W 晶体中的空位形成能。请明确参考体系、边界条件及弛豫方案，保留结构与能量来源。']]){const b=node('button',undefined,'example-task');b.append(node('strong',title),node('small',text));b.onclick=()=>{$('#create-form [name=prompt]').value=text;$('#create-form [name=prompt]').focus();};$('#task-examples').append(b);}
-const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存，尚未确定的科学条件需要进一步明确。当前通用自动执行尚未开放。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
+const helpItems=[['快速开始','点击“新建任务”，描述研究问题。补充信息可留空；任务会保存。按任务页“当前进展”的下一步，依次核对条件、确认方案、查看 HPC 计算和结果；尚未确定的科学条件会明确显示。'],['任务设置与输入','至少描述材料体系、温度或工况以及希望得到的性质。界面不会把未填写的条件当作已经确认。'],['势函数与材料资源','资源库保留势函数来源、版本和许可。元素相同不代表势函数适用，正式计算仍需任务相关的科学核验。'],['计算与 HPC','在顶部“设置 → 计算连接”中填写自己的登录地址、端口、用户名与认证资料。保存不提交作业，SSH 检查不代表计算环境已验证。目标物理计算只在授权超算执行。查看任务详情中的提交次数、作业号和历史。刷新页面不会重新提交计算。'],['结果分析与可视化','结果页可切换数据、图表、结构、轨迹和报告。多图使用已有真实数据；未接入的视图会明确标出。结果后的问题发给你配置的模型，不触发新模拟。'],['模型与 API 密钥','模型设置中选择厂商和具体模型 ID，输入 API 密钥。保存不调用模型。可读取 DeepSeek、Claude、GPT 的模型目录；GLM 当前按官方文档手动填写 ID。'],['失败与恢复','状态不明时先核对原作业，不能再次点击产生新计算。B 最多两次提交，失败和费用完整保留。'],['文献验证与历史','P 是论文结果；A 运行作者原始代码；B 独立生成。作者参考完成与科学复现成功分别记录。完整题目、DOI 和失败记录保存在案例中心。']];
 function renderHelp(){const query=$('#help-search').value.trim().toLowerCase(),box=$('#help-articles');box.replaceChildren();for(const [title,body] of helpItems.filter(r=>r.join(' ').toLowerCase().includes(query))){const d=node('details',undefined,'panel help-article');d.open=title==='快速开始';d.append(node('summary',title),node('p',body));box.append(d);}if(!box.children.length)box.append(emptyState('未找到相关说明','试试“模型”“计算”或“结果”等关键词。'));}
 $('#help-search').oninput=renderHelp;
 function renderPlotGallery(report,box){
@@ -2337,14 +2352,60 @@ function renderPlotGallery(report,box){
  const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const [key,value] of Object.entries(options))select.append(new Option(value,key));select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
  const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
 }
-async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；发送后会保留问题、答复与模型用量。助手只解读已有结果，不能提交新的计算或执行任意分析代码。':'结果助手尚未启用：可以下载数据，或先在“设置 → 模型 API”配置连接，再由管理员启用。';const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;}
+function renderAICharts(items,taskId){
+ const box=$('#discussion-charts');box.replaceChildren();if(!items.length)return;
+ box.append(node('h3','AI 绘图请求与结果'));
+ for(const item of items){
+  const row=node('article',undefined,'result-widget');row.append(node('h4',item.question));
+  const chart=item.chart;
+  if(item.state!=='completed'||!chart){row.append(node('p',item.state==='source_unavailable'?'来源数据暂未通过核验，图与下载已隐藏。':chart?.message||'这次选图未完成；请求记录已保留，没有自动重发。','form-note'));box.append(row);continue;}
+  const table={columns:[{name:chart.x,unit:chart.x_unit},{name:chart.y,unit:chart.y_unit}],rows:chart.preview};
+  const xs=chart.preview.map(values=>values[0]);
+  const svg=numericalPlot(table,{method:'raw_preview',x:chart.x,y:chart.y,window:[Math.min(...xs),Math.max(...xs)],values:{}});
+  const metadata=document.createElementNS('http://www.w3.org/2000/svg','metadata');
+  metadata.textContent=JSON.stringify({task_id:taskId,analysis_id:chart.analysis_id,source_file:chart.file,
+    source_sha256:chart.source_sha256,data_sha256:chart.csv_sha256,x:chart.x,y:chart.y,
+    total_rows:chart.rows,plotted_rows:chart.preview.length,sampled:chart.sampled});svg.append(metadata);
+  const csv=node('a','下载完整数据 CSV','quiet');csv.href=`/api/tasks/${encodeURIComponent(taskId)}/charts/${encodeURIComponent(item.id)}/download`;
+  const svgLink=node('a','下载图表 SVG','quiet');svgLink.download='auto-lammps-ai-chart.svg';svgLink.href='#';
+  svgLink.onclick=()=>{svgLink.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));};
+  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部行'}。横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。仅重绘已有结果，科学结论尚待核验。`,'plot-caption'));
+  box.append(row);
+ }
+}
+async function refreshDiscussion(){
+ if(!current)return;const id=current.id;
+ const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;
+ const box=$('#discussion-history');box.replaceChildren();
+ for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}
+ $('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；问题、答复与模型用量会保留。需要绘图时点“让 AI 生成数据图”。':'请先在“设置 → 模型 API”中保存当前所选模型的密钥和模型 ID；保存后即可在这里提问。';
+ if(result.enabled&&result.provider!=='deepseek-official')$('#discussion-status').textContent+=' 自动选图使用 DeepSeek；请在模型设置中切换到已连接的 DeepSeek。';
+ const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;
+ const chartButton=$('#discussion-ai-chart');chartButton.disabled=!result.enabled||result.provider!=='deepseek-official';
+ try{const charts=await api(`/api/tasks/${id}/charts`);if(current?.id===id)renderAICharts(charts.charts||[],id);}
+ catch{if(current?.id===id)$('#discussion-charts').replaceChildren(node('p','已保存的数据图暂不可读取，请稍后刷新。','form-note'));}
+}
 $('#discussion-open-plots').onclick=()=>{
  if(!current)return;
  resultTab='plots';
  for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='可视化图表'));
  renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});
 };
+$('#discussion-review-results').onclick=prepareResultReview;
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
+let chartRequest=null;
+$('#discussion-ai-chart').onclick=()=>action(async()=>{
+ if(!current)return;const id=current.id,question=$('#discussion-prompt').value.trim();
+ if(!question||question.length>1000){$('#discussion-status').textContent='请用 1000 字以内描述要绘制的图。';return;}
+ if(!chartRequest||chartRequest.task!==id||chartRequest.question!==question)chartRequest={id:crypto.randomUUID().replaceAll('-',''),task:id,question};
+ $('#discussion-status').textContent='应用内 AI 正在从已核验数据选择图表…';
+ try{const result=await api(`/api/tasks/${id}/charts`,{request_id:chartRequest.id,provider:'deepseek-official',question});
+  if(current?.id!==id)return;
+  if(result.state==='completed'){$('#discussion-prompt').value='';chartRequest=null;}
+  await refreshDiscussion();
+  $('#discussion-status').textContent=result.state==='completed'?'数据图已生成，完整 CSV 和 SVG 可在上方下载。':result.chart?.message||'这次选图未完成；请求记录已保留。';
+ }catch(error){if(current?.id===id)$('#discussion-status').textContent=error.message;throw error;}
+});
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
 
 function uiIcon(name){
