@@ -108,6 +108,7 @@ function setupCandidateNavigation(){
   const old=element('span');old.textContent='old task content';c.$(selector).append(old);
  }
  c.$('#candidate-answers').value='old answer';
+ c.$('#discussion-prompt').value='old task result question';
  for(const selector of ['#candidate-note','#candidate-authorization','#candidate-outcome'])c.$(selector).textContent='old task content';
  return {c,elements,calls,renders};
 }
@@ -125,6 +126,7 @@ test('opening a draft task clears previous questions and outcome before its firs
  c.api=async(path,data)=>{calls.push({path,data});return {id:NEXT,title:'New task',status:'draft',mode:'research',revision:1};};
  await c.openTask(NEXT);
  assertCandidateCleared(state);
+ assert.equal(elements.get('#discussion-prompt').value,'','a new task must not inherit another task question');
  assert.deepEqual(renders,[{state:null,task:null,record:null,answers:0,outcome:''}]);
  assert.deepEqual(calls,[{path:'/api/tasks/'+NEXT,data:undefined}]);
  assert.doesNotMatch(elements.get('#ai-current-title').textContent,/clarification|old/);
@@ -133,6 +135,7 @@ test('opening a frozen task clears old content while its candidate read is pendi
  const state=setupCandidateNavigation(),{c,calls}=state;let resolve;
  c.api=(path,data)=>{calls.push({path,data});return path.endsWith('/candidate')?new Promise(r=>resolve=r):Promise.resolve({id:NEXT,status:'conditions_frozen',mode:'research',revision:1});};
  const pending=c.openTask(NEXT);await flush();assertCandidateCleared(state);
+ assert.equal(state.elements.get('#discussion-prompt').value,'');
  resolve({candidate:{id:'new-record',task_id:NEXT,state:'prepared',revision:1,result:{summary:'new task only'}}});await pending;
  assert.equal(c.candidateRecord.id,'new-record');assert.equal(c.candidateTask,NEXT);
  assert.equal(calls.every(call=>call.data===undefined),true,'navigation only reads saved state');
@@ -277,7 +280,7 @@ test('a saved job controls the next action instead of an older prepared plan',()
  $('#scientific-review').hidden=true;
  const c=vm.createContext({$,ordinaryExecutionJob:()=>null});
  vm.runInContext("let current={id:'"+OLD+"',status:'conditions_frozen',mode:'research'}, activityData=null, candidateRecord={state:'prepared'}, executionState={job:{state:'failed',can_retry:false}};",c);
- vm.runInContext(source.slice(source.indexOf('function askAIAboutResults(){'),source.indexOf('function scheduleActivityRefresh(')),c);
+ vm.runInContext(source.slice(source.indexOf('function askAIAboutResults('),source.indexOf('function scheduleActivityRefresh(')),c);
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看失败原因与记录');
  assert.match($('#next-action-note').textContent,/已有提交与费用记录保留/);
@@ -298,6 +301,27 @@ test('a saved job controls the next action instead of an older prepared plan',()
  $('.discussion-panel').hidden=true;
  c.renderNextAction();
  assert.equal($('#next-action').textContent,'查看数据与图表');
+});
+
+test('evidence explanation submits one prepared question but preserves an existing draft',()=>{
+ const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
+ let submitted=0;
+ $('.discussion-panel').scrollIntoView=()=>{};
+ $('#discussion-prompt').focus=()=>{};
+ $('#discussion-form').requestSubmit=()=>{submitted++;};
+ const c=vm.createContext({$,current:{id:OLD}});
+ vm.runInContext(source.slice(source.indexOf('function askAIAboutResults('),source.indexOf('function scheduleActivityRefresh(')),c);
+ c.askAIAboutResults(true);
+ assert.equal(submitted,1);
+ assert.match($('#discussion-prompt').value,/已冻结的研究条件/);
+ $('#discussion-prompt').value='我正在写的另一个问题';
+ c.askAIAboutResults(true);
+ assert.equal(submitted,1,'an existing draft must not be sent automatically');
+ assert.equal($('#discussion-prompt').value,'我正在写的另一个问题');
+ $('#discussion-prompt').value='';$('#discussion-form button[type=submit]').disabled=true;
+ c.askAIAboutResults(true);
+ assert.equal(submitted,1,'no model connection must not send');
+ assert.match($('#discussion-status').textContent,/先从“设置”连接/);
 });
 
 test('draft execution heading names the next research step without implying a service outage',()=>{

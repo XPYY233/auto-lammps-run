@@ -107,6 +107,7 @@ async function openTask(id) {
   $('#result-priority-note').textContent='正在读取结果记录…';
   $('#plan-review-panel').hidden=true;
   $('#ai-activity').replaceChildren();$('#discussion-history').replaceChildren();
+  $('#discussion-prompt').value='';$('#discussion-status').textContent='';
   const discussionSubmit=$('#discussion-form button[type=submit]');
   if(discussionSubmit)discussionSubmit.disabled=true;
   let task;
@@ -881,13 +882,16 @@ function renderCurrentActivity(){
   renderNextAction();
 }
 
-function askAIAboutResults(){
+function askAIAboutResults(sendImmediately=false){
   const panel=$('.discussion-panel'),input=$('#discussion-prompt'),note=$('#task-quick-note');
   if(!current||!panel||panel.hidden){if(note)note.textContent='已有可用结果后，才能核对结果与研究目标。';return;}
-  if(!input.value.trim())input.value='请依据本任务已冻结的研究条件和已经核验的计算结果，逐项核对：计算方法是否符合研究目标；关键数值、单位、收敛与异常是否有证据；目前能确认什么、还缺什么。每项引用具体数据或说明证据缺失。不要把调度结束或数值处理完成说成科学验收通过，也不要发起新计算。';
+  const freshQuestion=!input.value.trim();
+  if(freshQuestion)input.value='请依据本任务已冻结的研究条件和已经核验的计算结果，逐项核对：计算方法是否符合研究目标；关键数值、单位、收敛与异常是否有证据；目前能确认什么、还缺什么。每项引用具体数据或说明证据缺失。不要把调度结束或数值处理完成说成科学验收通过，也不要发起新计算。';
   panel.scrollIntoView({block:'start',behavior:'smooth'});input.focus();
-  $('#discussion-status').textContent=$('#discussion-form button[type=submit]').disabled?'先从“设置”连接应用内模型，然后回到这里提问；已保存的结果核验记录仍可查看。':'请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
+  const form=$('#discussion-form'),enabled=!$('#discussion-form button[type=submit]').disabled;
+  $('#discussion-status').textContent=!enabled?'先从“设置”连接应用内模型，然后回到这里提问；已保存的结果核验记录仍可查看。':'请检查问题后点击“询问结果”。AI 会解释已有证据；正式科学验收状态不会因此改变。';
   if(note)note.textContent='已打开结果核对问题，请检查后发送。';
+  if(sendImmediately&&freshQuestion&&enabled){form.requestSubmit();return;}
 }
 function prepareResultReview(){
   const review=$('#scientific-review'),note=$('#task-quick-note');
@@ -2085,7 +2089,7 @@ function renderScientificReviews(){
  if(latest.state!=='source_unavailable'){
   const download=node('a','下载核验记录 ↓','quiet');download.href=`/api/tasks/${current.id}/scientific-reviews/${latest.id}/download`;actions.append(download);
  }
- if(!$('.discussion-panel').hidden){const ask=node('button','请应用内 AI 解释证据','quiet');ask.type='button';ask.onclick=askAIAboutResults;actions.append(ask);}
+ if(!$('.discussion-panel').hidden){const ask=node('button','让应用内 AI 解释证据','quiet');ask.type='button';ask.onclick=()=>askAIAboutResults(true);actions.append(ask);}
  box.append(actions);
  if(state.reviews.length>1){const history=node('details',undefined,'scientific-review-history');history.append(node('summary',`查看其他 ${state.reviews.length-1} 份核验记录`));for(const item of state.reviews.filter(item=>item.id!==latest.id)){const row=node('p',`${new Date(item.at).toLocaleString('zh-CN')} · ${item.state==='source_unavailable'?'来源已变化':'科学结论未判定'}`);if(item.state!=='source_unavailable'){const link=node('a','下载 ↓');link.href=`/api/tasks/${current.id}/scientific-reviews/${item.id}/download`;row.append(' ',link);}history.append(row);}box.append(history);}
 }
