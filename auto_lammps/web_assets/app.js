@@ -1531,7 +1531,9 @@ function taskNextLabel(task){
  if(['completed','validated'].includes(state))return '查看结果';
  if(['failed','timeout','preparation_failed','condition_failed','condition_attention','clarification','reconcile_required','unknown'].includes(state))return '查看问题';
  if(state==='prepared')return '确认方案';
- if(state==='draft')return '整理需求';
+ if(state==='draft')return task.condition_preparation_state==='imported'
+  ? Number(task.outstanding)>0?'让应用 AI 补齐条件':'核对并确认条件'
+  :'整理需求';
  if(state==='frozen')return task.mode==='reproduction'?'查看 P–A–B 进度':'准备方案';
  return '查看任务';
 }
@@ -2250,7 +2252,11 @@ function taskState(t){
   if(t.reference_state)return t.reference_state;
   return t.status==='conditions_frozen'?'frozen':'draft';
 }
-function taskStateLabel(t){return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',reconcile_required:'计算记录待核对',unknown:'提交状态待核对',dispatching:'正在提交',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败',condition_failed:'需求条件整理失败',condition_attention:'条件整理记录待核对',understanding:'正在整理需求条件'})[taskState(t)]||'状态待核对';}
+function taskStateLabel(t){
+ const state=taskState(t);
+ if(state==='draft'&&t.condition_preparation_state==='imported')return Number(t.outstanding)>0?'条件已整理 · 待补齐':'条件待确认';
+ return ({validated:'验收通过 · 基准工况',finished:'已确认结束',running:'运行中',queued:'排队中',accepted:'已提交',completed:'计算结束 · 待核验',reconcile_required:'计算记录待核对',unknown:'提交状态待核对',dispatching:'正在提交',failed:'失败',timeout:'超时',draft:'待准备',frozen:'条件已冻结 · 待准备方案',prepared:'方案已准备 · 待执行',preparing:'方案准备中',clarification:'需要补充条件',preparation_failed:'方案准备失败',condition_failed:'需求条件整理失败',condition_attention:'条件整理记录待核对',understanding:'正在整理需求条件'})[state]||'状态待核对';
+}
 function statsFor(tasks, box){box.replaceChildren();for(const [label,value] of [['全部任务',tasks.length],['运行中',tasks.filter(t=>taskState(t)==='running').length],['排队中',tasks.filter(t=>['queued','accepted'].includes(taskState(t))).length],['计算结束',tasks.filter(t=>taskState(t)==='completed').length],['验收通过',tasks.filter(t=>taskState(t)==='validated').length],['已确认结束',tasks.filter(t=>taskFinished(t)).length]]){const c=node('div',undefined,'stat'),icon=node('span',undefined,'stat-icon');icon.append(uiIcon(label==='运行中'?'play':label==='排队中'?'clock':label==='计算结束'?'check':'tasks'));c.append(icon,node('small',label),node('strong',String(value)));box.append(c);}}
 async function showHome(){current=null;hideViews('home-view');selectNavigation('');recordRoute('#home');await listTasks();statsFor(taskCache,$('#home-stats'));const papers=await api('/api/papers');const selected=papers.papers.filter(p=>p.selection==='selected');const box=$('#home-cases-content');box.replaceChildren();for(const p of selected.slice(0,2)){const c=node('article',undefined,'compact-case');c.append(node('span','文献复现验证','badge pending'),node('h3',p.title),node('small','DOI '+p.doi),node('p',p.stage));const go=node('button','查看进度','quiet');go.onclick=()=>requestRoute(p.tasks.length?'#'+p.tasks[0].id:'#papers');c.append(go);box.append(c);}if(!selected.length)box.append(node('p','尚未选定验证案例。','subtle'));const status=$('#home-status');status.replaceChildren();for(const [k,v] of [['计算状态',taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准'],['案例清单',selected.length+' 篇已选'],['模型连接','点击模型设置查看'],['存储空间','未连接实时用量查询']])status.append(node('dt',k),node('dd',v));const dl=$('#home-downloads');dl.replaceChildren();const finished=taskCache.filter(t=>t.reference_stage||taskState(t)==='completed');for(const t of finished.slice(0,3)){const b=node('button',t.title,'download-task');b.onclick=()=>requestRoute('#'+t.id);b.append(node('small','打开结果与下载文件'));dl.append(b);}if(!finished.length)dl.append(node('p','结果文件会随任务保存在这里。','subtle'));}
 $('#go-home').onclick=e=>{e.preventDefault();requestRoute('#home');};
