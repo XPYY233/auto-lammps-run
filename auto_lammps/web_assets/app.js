@@ -1833,6 +1833,11 @@ function renderReferenceProgress(){
  }
  box.append(node('p','调度完成后还需核验输出和论文对比；此处不代表科学复现通过。','plot-caption'));
 }
+function taskTagSummary(value,unit=''){
+ const text=(researchText(value)+(unit?' '+researchText(unit):'')).replace(/\s+/g,' ').trim();
+ const characters=Array.from(text);
+ return characters.length>48?characters.slice(0,47).join('')+'…':text;
+}
 async function refreshWorkspace(){
  if(!current)return;
  const id=current.id, generation=++workspaceGeneration;
@@ -1855,7 +1860,16 @@ async function refreshWorkspace(){
  $('.discussion-panel').hidden=!r&&!normalResult?.evaluations?.some(e=>e.requests.some(q=>q.reports?.length));
  $('#task-tags').replaceChildren();
  if(r){$('#task-status').textContent='A 已结束 · B '+bState(r);$('#task-meta').textContent='文献复现验证 · '+r.scope;for(const label of (r.closeout?['作者原始流程','P–A–B 比较已保存',acceptanceLabel(r.closeout.acceptance)]:['作者原始流程','P–A 诊断已保存','科学结论待核验']))$('#task-tags').append(node('span',label,'tag'));}
- else{for(const key of ['material','temperature']){const f=current.fields[key],c=f?.candidates.find(c=>c.id===f.selected);if(c)$('#task-tags').append(node('span',researchText(c.value)+(c.unit?' '+c.unit:''),'tag'));}}
+ else{
+  let shortened=false;
+  for(const key of ['material','temperature']){
+   const f=current.fields[key],c=f?.candidates.find(c=>c.id===f.selected);
+   if(!c)continue;
+   const label=taskTagSummary(c.value,c.unit);if(!label)continue;
+   $('#task-tags').append(node('span',label,'tag'));shortened=shortened||label.endsWith('…');
+  }
+  if(shortened)$('#task-tags').append(node('small','完整内容见“查看你的完整研究需求”和“研究条件”。','subtle'));
+ }
  renderFlow(r);$('#task-information').replaceChildren();$('#task-files').replaceChildren();$('#task-resources').replaceChildren();
  addInfo('状态',r?'A 已结束，B '+bState(r):current.status==='conditions_frozen'?'条件已保存':'需求已保存');addInfo('记录更新',new Date(current.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}));
  if(r){addInfo('A 运行时长',duration(r.runtime.elapsed_seconds));addInfo('A 使用核数',String(r.runtime.cores));addInfo('A 提交次数',`${r.evaluation.dispatch_claims} 次（含失败）`);addInfo('B 提交次数',bCount(r));addInfo('A 本次核时',number(r.runtime.core_hours,3));addInfo('B 资源额度','用户未设上限');addInfo('A 作业号',r.job_id);reportDownloads(r,$('#task-files'));const a=node('a','论文与 DOI ↗','resource-link');a.href='https://doi.org/'+r.doi;a.target='_blank';a.rel='noopener noreferrer';a.append(node('small',r.title));$('#task-resources').append(a);}
@@ -2135,12 +2149,17 @@ for(const button of document.querySelectorAll('[data-resource-tab]'))button.prep
 let targetPreviewGeneration=0;
 function renderPaperEvidence(box,report){
  if(!report||report.task_id!==current?.id)return;
+ const identity=typeof report.manifest_sha256==='string'&&/^[a-f0-9]{64}$/.test(report.manifest_sha256)?report.task_id+':'+report.manifest_sha256:null;
+ const choice=renderPaperEvidence.selection;
+ const generation=renderPaperEvidence.generation=(renderPaperEvidence.generation||0)+1;
  const panel=node('section',undefined,'paper-workbench');
  panel.append(node('h2','文献工作台 · 论文结果 P'),node('h3',report.title));
  const doi=node('a','DOI '+report.doi);doi.href='https://doi.org/'+report.doi;doi.target='_blank';doi.rel='noopener noreferrer';panel.append(doi,node('p',report.source_note,'subtle'));
  panel.append(node('p','P 是论文原图与提取数值；A 是作者源码运行；B 是应用内 AI 独立计算。提取完成不等于计算或科学复现通过。','form-note'));
  const tabs=node('div',undefined,'evidence-view-tabs'),area=node('section',undefined,'paper-evidence-content');tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','切换论文图表');panel.append(tabs,area);
  const draw=view=>{
+  if(current?.id!==report.task_id||generation!==renderPaperEvidence.generation)return;
+  renderPaperEvidence.selection=identity?{identity,view_id:view.id}:null;
   area.replaceChildren();for(const b of tabs.children)b.setAttribute('aria-selected',String(b.dataset.view===view.id));
   area.append(node('h3',view.title),node('p',view.description));
   const images=node('div',undefined,'evidence-grid');
@@ -2153,7 +2172,8 @@ function renderPaperEvidence(box,report){
   for(const table of view.tables)tables.append(evidenceDataTable(table,'paper-evidence'));if(view.tables.length)area.append(tables);
  };
  for(const view of report.views){const b=node('button',view.title);b.dataset.view=view.id;b.setAttribute('role','tab');b.onclick=()=>draw(view);tabs.append(b);}
- if(report.views.length)draw(report.views[0]);
+ if(report.views.length)draw((identity&&choice?.identity===identity&&report.views.find(view=>view.id===choice.view_id))||report.views[0]);
+ else renderPaperEvidence.selection=null;
  const source=report.target_inventory;
  if(source){const list=node('details',undefined,'coverage-panel');list.append(node('summary',`查看 ${source.targets.length} 项图表的复现优先级、工况与缺项`));
   list.append(node('p',source.coverage_note));
@@ -2182,7 +2202,11 @@ function renderTargetPlanning() {
     box.append(node('p','这是普通研究 B 的运行页面；上方论文证据仅供人类对照，不进入 AI 方案生成。作者 A 与本页 B 分别记录，固定条件和原提交历史保留。','form-note'));return;
   }
   box.append(node('h2','先选复现目标'),node('p','逐项查看论文图表、工况与所需数据；同一工况的多个图表共用计算。'));
-  const source=current.target_inventory, frozen=current.status==='conditions_frozen';
+  const historical=current.status!=='conditions_frozen'&&(paper?.target_import_allowed===false||
+    (typeof referenceProgress!=='undefined'&&referenceProgress?.task_id===current.id&&referenceProgress.entries.some(e=>
+      !e.evaluation.available||e.evaluation.reserved_attempts>0||e.evaluation.dispatch_claims>0)));
+  const source=current.target_inventory, frozen=current.status==='conditions_frozen'||historical;
+  if(historical){const note='此任务已有作者计算记录或记录待核对。图表清单仅供事后查看，不能补写为事前目标；原作业与验收历史保留。';box.append(node('p',note,'form-note'));$('#freeze').disabled=true;$('#freeze-note').textContent=note;}
   if(!source){
     const audit=workspaceReport?.closeout;
     if(audit){
@@ -2192,7 +2216,7 @@ function renderTargetPlanning() {
       box.append(show,node('p','这是对已完成基准的补充审计；原 PAB 验收、提交次数和历史不变。','form-note'));
     }else if(paper){
       box.append(node('p',frozen?'P 已提取并显示；此历史任务没有事前图表计划，不能追写为事前冻结。':'P 已提取并显示。请查看工况、资源与缺项，再保存目标范围；未确定的比较标准仍需确认。','form-note'));
-      if(!frozen&&paper.target_inventory){const load=node('button','读取工作台图表清单并选择目标','primary');load.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/paper-evidence/import-targets`,{revision:current.revision});await afterChange('已读取登记的工作台清单；选择范围不会提交计算。');});box.append(load);}
+      if(!frozen&&paper.target_import_allowed===true&&paper.target_inventory){const load=node('button','读取工作台图表清单并选择目标','primary');load.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/paper-evidence/import-targets`,{revision:current.revision});await afterChange('已读取登记的工作台清单；选择范围不会提交计算。');});box.append(load);}
     }else box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'尚未接入文献工作台图表产物；这不表示正文不存在或不可复现。请先完成资源匹配与 P 提取接线。'));
     return;
   }
@@ -2213,7 +2237,7 @@ function renderTargetPlanning() {
     overview.replaceChildren(node('h3',`已选 ${state.selected_count} / ${state.total_count} 项 · ${state.groups.length} 个工况组`));
     for(const group of state.groups)overview.append(node('p',group.labels.join('、')+'：'+group.conditions.join('；'),'target-group'));
     if(state.blockers.length){const gaps=node('ul');for(const gap of state.blockers)gaps.append(node('li',gap.message));overview.append(node('strong','开始前还需处理'),gaps);}
-    const message=frozen?'范围已经固定，原始记录保留。':state.can_freeze?'范围已保存，条件和比较标准齐全，可以冻结。':!state.selection_saved?'当前选择尚未保存；保存后继续核对上述缺项。':'范围已保存，请先处理上述缺项。';
+    const message=historical?'这是已有计算后的清单查看，不能补作事前冻结。':frozen?'范围已经固定，原始记录保留。':state.can_freeze?'范围已保存，条件和比较标准齐全，可以冻结。':!state.selection_saved?'当前选择尚未保存；保存后继续核对上述缺项。':'范围已保存，请先处理上述缺项。';
     overview.append(node('p',message,'form-note'));
     if(!frozen){$('#freeze').disabled=!state.can_freeze;$('#freeze-note').textContent=message+' 冻结不会提交计算，也不表示科学通过。';}
   },error=>{overview.replaceChildren(node('p','暂未取得目标检查结果：'+error.message));if(!frozen)$('#freeze').disabled=true;});

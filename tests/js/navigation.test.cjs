@@ -46,9 +46,10 @@ test('stale task-open response cannot publish task content after a new navigatio
 });
 
 function element(tag){
- return {tagName:tag,children:[],textContent:'',hidden:false,disabled:false,value:'',dataset:{},
+ return {tagName:tag,children:[],textContent:'',hidden:false,disabled:false,value:'',dataset:{},attributes:{},
   append(...items){this.children.push(...items);},
-  replaceChildren(...items){this.children=[...items];this.textContent='';},setAttribute(){}};
+  replaceChildren(...items){this.children=[...items];this.textContent='';},
+  setAttribute(name,value){this.attributes[name]=String(value);},getAttribute(name){return this.attributes[name]??null;}};
 }
 function textContent(element){return [element.textContent,...element.children.map(child=>typeof child==='object'?textContent(child):child)].join(' ');}
 const OLD='a'.repeat(32),NEXT='b'.repeat(32);
@@ -285,4 +286,102 @@ test('a queued navigation still prevents the actual create handler from repainti
  resolve({...mutation,paper_evidence:paperFixture(NEXT)});await pending;
  assert.equal(c.current,mutation);assert.equal(c.$('#task-view').hidden,true);assert.equal(c.$('#target-planning').children[0],marker);
  assert.deepEqual(renders,[]);assert.deepEqual(refreshes,[]);assert.deepEqual(notices,[]);
+});
+
+function setupTaskTagWorkspace(fields){
+ const state=setupCandidateNavigation(),{c,calls}=state;
+ c.current={id:OLD,status:'draft',mode:'research',updated_at:'2026-01-01T00:00:00Z',fields,prompt:'Complete research request'};
+ c.workspaceState={task:OLD,phase:'ready',updated:null};c.resultTab='overview';
+ for(const name of ['renderRefreshStatus','renderTargetPlanning','renderFlow','addInfo','renderRawFiles','renderExecutionControls','renderReferenceProgress'])c[name]=()=>{};
+ c.currentRawFiles=()=>[];
+ const replies={
+  'reference-result':{report:null},execution:{job:null},'raw-files':{files:[]},
+  results:{evaluations:[]},'reference-progress':{task_id:OLD,entries:[]},
+ };
+ c.api=async(path,data)=>{calls.push({path,data});return replies[path.split('/').at(-1)];};
+ vm.runInContext(source.slice(source.indexOf('function researchText('),source.indexOf('function researchContent(')),c);
+ vm.runInContext(source.slice(source.indexOf('function taskTagSummary('),source.indexOf('function renderExecutionControls(){')),c);
+ return state;
+}
+function selectedCondition(value,unit=''){
+ return {selected:'selected',candidates:[{id:'selected',value,unit},{id:'not-selected',value:'Unselected evidence must stay out of tags',unit:''}]};
+}
+test('workspace tags bound long duplicated condition excerpts without changing the complete evidence or request',async()=>{
+ const excerpt='Synthetic research protocol\n  with full methods, conditions and source evidence. '.repeat(100);
+ const fields={material:selectedCondition(excerpt),temperature:selectedCondition(excerpt)},original=JSON.stringify(fields);
+ const {c,calls}=setupTaskTagWorkspace(fields);await c.refreshWorkspace();
+ const box=c.$('#task-tags'),tags=box.children.filter(item=>item.className==='tag');assert.equal(tags.length,2);
+ for(const tag of tags){assert.ok(Array.from(tag.textContent).length<=48);assert.match(tag.textContent,/…$/);assert.doesNotMatch(tag.textContent,/\n|\r|\t|Unselected evidence/);}
+ assert.match(textContent(box),/完整内容见“查看你的完整研究需求”和“研究条件”/);
+ assert.equal(JSON.stringify(c.current.fields),original);assert.equal(c.current.fields.material.candidates[0].value,excerpt);
+ assert.equal(c.current.prompt,'Complete research request');assert.equal(calls.length,5);assert.ok(calls.every(call=>call.data===undefined));
+});
+test('short condition tags keep readable values and units, while missing selections clear stale tags',async()=>{
+ const fields={material:selectedCondition('  Synthetic\n phase  '),temperature:selectedCondition('310','K')};
+ const {c}=setupTaskTagWorkspace(fields);await c.refreshWorkspace();
+ assert.deepEqual(c.$('#task-tags').children.map(item=>item.textContent),['Synthetic phase','310 K']);
+ fields.material.selected=null;fields.temperature.selected='absent';await c.refreshWorkspace();
+ assert.equal(c.$('#task-tags').children.length,0);
+ assert.equal(fields.material.candidates[0].value,'  Synthetic\n phase  ');
+});
+test('condition tag limits include a long unit and preserve Unicode characters at the truncation boundary',async()=>{
+ const fields={material:selectedCondition('🧪'.repeat(100)),temperature:selectedCondition('310','K\n Synthetic unit qualifier '.repeat(100))};
+ const original=JSON.stringify(fields),{c}=setupTaskTagWorkspace(fields);await c.refreshWorkspace();
+ const tags=c.$('#task-tags').children.filter(item=>item.className==='tag');assert.equal(tags.length,2);
+ for(const tag of tags){assert.ok(Array.from(tag.textContent).length<=48);assert.match(tag.textContent,/…$/);}
+ assert.ok(Array.from(tags[0].textContent).every(character=>character==='🧪'||character==='…'));
+ assert.match(tags[1].textContent,/^310 K Synthetic unit qualifier/);assert.doesNotMatch(tags[1].textContent,/\n/);
+ assert.equal(JSON.stringify(c.current.fields),original);
+});
+
+function selectablePaperFixture(taskId=OLD,manifest='a'.repeat(64)){
+ const report=paperFixture(taskId);report.manifest_sha256=manifest;
+ report.figures.push({name:'second.png',label:'Synthetic second figure',caption:'Synthetic second caption'});
+ report.views.push({id:'second',title:'Synthetic second view',description:'Another synthetic quantity',figures:[{name:'second.png'}],tables:[]});
+ return report;
+}
+function redrawPaper(state,report){
+ state.c.current={id:report.task_id,mode:'research',status:'draft',paper_evidence:report};state.c.render();
+ const box=state.c.$('#target-planning');
+ return {tabs:findElement(box,item=>item.className==='evidence-view-tabs'),area:findElement(box,item=>item.className==='paper-evidence-content')};
+}
+function assertSelectedPaper(view,id,filename,taskId=OLD){
+ assert.equal(view.tabs.children.find(tab=>tab.getAttribute('aria-selected')==='true').dataset.view,id);
+ assert.equal(view.tabs.children.filter(tab=>tab.getAttribute('aria-selected')==='true').length,1);
+ assert.equal(findElement(view.area,item=>item.tagName==='img').src,`/api/tasks/${taskId}/paper-evidence/files/${filename}`);
+}
+test('paper refresh keeps the selected figure for the same task and manifest, including reordered tabs',()=>{
+ const state=setupAfterChange(),report=selectablePaperFixture();let view=redrawPaper(state,report);
+ view.tabs.children[1].onclick();assertSelectedPaper(view,'second','second.png');
+ view=redrawPaper(state,structuredClone(report));assertSelectedPaper(view,'second','second.png');
+ const reordered=structuredClone(report);reordered.views.reverse();view=redrawPaper(state,reordered);
+ assertSelectedPaper(view,'second','second.png');assert.equal(state.calls.length,0);
+});
+test('another task with the same manifest and view IDs does not inherit the previous paper tab',()=>{
+ const state=setupAfterChange();let view=redrawPaper(state,selectablePaperFixture());view.tabs.children[1].onclick();
+ view=redrawPaper(state,selectablePaperFixture(NEXT));assertSelectedPaper(view,'figure1','fixture.png',NEXT);
+});
+test('a changed evidence manifest resets the paper tab even when its view IDs remain the same',()=>{
+ const state=setupAfterChange();let view=redrawPaper(state,selectablePaperFixture());view.tabs.children[1].onclick();
+ view=redrawPaper(state,selectablePaperFixture(OLD,'b'.repeat(64)));assertSelectedPaper(view,'figure1','fixture.png');
+});
+test('removed or empty paper views cannot keep a nonexistent selected tab',()=>{
+ const state=setupAfterChange(),report=selectablePaperFixture();let view=redrawPaper(state,report);view.tabs.children[1].onclick();
+ const reduced=structuredClone(report);reduced.views.pop();view=redrawPaper(state,reduced);assertSelectedPaper(view,'figure1','fixture.png');
+ const empty=structuredClone(report);empty.views=[];view=redrawPaper(state,empty);
+ assert.equal(view.tabs.children.length,0);assert.equal(findElement(view.area,item=>item.tagName==='img'),undefined);
+ view=redrawPaper(state,report);assertSelectedPaper(view,'figure1','fixture.png');
+});
+test('paper tab persistence requires an actual manifest identity and does not guess from its title or views',()=>{
+ for(const manifest of [undefined,'not-a-digest']){
+  const state=setupAfterChange(),report=selectablePaperFixture();report.manifest_sha256=manifest;
+  let view=redrawPaper(state,report);view.tabs.children[1].onclick();assertSelectedPaper(view,'second','second.png');
+  view=redrawPaper(state,structuredClone(report));assertSelectedPaper(view,'figure1','fixture.png');
+ }
+});
+test('a removed tab button cannot change the latest paper selection on the next refresh',()=>{
+ const state=setupAfterChange(),report=selectablePaperFixture();const old=redrawPaper(state,report),oldFirst=old.tabs.children[0];
+ let view=redrawPaper(state,structuredClone(report));view.tabs.children[1].onclick();assertSelectedPaper(view,'second','second.png');
+ oldFirst.onclick();assertSelectedPaper(view,'second','second.png');
+ view=redrawPaper(state,structuredClone(report));assertSelectedPaper(view,'second','second.png');
 });

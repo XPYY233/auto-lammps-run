@@ -90,12 +90,15 @@ class PaperEvidenceViews:
         if (not isinstance(priorities, dict) or set(priorities) - ids
                 or any(type(v) is not int or not 1 <= v <= 3 for v in priorities.values())):
             raise ResultUnavailable('Invalid target priorities')
+        linked = [e for e in paper['evaluations'] if e['task_id'] == identifier]
+        target_import_allowed = not any(not e['available'] or e.get('dispatch_claims', 0) > 0
+                                        or e.get('reserved_attempts', 0) > 0 for e in linked)
         public = dict(task_id=identifier, paper_id=paper['id'], title=paper['title'], doi=paper['doi'],
             source_sha256=source, source_note=text(document['source_note'], 4000),
             limitations=[text(v, 4000) for v in document['limitations']],
             figures=public_figures, files=public_files, views=views, target_inventory=source_inventory,
             priorities=priorities, scientific_status='not_evaluated', execution_authorized=False,
-            manifest_sha256=sha256(raw))
+            manifest_sha256=sha256(raw), target_import_allowed=target_import_allowed)
         return public, data
 
     def get(self, identifier):

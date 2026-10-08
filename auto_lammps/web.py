@@ -1213,15 +1213,26 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         require_open_task(identifier)
         return store.clear_initial_geometry(identifier, data.revision)
 
+    def require_reference_preregistration_open(identifier):
+        if papers is None:
+            return
+        progress = papers.reference_progress(identifier)
+        if not progress['available'] or any(e['evaluation'].get('reserved_attempts', 0) > 0
+                or e['evaluation'].get('dispatch_claims', 0) > 0 for e in progress['entries']):
+            raise TaskError('此任务已有作者计算预留或提交记录，或记录待核对；不能补作事前复现目标。')
+
     @app.post('/api/tasks/{identifier}/paper-evidence/import-targets')
     @serialized_task_action
     def import_workbench_targets(identifier: str, data: Revision):
         # Only the preconfigured, hash-checked adapter supplies content. Browser
         # input contains a revision, never an arbitrary inventory or local path.
         require_open_task(identifier)
+        require_reference_preregistration_open(identifier)
         report = paper_projection(identifier)
         if report is None or report['target_inventory'] is None:
             raise TaskError('尚无已登记的文献工作台目标清单。')
+        if not report['target_import_allowed']:
+            raise TaskError('此任务已有计算预留或提交记录，或记录暂不可核对；P 仅作事后展示，不能补作事前目标。')
         return store.import_target_inventory(identifier, data.revision, report['target_inventory'])
 
     @app.post('/api/tasks/{identifier}/targets/preview')
@@ -1235,10 +1246,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.post('/api/tasks/{identifier}/targets')
     def select_targets(identifier: str, data: TargetSelection):
+        require_reference_preregistration_open(identifier)
         return store.select_targets(identifier, data.revision, data.selected_ids, data.exclusion_reason)
 
     @app.post('/api/tasks/{identifier}/freeze')
     def freeze(identifier: str, data: Revision):
+        if store.get(identifier)['mode'] == 'reproduction':
+            require_reference_preregistration_open(identifier)
         return store.freeze(identifier, data.revision)
 
     @app.post('/api/tasks/{identifier}/generate-conditions')

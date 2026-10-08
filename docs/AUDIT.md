@@ -1973,3 +1973,26 @@ FeAl在原任务普通页面恢复后已真实调用首版，收到六项澄清�
 - 2026-10-08 workbench integration check: existing paper digitization preserves occluded/unreadable samples as empty CSV cells. The shared result preview previously required every selected cell to be nonempty; applying it unchanged to P would reject honest missing measurements. Corrective action: add an explicit paper-only allowance for empty preview cells, preserve blanks/status and full CSV, and retain strict behavior for existing calculation views. This is representation handling, not interpolation or a scientific pass.
 
 - 2026-10-08 installed browser acceptance exposed a real regression: creating a task's human-only paper-evidence subdirectory makes the legacy ReferenceViews parent directory exist, but there is no legacy report.json for that paper. ReferenceViews then raises FileNotFoundError, causing the page's joined workspace read to fail and hiding otherwise valid task information. Corrective action before retry: treat an absent legacy report as an absent optional reference report, while continuing to validate any present report and keeping the P reader independent. Add a regression for a P-only folder and re-install immutable source; no ledger or scientific status changes.
+
+- 2026-10-08 corrected-candidate installation failed with pip OSError errno 28 (No space left on device); local data volume had about 334 MiB free. This is local installer storage, not HPC capacity or simulation failure. The running candidate and all research/ledger data remain intact. Corrective action: preserve the failed installation log/receipt, remove only this turn's incomplete generated runtime and disposable pip download cache, then retry a fresh candidate directory; do not remove prior accepted runtimes, datasets, author sources or execution evidence. Verification pending successful installation and page check.
+
+- 2026-10-08 browser verification: an accessibility node became stale during the task's asynchronous workspace redraw immediately after reload. No click or compute action occurred. Corrective action: refresh the observed page state and use the visible tab's stable role/name locator for this redraw boundary; this is an automation targeting failure, not a simulation or user-data failure.
+
+- 2026-10-08 real user-page observation: task-tags repeats full condition-source paragraphs for material and temperature, filling the header with duplicate text and pushing evidence below multiple screens. Impact: the user cannot quickly locate P, A/B status or actions. Corrective action: show bounded generic condition summaries in header tags, preserving full prompts/conditions in their labeled details; worker owns only this rendering fragment and regression. No scientific condition is truncated in storage or model input.
+# 2026-10-08：页头摘要回归测试夹具缺少当前页签状态
+
+- 证据：页头条件摘要的新增导航测试首轮 71 项中 68 项通过，3 项在 VM 夹具中报 `ReferenceError: resultTab is not defined`；实际产品脚本存在该状态变量。
+- 影响与原因：新增测试未提供实际 `refreshWorkspace` 所依赖的页签状态，尚不能用此失败推断页面实现错误。
+- 纠正：仅补齐离线夹具，保留实际函数调用及 Unicode、长单位与完整条件不被改写的断言；不改方案计数或执行记录。
+- 验证：已记录后由实现者修复夹具并重新检查，结果待回报。
+# 2026-10-08：已运行参考的草稿不能补作事前目标；证据页签刷新丢失
+
+- 事实：作者参考曾从控制入口派发，而关联任务仍是草稿；新 P 桥接因此提供了“读取清单并选择目标”，有将事后整理冻结成事前标准的风险。P 展示本身不应受影响。
+- 纠正：已有参考派发声明的历史仅允许查看 P，不再由此入口补写事前目标；冻结/结束保护保持。保留既有费用、身份和真实科学范围。
+- 事实：同一 P 展示每次定时重绘默认选第一页签，会中断用户查看另一图及其数值表。
+- 纠正：页签选择绑定当前任务及实际证据版本，同版本刷新保留；跨任务或版本变化不能沿用其它论文页签。验证待窄实现、离线及安装页面复验。
+- 事后导入保护的第一次文本补丁因返回语句格式与实际源码不符而未应用；没有修改文件、记录或执行。随后读取实际片段再编辑，不放宽导入规则。
+- 新事后导入反例首次误用了不存在的 `PaperStore.bind_reference` 方法名，九个既有检查通过、该夹具未建立账本绑定；没有真实提交或产品记录改变。按实际参考绑定接口修正夹具后再验证。
+- 本轮后续验证：P-only 旧报告缺失修复已安装，真实页面的任务与参考信息恢复；页头摘要/证据页签回归及全部 116 项 JS 通过，事后导入保护 10 项 Python 通过。预留、未知派发与不可读账本均不能补作事前目标，P 查看/下载不受影响。
+- 磁盘纠正实录：未清理下载缓存或科研数据。先保留本轮安装失败记录，复用相同已核验依赖进行非 editable 应用升级；随后按用户新增清理授权核验并删除九个非活跃、源码已在远端 Git 留存的旧环境，44 份顶层私有安装/验收记录逐字节保存。实际腾出约 4.4 GiB（目录块计数的 6.49 GiB 估计不冒称实际释放量），当前运行、一个回退环境及桌面监督器解释器保留。
+- 独立窄审指出导入守卫尚未覆盖草稿已经有 inventory 的情况：A 开始后仍可从目标选择/冻结入口补作计划，页面也有“可保存”与“仅事后展示”文案矛盾。纠正：参考账本检查同时覆盖目标选择与复现冻结，历史清单保持只读，普通独立研究不因此增加论文门槛；补已存在清单、未知记录的 HTTP 拒绝反例。之前 1154/116 结果属于该扩展前截面，新增检查待完成。

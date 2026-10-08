@@ -17,6 +17,8 @@ from auto_lammps.operator_workspace import ReferenceViews
 from types import SimpleNamespace
 from test_tasks import target_inventory, evidence
 from test_web import ORIGIN, HEADERS
+from auto_lammps.ledger import Ledger
+from test_ledger import H1, H2, POLICY, RESOURCE
 
 
 class PaperEvidenceTests(unittest.TestCase):
@@ -105,6 +107,38 @@ class PaperEvidenceTests(unittest.TestCase):
                 json={'revision':other['revision']},headers=HEADERS)
             self.assertEqual(reply.status_code,422)
             self.assertEqual(self.store.get(other['id'])['revision'],other['revision'])
+
+    def test_reference_reservation_or_uncertain_dispatch_cannot_be_preregistered_afterward(self):
+        ledger=Ledger(Path(self.tmp.name).resolve()/'ledger.sqlite')
+        ledger.create_campaign('synthetic', POLICY); self.papers.ledger=ledger
+        evaluation=ledger.register_evaluation('synthetic',task_sha256=H1,repetition=0,role='reference',system_sha256=H2)
+        self.papers.bind_reference_evaluation(self.paper['id'],self.task['id'],evaluation)
+        self.assertTrue(self.views.get(self.task['id'])['target_import_allowed'])
+        # Existing inventories must not become retrospective preregistrations
+        # through the separate select/freeze endpoints either.
+        self.task=self.store.import_target_inventory(self.task['id'],self.task['revision'],self.document['target_inventory'])
+        row=ledger.reserve(evaluation,'synthetic',H2,RESOURCE)
+        for dispatch in (False, True):
+            if dispatch:
+                ledger.begin_dispatch(row['id']);ledger.uncertain(row['id'],{'synthetic':True})
+            report=self.views.get(self.task['id'])
+            self.assertFalse(report['target_import_allowed'])
+            reply=self.client.post('/api/tasks/'+self.task['id']+'/paper-evidence/import-targets',
+                json={'revision':self.task['revision']},headers=HEADERS)
+            self.assertEqual(reply.status_code,422)
+            select=self.client.post('/api/tasks/'+self.task['id']+'/targets',json={
+                'revision':self.task['revision'],'selected_ids':[self.document['target_inventory']['targets'][0]['id']],
+                'exclusion_reason':''},headers=HEADERS)
+            self.assertEqual(select.status_code,422)
+            freeze=self.client.post('/api/tasks/'+self.task['id']+'/freeze',
+                json={'revision':self.task['revision']},headers=HEADERS)
+            self.assertEqual(freeze.status_code,422)
+            self.assertEqual(self.store.get(self.task['id'])['revision'],self.task['revision'])
+            self.assertEqual(self.views.download(self.task['id'],'points.csv'),self.contents['points.csv'])
+        # Unreadable reference state remains a human-viewable P, not an excuse
+        # to label posthoc targets as a new preregistration.
+        self.papers.ledger=None
+        self.assertFalse(self.views.get(self.task['id'])['target_import_allowed'])
 
     def test_missing_P_cell_is_preserved_not_interpolated(self):
         content=b'x,y\n0,\n1,2\n'
