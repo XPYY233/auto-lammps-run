@@ -86,6 +86,35 @@ class WebWorkbenchTests(unittest.TestCase):
         response = self.client.get(self.base+'/export/item/11?source_sha256='+self.binding.pdf_sha256)
         self.assertEqual(response.status_code, 422)
 
+    def test_recovery_route_checks_source_and_never_accepts_native_tokens(self):
+        request=dict(request_id='c'*32,source_sha256=self.binding.pdf_sha256,
+                     resume_of='d'*32,job_token='forged-native-token')
+        self.assertEqual(self.client.post(self.base+'/extract',json=request,
+            headers=self.headers).status_code,422)
+        del request['job_token'];request['source_sha256']='f'*64
+        self.assertEqual(self.client.post(self.base+'/extract',json=request,
+            headers=self.headers).status_code,409)
+        request['source_sha256']=self.binding.pdf_sha256;request['resume_of']='invalid'
+        self.assertEqual(self.client.post(self.base+'/extract',json=request,
+            headers=self.headers).status_code,422)
+        self.assertEqual(self.outgoing,[])
+
+    def test_recovery_options_are_read_only_and_user_action_routes_bound_origin(self):
+        original='d'*32
+        self.bridge.recovery_options=lambda *args,**kwargs:[dict(
+            resume_of=original,enabled=True,reused_model_calls=24,reason='Saved stage')]
+        before=self.tasks.get(self.task['id'])
+        self.assertEqual(self.client.get(self.base).json()['recoveries'][0]['resume_of'],original)
+        received=[]
+        self.bridge.extract=lambda *args,**kwargs:received.append((args,kwargs)) or dict(state='failed')
+        request=dict(request_id='c'*32,source_sha256=self.binding.pdf_sha256,resume_of=original)
+        response=self.client.post(self.base+'/extract',json=request,headers=self.headers)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(received[0][1]['resume_of'],original)
+        self.assertFalse(received[0][1]['force_rescan'])
+        self.assertEqual(self.tasks.get(self.task['id']),before)
+        self.assertEqual(self.outgoing,[])
+
 
 if __name__=='__main__':
     unittest.main()

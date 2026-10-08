@@ -246,6 +246,7 @@ class WorkbenchExtractionInput(Input):
     source_sha256: str
     force_rescan: bool = False
     repair_visuals: bool = False
+    resume_of: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
@@ -310,10 +311,21 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             except (TaskError, ValueError, OSError):
                 enabled = False
                 reason = '工作台全文来源尚未通过核验；既有 P/A 记录仍可查看。'
+        recoveries = []
+        if enabled:
+            try:
+                client = connections.client('deepseek-official', calls=model_client.calls)
+                with store.transaction() as db:
+                    revision = db.execute('SELECT COUNT(*) FROM connection_events WHERE provider=?',
+                        ('deepseek-official',)).fetchone()[0]
+                recoveries = workbench_bridge.recovery_options(identifier, binding, client,
+                    connection_revision=max(1, revision), credential_generation=max(1, revision))
+            except (TaskError, ValueError, OSError):
+                recoveries = []
         return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
             source_sha256=binding.pdf_sha256 if binding else None,
             messages=workbench_bridge.history(identifier) if workbench_bridge and binding else [],
-            evidence=evidence,
+            evidence=evidence, recoveries=recoveries,
             execution_authorized=False)
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
@@ -1000,6 +1012,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 ('deepseek-official',)).fetchone()[0]
         return workbench_bridge.extract(identifier, data.request_id, binding, client,
             force_rescan=data.force_rescan, repair_visuals=data.repair_visuals,
+            resume_of=data.resume_of,
             connection_revision=max(1, revision), credential_generation=max(1, revision))
 
     @app.get('/api/tasks/{identifier}/workbench/images/{entity_uid}')

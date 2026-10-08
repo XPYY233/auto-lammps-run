@@ -6,7 +6,7 @@ of those operations is copied here. The controller supplies trusted paper
 bindings and persistent workbench services; the browser supplies neither PDFs,
 credentials nor independent-calculation conditions.
 """
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import importlib
 import json
@@ -21,7 +21,7 @@ from .manifest import canonical, sha256
 from .papers import doi_text
 from .runtime_launcher import read_regular
 from .tasks import TaskError, task_id
-from .workbench_adapter import WorkbenchAdapterError, WorkbenchScientificAdapter
+from .workbench_adapter import WorkbenchAdapterError, WorkbenchScientificAdapter, native_digest
 
 
 HUMAN_ROLE = 'paper_reference_human_only'
@@ -63,6 +63,33 @@ class WorkbenchPaperBinding:
 
 
 @dataclass(frozen=True)
+class WorkbenchRecoveryBinding:
+    """Controller-only migration of a verified legacy continuation identity.
+
+    Both dependency digests are explicit: a reviewed local codec repair may
+    change the installed implementation without rewriting the old receipt.
+    This type is never accepted from a renderer or included in a public view.
+    """
+    request_id: str
+    job_token: str
+    intent_sha256: str
+    receipt_sha256: str
+    model_ledger_sha256: str
+    model_policy_sha256: str
+    prior_native_capability_sha256: str
+    native_capability_sha256: str
+
+    def __post_init__(self):
+        task_id(self.request_id)
+        if (not isinstance(self.job_token, str) or not 1 <= len(self.job_token) <= 256
+                or any(ord(c) < 33 or ord(c) > 126 for c in self.job_token)):
+            raise TaskError('工作台恢复身份无效。')
+        for key, value in asdict(self).items():
+            if key not in {'request_id', 'job_token'}:
+                _digest(value)
+
+
+@dataclass(frozen=True)
 class WorkbenchRuntime:
     database: object
     jobs: object
@@ -77,6 +104,8 @@ class WorkbenchRuntime:
     visual_image: object = None
     native_capability_reader: object = None
     native_stage_reader: object = None
+    native_recovery_reader: object = None
+    native_source_reader: object = None
 
 
 def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
@@ -105,6 +134,8 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
         visuals = load('evidence.visual_evidence')
         workflow = load('evidence.literature_extraction_checkpoint_workflow')
         stages = load('evidence.literature_extraction_stages')
+        execution = load('evidence.literature_checkpoint_runtime')
+        context = load('evidence.context_chat')
         snapshots = job.LiteraturePDFSnapshotAuthority(blob_store=snapshot_blobs)
         if snapshots.persistent is not True:
             raise ValueError('persistent snapshots required')
@@ -129,17 +160,29 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'model_stages': sorted(job.MODEL_STAGES),
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
-                    for module in (job, business, workflow, stages, persistence, finalizer)}}
+                    for module in (job, business, workflow, stages, persistence, finalizer, context)}}
         def native_stage(token):
             state = persistence.decode_job_private_state(jobs.export_private_state(token, session_id=session_id))
             return {'paper_id': state.paper_id, 'paper': dict(state.paper),
                 'pdf_sha256': state.snapshot['pdf_sha256'], 'stage': state.stage,
                 'runtime_task': workflow._runtime_task}
+        def native_recovery(token):
+            # Public load on the existing sealed authority is read-only.
+            # recover_job_state would normalize a lease or unknown call and
+            # therefore must not be used by the browser's status endpoint.
+            checkpoint = checkpoint_runtime._service.load(workflow._checkpoint_task_id(token))
+            state = execution.decode_execution_state(checkpoint.private_payload)
+            return {'checkpoint': checkpoint, 'execution': state,
+                'job': persistence.decode_job_private_state(state.job_state)}
+        def native_source(paper_id):
+            source = database.get_paper(paper_id)
+            return context._read_stable_pdf_snapshot(str(source['pdf_path'])).sha256
         return WorkbenchRuntime(database, jobs, ports, session_id,
             prepared.PreparedOutbound, budget.LiteratureDerivedBudgetBusinessAIClient,
             persistence.decode_job_private_state, exports,
             six.list_current_data, visuals.list_visual_assets,
-            visuals.visual_asset_image_path, native_capabilities, native_stage)
+            visuals.visual_asset_image_path, native_capabilities, native_stage,
+            native_recovery, native_source)
     except (ImportError, AttributeError, TypeError, ValueError):
         raise TaskError('本机文献工作台依赖或持久服务尚未接好，未开始提取。') from None
 
@@ -225,15 +268,31 @@ class WorkbenchModelClient:
 
 
 class WorkbenchExtractionBridge:
-    def __init__(self, papers, runtime):
+    def __init__(self, papers, runtime, *, recoveries=()):
         self.papers, self.runtime = papers, runtime
+        self.recoveries = {}
+        for binding in recoveries:
+            if (not isinstance(binding, WorkbenchRecoveryBinding)
+                    or binding.request_id in self.recoveries):
+                raise TaskError('受信工作台恢复登记无效或重复。')
+            self.recoveries[binding.request_id] = binding
+        if len({b.job_token for b in self.recoveries.values()}) != len(self.recoveries):
+            raise TaskError('受信工作台恢复登记重复使用原生任务。')
         with papers.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS workbench_extraction_intents ('
                 'id TEXT PRIMARY KEY, task_id TEXT NOT NULL, paper_id TEXT NOT NULL, '
                 'binding_sha256 TEXT NOT NULL, document TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS workbench_extraction_receipts ('
                 'id TEXT PRIMARY KEY REFERENCES workbench_extraction_intents(id), document TEXT NOT NULL)')
-            for table in ('workbench_extraction_intents', 'workbench_extraction_receipts'):
+            db.execute('CREATE TABLE IF NOT EXISTS workbench_extraction_continuations ('
+                'id TEXT PRIMARY KEY REFERENCES workbench_extraction_intents(id), '
+                'document TEXT NOT NULL, document_sha256 TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS workbench_extraction_recoveries ('
+                'id TEXT PRIMARY KEY REFERENCES workbench_extraction_intents(id), '
+                'source_request_id TEXT NOT NULL UNIQUE REFERENCES workbench_extraction_intents(id), '
+                'document TEXT NOT NULL)')
+            for table in ('workbench_extraction_intents', 'workbench_extraction_receipts',
+                    'workbench_extraction_continuations', 'workbench_extraction_recoveries'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} '
                         f'BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT, \'immutable workbench history\'); END')
@@ -267,15 +326,269 @@ class WorkbenchExtractionBridge:
         return [json.loads(row['receipt']) if row['receipt'] else
             {**json.loads(row['intent']), 'state': 'unknown', 'automatic_retry': False} for row in rows]
 
+    @staticmethod
+    def _request(db, request_id):
+        row = db.execute('SELECT i.document intent, i.binding_sha256, r.document receipt '
+            'FROM workbench_extraction_intents i LEFT JOIN workbench_extraction_receipts r '
+            'ON r.id=i.id WHERE i.id=?', (request_id,)).fetchone()
+        if not row or not row['receipt']:
+            raise TaskError('原提取状态未知；请先核对，不能恢复收费。')
+        intent, receipt = json.loads(row['intent']), json.loads(row['receipt'])
+        if (sha256(canonical(intent)) != row['binding_sha256']
+                or any(receipt.get(k) != v for k, v in intent.items())
+                or intent.get('request_id') != request_id):
+            raise TaskError('原文献提取身份或回执摘要不一致，不能恢复。')
+        return intent, receipt
+
+    @staticmethod
+    def _model_binding(client):
+        if not isinstance(client, DeepSeekClient):
+            raise TaskError('文献提取需要本项目已配置并记账的 DeepSeek 连接。')
+        return {'model_ledger_sha256': sha256(str(client.calls.path.resolve()).encode()),
+            'model_policy_sha256': sha256(canonical(asdict(client.calls.config)))}
+
+    def _continuation(self, db, request_id):
+        row = db.execute('SELECT document, document_sha256 '
+            'FROM workbench_extraction_continuations WHERE id=?', (request_id,)).fetchone()
+        if row:
+            data = json.loads(row['document'])
+            if (sha256(canonical(data)) != row['document_sha256']
+                    or data.get('request_id') != request_id):
+                raise TaskError('原生工作台恢复绑定摘要不一致，不能恢复。')
+            return data
+        return None
+
+    def _recovery_context(self, identifier, request_id, binding, client, *,
+                          connection_revision, credential_generation):
+        """Validate private history against the original sealed native state.
+
+        No starter, preflight, lease acquisition or provider is invoked here.
+        The native runner alone replays its successful prefix during execute.
+        """
+        task_id(request_id)
+        paper = self._paper(identifier, binding)
+        try:
+            if (not callable(self.runtime.native_source_reader)
+                    or self.runtime.native_source_reader(binding.workbench_paper_id) != binding.pdf_sha256):
+                raise ValueError('source changed')
+        except Exception:
+            raise TaskError('原 PDF 字节或受信来源读取已变化；未恢复或收费。') from None
+        model_binding = self._model_binding(client)
+        identity = dict(task_id=identifier, paper_id=paper['id'], title=paper['title'],
+            doi=paper['doi'], role=HUMAN_ROLE, source_sha256=binding.pdf_sha256,
+            model=client.model, connection_revision=connection_revision,
+            credential_generation=credential_generation)
+        with self.papers.tasks.transaction() as db:
+            original, failure = self._request(db, request_id)
+            if db.execute("SELECT 1 FROM task_lifecycle WHERE task_id=? AND action IN ('delete','finish')",
+                    (identifier,)).fetchone():
+                raise TaskError('任务已结束，不能恢复文献提取。')
+            if (failure.get('state') != 'failed'
+                    or any(original.get(k) != v for k, v in identity.items())):
+                raise TaskError('只能恢复同一任务、论文、PDF 和模型连接的已核定失败。')
+            if db.execute('SELECT 1 FROM workbench_extraction_recoveries '
+                    'WHERE source_request_id=?', (request_id,)).fetchone():
+                raise TaskError('原提取已发起恢复；请查看该恢复记录，不能重复收费。')
+            continuation = self._continuation(db, request_id)
+            trusted = self.recoveries.get(request_id)
+            if not continuation and not trusted:
+                raise TaskError('缺少受信的原生工作台恢复绑定；未重新提取或收费。')
+            if trusted:
+                if (trusted.intent_sha256 != sha256(canonical(original))
+                        or trusted.receipt_sha256 != sha256(canonical(failure))
+                        or any(getattr(trusted, k) != v for k, v in model_binding.items())
+                        or (continuation and (continuation['job_token'] != trusted.job_token
+                            or continuation['native_capability_sha256'] !=
+                                trusted.prior_native_capability_sha256))):
+                    raise TaskError('受信恢复登记与原失败、模型账本或原生身份不一致。')
+                token = trusted.job_token
+                expected_native = trusted.native_capability_sha256
+            else:
+                if (continuation['intent_sha256'] != sha256(canonical(original))
+                        or any(continuation.get(k) != v for k, v in model_binding.items())
+                        or continuation.get('workbench_paper_id') != binding.workbench_paper_id
+                        or continuation.get('source_sha256') != binding.pdf_sha256
+                        or continuation.get('session_sha256') != sha256(self.runtime.session_id.encode())):
+                    raise TaskError('原生工作台恢复绑定与当前来源或连接不一致。')
+                token = continuation['job_token']
+                expected_native = continuation['native_capability_sha256']
+            # A recovery is a new append-only action. Walk the same token's
+            # history to account for every successful call, including earlier
+            # explicitly authorized recoveries, without copying target data.
+            lineage, seen = [], set()
+            cursor = request_id
+            while cursor is not None:
+                if cursor in seen:
+                    raise TaskError('工作台恢复历史不完整，不能恢复。')
+                seen.add(cursor)
+                old_intent, old_receipt = self._request(db, cursor)
+                old_continuation = self._continuation(db, cursor)
+                old_trusted = self.recoveries.get(cursor)
+                if (old_receipt.get('state') != 'failed'
+                        or any(old_intent.get(k) != v for k, v in identity.items())):
+                    raise TaskError('工作台恢复历史属于其他来源或未知调用。')
+                old_native = (old_continuation['native_capability_sha256'] if old_continuation
+                    else old_trusted.prior_native_capability_sha256 if old_trusted else None)
+                if old_native is None or (old_continuation and old_continuation['job_token'] != token):
+                    raise TaskError('工作台恢复历史缺少受信的原生绑定。')
+                lineage.append((old_intent, old_receipt, old_native))
+                cursor = old_intent.get('resume_of')
+            unknown = db.execute('SELECT i.id, i.document intent, r.document receipt '
+                'FROM workbench_extraction_intents i LEFT JOIN workbench_extraction_receipts r '
+                'ON r.id=i.id WHERE i.paper_id=?', (paper['id'],)).fetchall()
+            for row in unknown:
+                if json.loads(row['intent']).get('source_sha256') == binding.pdf_sha256:
+                    receipt = json.loads(row['receipt']) if row['receipt'] else None
+                    if receipt is None or receipt.get('state') in {'unknown', 'failed_or_unknown'}:
+                        raise TaskError('同一 PDF 有未知提取状态；请先核对，不能恢复收费。')
+        native_adapter = WorkbenchScientificAdapter({
+            **{k: identity[k] for k in ('task_id', 'paper_id', 'title', 'doi', 'role', 'source_sha256')},
+            'request_id': request_id, 'workbench_paper_id': binding.workbench_paper_id},
+            capability_reader=self.runtime.native_capability_reader,
+            stage_reader=lambda: None)
+        current_native = sha256(canonical(native_adapter.installed))
+        if current_native != expected_native:
+            raise TaskError('工作台依赖版本已变化；须受信登记修复版本后才能恢复。')
+        if not callable(self.runtime.native_recovery_reader):
+            raise TaskError('工作台密封检查点读取接口未接好，不能恢复。')
+        try:
+            native = self.runtime.native_recovery_reader(token)
+            checkpoint, execution, job = native['checkpoint'], native['execution'], native['job']
+            manifest = checkpoint.manifest
+            if (job.token != token or job.paper_id != binding.workbench_paper_id
+                    or dict(job.paper) != {'title': paper['title'], 'doi': paper['doi']}
+                    or job.snapshot['pdf_sha256'] != binding.pdf_sha256
+                    or manifest.pdf_snapshot_fingerprint != job.snapshot['content_fingerprint']
+                    or manifest.task_id != 'literature_' + sha256(token.encode())
+                    or manifest.session_digest != sha256(self.runtime.session_id.encode())
+                    or manifest.provider_id != 'deepseek'
+                    or manifest.runtime_revision != connection_revision
+                    or manifest.credential_generation != credential_generation
+                    or tuple(manifest.task_models) != (('analysis', client.model), ('extraction', client.model))
+                    or manifest.executor_id != native_adapter.installed['executor']['id']
+                    or manifest.executor_version != native_adapter.installed['executor']['version']
+                    or checkpoint.state in {'completed', 'outcome_unknown', 'cancelled'}
+                    or manifest.expires_at <= time.time()
+                    or any(r.state not in {'succeeded', 'planned'} for r in checkpoint.receipts)):
+                raise ValueError('native recovery identity')
+            ledger = []
+            for old_intent, old_receipt, old_native in reversed(lineage):
+                call_ids = old_receipt['model_request_ids']
+                if not isinstance(call_ids, list) or len(set(call_ids)) != len(call_ids):
+                    raise ValueError('ledger history')
+                base = {k: old_intent[k] for k in ('task_id', 'paper_id', 'role', 'source_sha256', 'request_id')}
+                proof_identity = {**base, 'title': paper['title'], 'doi': paper['doi'],
+                    'workbench_paper_id': binding.workbench_paper_id}
+                for ordinal, call_id in enumerate(call_ids, 1):
+                    if call_id != sha256(canonical({**base, 'ordinal': ordinal}))[:32]:
+                        raise ValueError('foreign call')
+                    record = client.calls.lookup(call_id)
+                    receipt = record['receipt'] if record else None
+                    proof = receipt.get('scientific_adapter', {}) if receipt else {}
+                    if (not receipt or receipt.get('state') != 'completed'
+                            or receipt.get('provider') != 'deepseek'
+                            or receipt.get('requested_model') != client.model
+                            or receipt.get('purpose') != 'literature_workbench_extraction'
+                            or receipt.get('role') != HUMAN_ROLE
+                            or receipt.get('transport_attempts') != 1
+                            or receipt.get('request_sha256') != record['request_sha256']
+                            or receipt.get('output_sha256') != sha256(canonical(receipt['structured_output']))
+                            or proof.get('name') != 'literature_workbench_scientific_adapter'
+                            or proof.get('adapter_source_sha256') != native_adapter.adapter_sha256
+                            or proof.get('identity') != proof_identity
+                            or proof.get('native_contract_sha256') != old_native
+                            or sha256(canonical(proof.get('native_capabilities'))) != old_native):
+                        raise ValueError('unverified ledger')
+                    ledger.append(receipt)
+            succeeded = [r for r in checkpoint.receipts if r.state == 'succeeded']
+            if len(ledger) != len(succeeded) or checkpoint.spent_calls != len(ledger):
+                raise ValueError('unreconciled calls')
+            for receipt, native_receipt in zip(ledger, succeeded):
+                proof = receipt['scientific_adapter']
+                if (proof['native_call_digest'] != native_receipt.call_digest
+                        or proof['stage'] != native_receipt.stage
+                        or receipt['task'] != native_receipt.task
+                        or native_receipt.model != client.model
+                        or native_digest(receipt['structured_output']) != native_receipt.result_digest):
+                    raise ValueError('checkpoint call mismatch')
+            offset = execution.receipt_offset
+            relevant = checkpoint.receipts[offset:]
+            prefix = execution.completed_results
+            stage = job.stage
+            if (not 0 <= offset <= len(succeeded)
+                    or execution.stage_fingerprint != stage['stage_fingerprint']
+                    or checkpoint.stage != stage['name']
+                    or len(prefix) != sum(r.state == 'succeeded' for r in relevant)
+                    or len(prefix) > len(stage['calls'])):
+                raise ValueError('native prefix')
+            for index, result in enumerate(prefix):
+                if (relevant[index].state != 'succeeded'
+                        or native_digest(result) != relevant[index].result_digest
+                        or stage['calls'][index]['call_digest'] != relevant[index].call_digest):
+                    raise ValueError('native prefix mismatch')
+        except Exception:
+            raise TaskError('原失败、成功调用账本与密封检查点未完全核对；未恢复或收费。') from None
+        return {'job_token': token, 'reused_model_calls': len(ledger),
+            'prefix_count': len(prefix), 'stage_fingerprint': execution.stage_fingerprint,
+            'native_capability_sha256': current_native,
+            'prior_native_capability_sha256': lineage[0][2],
+            'intent_sha256': sha256(canonical(original)),
+            'receipt_sha256': sha256(canonical(failure)),
+            'checkpoint_revision': checkpoint.revision}
+
+    def recovery_options(self, identifier, binding, client, *, connection_revision,
+                         credential_generation):
+        """Human status view; private tokens and source data never leave it."""
+        options = []
+        for receipt in self.history(identifier):
+            if receipt.get('state') not in {'failed', 'failed_or_unknown', 'unknown'}:
+                continue
+            option = {'resume_of': receipt['request_id'], 'enabled': False,
+                'reused_model_calls': 0, 'reason': '原提取状态未知；请先核对，不能恢复收费。'}
+            try:
+                context = self._recovery_context(identifier, receipt['request_id'], binding, client,
+                    connection_revision=connection_revision, credential_generation=credential_generation)
+                option.update(enabled=True, reused_model_calls=context['reused_model_calls'],
+                    reason='复用已成功调用；只对后续阶段新增记账，原失败记录保留。')
+            except TaskError as exc:
+                option['reason'] = str(exc)
+            options.append(option)
+        return options
+
+    def _continuation_document(self, request_id, intent, binding, client, token, capability_digest):
+        return {'version': 1, 'request_id': request_id, 'job_token': token,
+            'intent_sha256': sha256(canonical(intent)), **self._model_binding(client),
+            'workbench_paper_id': binding.workbench_paper_id, 'source_sha256': binding.pdf_sha256,
+            'session_sha256': sha256(self.runtime.session_id.encode()),
+            'native_capability_sha256': capability_digest}
+
+    def _save_continuation(self, request_id, intent, binding, client, token, adapter):
+        document = self._continuation_document(request_id, intent, binding, client, token,
+            sha256(canonical(adapter.installed)))
+        with self.papers.tasks.transaction() as db:
+            prior = self._continuation(db, request_id)
+            if prior is not None:
+                if canonical(prior) != canonical(document):
+                    raise TaskError('已登记的恢复绑定与工作台当前准备不一致，未发送。')
+                return
+            db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
+                (request_id, canonical(document).decode(), sha256(canonical(document))))
+
     def extract(self, identifier, request_id, binding, client, *, force_rescan=False,
-                repair_visuals=False, connection_revision, credential_generation):
+                repair_visuals=False, resume_of=None, connection_revision, credential_generation):
         """Controller-authorized user click; no B fields are accepted or read."""
         task_id(request_id)
         if (type(force_rescan) is not bool or type(repair_visuals) is not bool
                 or (force_rescan and repair_visuals)
+                or (resume_of is not None and (force_rescan or repair_visuals))
                 or type(connection_revision) is not int or connection_revision < 0
                 or type(credential_generation) is not int or credential_generation < 0):
             raise TaskError('文献提取选项或模型连接身份无效。')
+        if resume_of is not None:
+            task_id(resume_of)
+            if resume_of == request_id:
+                raise TaskError('恢复须使用新的请求编号，并保留原提取记录。')
+        self._model_binding(client)
         paper = self._paper(identifier, binding)
         intent = dict(request_id=request_id, task_id=identifier, paper_id=paper['id'],
             title=paper['title'], doi=paper['doi'], role=HUMAN_ROLE,
@@ -284,6 +597,8 @@ class WorkbenchExtractionBridge:
             force_rescan=force_rescan, repair_visuals=repair_visuals,
             scientific_status='not_evaluated', execution_authorized=False,
             automatic_retry=False)
+        if resume_of is not None:
+            intent['resume_of'] = resume_of
         binding_hash = sha256(canonical(intent))
         with self.papers.tasks.transaction() as db:
             prior = db.execute('SELECT i.binding_sha256, i.document intent, r.document receipt '
@@ -295,6 +610,22 @@ class WorkbenchExtractionBridge:
                     raise TaskError('提取请求编号已用于其他来源或模型配置。')
                 return json.loads(prior['receipt']) if prior['receipt'] else {
                     **json.loads(prior['intent']), 'state': 'unknown', 'automatic_retry': False}
+        recovery = self._recovery_context(identifier, resume_of, binding, client,
+            connection_revision=connection_revision, credential_generation=credential_generation
+            ) if resume_of is not None else None
+        with self.papers.tasks.transaction() as db:
+            # Recheck under the write lock after validating the sealed state.
+            prior = db.execute('SELECT i.binding_sha256, i.document intent, r.document receipt '
+                'FROM workbench_extraction_intents i LEFT JOIN workbench_extraction_receipts r '
+                'ON r.id=i.id WHERE i.id=?', (request_id,)).fetchone()
+            if prior:
+                if prior['binding_sha256'] != binding_hash:
+                    raise TaskError('提取请求编号已用于其他来源或模型配置。')
+                return json.loads(prior['receipt']) if prior['receipt'] else {
+                    **json.loads(prior['intent']), 'state': 'unknown', 'automatic_retry': False}
+            if recovery and db.execute('SELECT 1 FROM workbench_extraction_recoveries '
+                    'WHERE source_request_id=?', (resume_of,)).fetchone():
+                raise TaskError('原提取已发起恢复；不能重复收费。')
             same_source = db.execute('SELECT i.document intent, r.document receipt '
                 'FROM workbench_extraction_intents i LEFT JOIN workbench_extraction_receipts r '
                 'ON r.id=i.id WHERE i.paper_id=?', (paper['id'],)).fetchall()
@@ -305,7 +636,7 @@ class WorkbenchExtractionBridge:
                 old = json.loads(row['receipt']) if row['receipt'] else None
                 if old is None or old['state'] in {'unknown', 'failed_or_unknown'}:
                     raise TaskError('同一 PDF 的先前提取状态未知；请先核对，不能换请求编号再次收费。')
-                if (not force_rescan and not repair_visuals and (old['state'] in
+                if (not recovery and not force_rescan and not repair_visuals and (old['state'] in
                         {'completed', 'completed_with_limitations', 'no_evidence_published'}
                         or old.get('model_request_ids'))):
                     raise TaskError('这份 PDF 已有提取记录；请查看现有证据，重扫须明确发起。')
@@ -314,17 +645,35 @@ class WorkbenchExtractionBridge:
                 raise TaskError('任务已结束，不能开始新的文献提取。')
             db.execute('INSERT INTO workbench_extraction_intents VALUES (?,?,?,?,?)',
                 (request_id, identifier, paper['id'], binding_hash, canonical(intent).decode()))
+            if recovery:
+                db.execute('INSERT INTO workbench_extraction_recoveries VALUES (?,?,?)',
+                    (request_id, resume_of, canonical({k: v for k, v in recovery.items()
+                        if k != 'job_token'}).decode()))
+                # Persist the already-authenticated token in the same commit
+                # as consent. A free preflight/assembly failure must still be
+                # recoverable through this new failed action, never lock the
+                # source behind a consumed parent without a continuation.
+                continuation = self._continuation_document(request_id, intent, binding,
+                    client, recovery['job_token'], recovery['native_capability_sha256'])
+                db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
+                    (request_id, canonical(continuation).decode(), sha256(canonical(continuation))))
         adapter = WorkbenchModelClient(client, task=identifier, paper=paper['id'],
             source_sha256=binding.pdf_sha256, request_id=request_id)
         result = {**intent, 'state': 'failed', 'model_request_ids': []}
+        if recovery:
+            result.update(reused_model_calls=recovery['reused_model_calls'],
+                further_model_calls_accounted=True)
         try:
-            request = dict(paper_id=binding.workbench_paper_id, force_rescan=force_rescan)
+            request = ({'job_token': recovery['job_token']} if recovery else
+                dict(paper_id=binding.workbench_paper_id, force_rescan=force_rescan))
             if repair_visuals:
                 request['repair_visuals'] = True
             ports, jobs = self.runtime.ports, self.runtime.jobs
             ports.assembler.preflight(request)
             draft = ports.assembler.assemble(request)
             token = draft.outbound['job_handle']
+            if recovery and token != recovery['job_token']:
+                raise TaskError('工作台返回了其他原生任务，未恢复或收费。')
             decoded = self.runtime.decode_job_state(jobs.export_private_state(
                 token, session_id=self.runtime.session_id))
             if decoded.snapshot.get('pdf_sha256') != binding.pdf_sha256:
@@ -335,6 +684,17 @@ class WorkbenchExtractionBridge:
                 capability_reader=self.runtime.native_capability_reader,
                 stage_reader=(lambda: self.runtime.native_stage_reader(token))
                     if callable(self.runtime.native_stage_reader) else None)
+            self._save_continuation(request_id, intent, binding, client, token, adapter.adapter)
+            if recovery:
+                if (decoded.stage['stage_fingerprint'] != recovery['stage_fingerprint']
+                        or draft.outbound['stage_fingerprint'] != recovery['stage_fingerprint']):
+                    raise TaskError('工作台内存阶段与密封检查点不一致；须重新启动持久服务后恢复。')
+                # The upstream budget client consumes sealed results itself;
+                # advance only our mandatory adapter's call-position tracker.
+                adapter.adapter.positions[recovery['stage_fingerprint']] = recovery['prefix_count']
+            fresh = getattr(jobs, 'assert_source_fresh', None)
+            if callable(fresh):
+                fresh(token, session_id=self.runtime.session_id)
             models = (('analysis', client.model), ('extraction', client.model))
             outbound = {'payload': dict(draft.outbound),
                 'call_plan': [call.canonical_dict() for call in draft.call_plan]}
@@ -387,6 +747,8 @@ class WorkbenchExtractionBridge:
             if isinstance(exc, WorkbenchAdapterError):
                 result['error'] = str(exc)
         result['model_request_ids'] = list(adapter.requests)
+        if recovery:
+            result['new_model_calls'] = len(adapter.requests)
         if result['state'] == 'failed':
             receipts = [client.calls.lookup(r) for r in adapter.requests]
             if any(not r or not r.get('receipt') or r['receipt'].get('state') == 'unknown'

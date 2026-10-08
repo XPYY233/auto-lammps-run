@@ -2442,20 +2442,28 @@ function appendWorkbenchEntry(box){
    run.onclick=()=>action(async()=>{
     if(!active()||pending||pendingRequest||latestRecord!==record)return;
     const request={request_id:crypto.randomUUID().replaceAll('-',''),source_sha256:record.source_sha256};
-    pending=true;run.disabled=true;pendingRequest=request;draw(record);
-    try{const reply=await api(`/api/tasks/${id}/workbench/extract`,{...pendingRequest,...options});if(terminal.includes(reply.state))pendingRequest=null;}
+    pending=true;run.disabled=true;pendingRequest={...request,...options};draw(record);
+    try{const reply=await api(`/api/tasks/${id}/workbench/extract`,pendingRequest);if(terminal.includes(reply.state))pendingRequest=null;}
     finally{pending=false;if(active())await entry.loadWorkbench();}
    });
   };
   if(record.enabled&&!uncertain){
-   if(!saved)runButton('让应用 AI 提取并核验论文',{},'primary');
+   const resumable=(record.recoveries||[]).filter(item=>item.enabled===true&&/^[a-f0-9]{32}$/.test(item.resume_of));
+   if(resumable.length){
+    for(const recovery of resumable){
+     content.append(node('p',`可复用原请求已成功的 ${recovery.reused_model_calls} 次答复；后续尚未完成的核验会调用模型并记账。原失败与费用保留。`,'form-note'));
+     if(recovery.reason)content.append(node('p',recovery.reason,'form-note'));
+     runButton('从已保存的阶段继续核验',{resume_of:recovery.resume_of},'primary');
+    }
+   }
+   else if(!saved)runButton('让应用 AI 提取并核验论文',{},'primary');
    else{
     content.append(node('p','重新扫描或修复图表会新增模型调用并记账；已有证据、请求和费用保留。','form-note'));
     runButton('重新扫描全文（新增模型调用）',{force_rescan:true});
     if((record.messages||[]).some(message=>['completed_with_limitations','no_evidence_published'].includes(message.state)||message.visual_evidence_ready===false))runButton('修复图表提取（新增模型调用）',{repair_visuals:true});
    }
   }
-  if(pending){const progress=node('p','应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
+  if(pending){const progress=node('p',pendingRequest?.resume_of?'应用 AI 正从保存阶段继续核验，成功答复不会重新收费。可以关闭浏览器后再查看记录；不会提交 HPC。':'应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
   if(uncertain)content.append(node('p','已有请求尚未得到终态；先核对原回执，不能换编号自动重提。','form-note'));
   const refresh=node('button','查看提取进度与已保存数据','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
   const evidence=record.evidence;if(!evidence)return;

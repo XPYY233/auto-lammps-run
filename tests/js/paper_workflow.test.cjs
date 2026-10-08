@@ -238,3 +238,26 @@ test('enabled freeze uses the existing revision endpoint; disabled historical fr
  const s=setup(),w=workflow();w.actions=[{id:'freeze_targets',label:'确认范围',enabled:true,method:'POST',endpoint:`/api/tasks/${TASK}/freeze`}];publish(s,w);const run=find(s.box(),node=>node.tag==='button'&&node.textContent==='确认范围').onclick();await flush();assert.equal(s.pending[0].path,`/api/tasks/${TASK}/freeze`);assert.equal(s.pending[0].data.revision,1);s.pending[0].resolve({...s.c.current,status:'conditions_frozen',revision:2});await run;assert.equal(s.c.current.revision,2);assert.equal(s.calls.length,1);
  w.actions[0].enabled=false;w.actions[0].disabled_reason='已有运行，不能补作事前冻结';publish(s,w);assert.equal(find(s.box(),node=>node.tag==='button'&&node.textContent==='确认范围'),undefined);assert.match(text(s.box()),/不能补作事前冻结/);
 });
+
+
+test('saved workbench recovery reuses the original request without force rescan or native token',async()=>{
+ const s=setup();publish(s);const original='d'.repeat(32);
+ const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:original,model_request_ids:['native-call']}],recoveries:[{resume_of:original,enabled:true,reused_model_calls:24,reason:'Resume authenticated checkpoint'}]}));
+ assert.match(text(entry),/24 次答复/);assert.match(text(entry),/后续尚未完成/);
+ assert.equal(find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）'),undefined);
+ const button=find(entry,n=>n.textContent==='从已保存的阶段继续核验');const request=button.onclick();await flush();
+ assert.equal(s.pending[1].data.resume_of,original);assert.equal(s.pending[1].data.source_sha256,SHA);
+ assert.equal(s.pending[1].data.force_rescan,undefined);assert.equal(s.pending[1].data.job_token,undefined);
+ assert.match(text(entry),/正从保存阶段继续/);assert.equal(button.disabled,true);
+ s.pending[1].resolve({state:'completed'});await flush();s.pending[2].resolve(workbenchRecord({messages:[{state:'failed',request_id:original},{state:'completed',request_id:'e'.repeat(32)}]}));await request;
+ assert.match(text(entry),/已提取并保存/);assert.match(text(entry),/提取未完成/);
+});
+test('uncertain workbench receipt blocks a recovery even when a stale option is present',async()=>{
+ const s=setup();publish(s);const original='d'.repeat(32);
+ const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'unknown',request_id:original}],recoveries:[{resume_of:original,enabled:true,reused_model_calls:24}]}));
+ assert.equal(find(entry,n=>n.textContent==='从已保存的阶段继续核验'),undefined);assert.match(text(entry),/先核对原回执/);assert.equal(s.calls.length,1);
+});
+test('disabled or invalid workbench recovery options never create native continuation requests',async()=>{
+ const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:'d'.repeat(32),model_request_ids:['native-call']}],recoveries:[{resume_of:'d'.repeat(32),enabled:false,reused_model_calls:24},{resume_of:'untrusted-native-token',enabled:true,reused_model_calls:24}]}));
+ assert.equal(find(entry,n=>n.textContent==='从已保存的阶段继续核验'),undefined);assert.equal(s.calls.length,1);
+});

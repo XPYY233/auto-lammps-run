@@ -12,7 +12,7 @@ import stat
 from .manifest import canonical, sha256
 from .runtime_launcher import ExecutionDenied, absolute, directory, read_regular
 from .tasks import TaskError
-from .workbench_bridge import (WorkbenchExtractionBridge, WorkbenchPaperBinding,
+from .workbench_bridge import (WorkbenchExtractionBridge, WorkbenchPaperBinding, WorkbenchRecoveryBinding,
     installed_workbench_runtime)
 
 
@@ -107,7 +107,9 @@ def assemble_private_workbench(papers, config_path):
 
     Exact schema: version=1, private_root=existing absolute owner-only directory,
     session_id=stable opaque identity, bindings=[{paper_id,workbench_paper_id,
-    pdf_sha256}]. An empty binding list permits controller-only PDF registration
+    pdf_sha256}], optional recoveries=[WorkbenchRecoveryBinding fields]. The
+    latter is controller-only evidence for a legacy job or reviewed dependency
+    repair, never a browser-supplied token. An empty binding list permits controller-only PDF registration
     into ``bridge.runtime.database`` before saving actual mappings. Registered
     title/DOI/PDF SHA are checked by the bridge for each human task operation.
 
@@ -119,14 +121,22 @@ def assemble_private_workbench(papers, config_path):
     """
     try:
         config = _json(read_regular(absolute(str(config_path)), 65536, private=True))
-        if (not isinstance(config, dict) or set(config) !=
-                {'version', 'private_root', 'session_id', 'bindings'}
+        if (not isinstance(config, dict) or set(config) not in (
+                {'version', 'private_root', 'session_id', 'bindings'},
+                {'version', 'private_root', 'session_id', 'bindings', 'recoveries'})
                 or type(config['version']) is not int or config['version'] != 1
                 or not isinstance(config['private_root'], str)
                 or not isinstance(config['session_id'], str)
                 or not 1 <= len(config['session_id']) <= 256
                 or any(ord(c) < 33 or ord(c) > 126 for c in config['session_id'])
                 or not isinstance(config['bindings'], list) or len(config['bindings']) > 1000):
+            raise _denied()
+        recoveries = config.get('recoveries', [])
+        if not isinstance(recoveries, list) or len(recoveries) > 1000:
+            raise _denied()
+        recoveries = [WorkbenchRecoveryBinding(**item) for item in recoveries]
+        if (len({r.request_id for r in recoveries}) != len(recoveries)
+                or len({r.job_token for r in recoveries}) != len(recoveries)):
             raise _denied()
         bindings = {}
         for item in config['bindings']:
@@ -184,7 +194,7 @@ def assemble_private_workbench(papers, config_path):
         checkpoints = checkpoint_type(service_type(store=store))
         runtime = installed_workbench_runtime(database=database, snapshot_blobs=blobs,
             checkpoint_runtime=checkpoints, session_id=config['session_id'])
-        return WorkbenchExtractionBridge(papers, runtime), bindings
+        return WorkbenchExtractionBridge(papers, runtime, recoveries=recoveries), bindings
     except WorkbenchRuntimeError:
         raise
     except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError,
