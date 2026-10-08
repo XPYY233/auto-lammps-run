@@ -48,6 +48,8 @@ test('verified numeric source without a frozen plot can be drawn in the app from
  assert.match(flat(box),/等间隔抽样的 3 行预览/);
  assert.match(flat(box),/下载当前图表 SVG/);
  assert.equal(find(box,'a')[0].download,'auto-lammps-result-plot.svg');
+ assert.match(flat(box),/下载完整绘图数据 CSV/);
+ assert.match(find(box,'a')[1].href,/\/api\/tasks\/task\/results\/plot\/chart-data\?file=values.dat&x=step&y=energy/);
  assert.match(flat(find(box,'metadata')[0]),/"source_file":"values.dat"/);
  assert.match(flat(find(box,'metadata')[0]),/"sampled":true/);
  const axes=find(box,'select').slice(1);assert.equal(axes.length,2);

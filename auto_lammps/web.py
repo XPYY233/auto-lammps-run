@@ -804,6 +804,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
             return JSONResponse({'detail':'原始数据或来源核验未通过，未展示数据与图表。'},status_code=409)
 
+    @app.get('/api/tasks/{identifier}/results/{analysis_id}/chart-data')
+    def task_chart_data(identifier: str, analysis_id: str, file: str, x: str, y: str):
+        store.get(identifier)
+        if results_reader is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:value=results_reader.chart_data(identifier,analysis_id,file,x,y)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'数值表或来源核验未通过，未提供派生数据。'},status_code=409)
+        return Response(value['csv'],media_type='text/csv',headers={
+            'Content-Disposition':'attachment; filename="result-chart-data.csv"',
+            'X-Source-SHA256':value['source_sha256'], 'X-Data-SHA256':value['csv_sha256']})
+
     @app.get('/api/tasks/{identifier}/results/{analysis_id}/download')
     def task_report(identifier: str, analysis_id: str):
         store.get(identifier)

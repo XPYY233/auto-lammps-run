@@ -515,6 +515,45 @@ class ResultsReader:
             value.update(site_thermodynamic_results=verified['site_thermodynamic_results'],site_previews=previews)
         return value
 
+    def chart_data(self, identifier, analysis_id, name, x, y):
+        """Return a bounded, complete two-column view of one verified numeric source.
+
+        This is presentation data after the frozen report, never a new fit or
+        scientific verdict. The source receipt and bytes are checked again.
+        """
+        from .analysis import MAX_TABLE_BYTES, parse_table
+        verified,report,ticket,inventory=self._verified_sources(identifier,analysis_id)
+        source=next((item for item in report['sources'] if item['file']==name),None)
+        public=next((item for item in verified['sources'] if item['file']==name),None)
+        if source is None or public is None or source.get('format') is not None:
+            raise ResultUnavailable('Only declared numeric tables can be redrawn')
+        columns=source['columns']
+        names=[column['name'] for column in columns]
+        if not isinstance(x,str) or not isinstance(y,str) or x==y or x not in names or y not in names:
+            raise ResultUnavailable('Choose two distinct declared numeric columns')
+        item=inventory.get('output/'+name)
+        if (item is None or item['sha256']!=source['sha256'] or item['size']!=source['size']
+                or item['size']>MAX_TABLE_BYTES):
+            raise ResultUnavailable('Numeric source differs from collected receipt')
+        data=runtime.read_regular(self.collections/ticket/'payload'/'output'/name,item['size'])
+        if len(data)!=item['size'] or sha256(data)!=item['sha256']:
+            raise ResultUnavailable('Numeric source bytes changed')
+        rows=parse_table(data,{'file':name,'columns':columns})
+        xi,yi=names.index(x),names.index(y)
+        buffer=io.StringIO(newline='')
+        writer=csv.writer(buffer,lineterminator='\n')
+        writer.writerow(['source_line',x,y])
+        for line,values in rows:
+            writer.writerow([line,repr(values[xi]),repr(values[yi])])
+        raw=buffer.getvalue().encode('utf-8')
+        if len(raw)>MAX_TABLE_BYTES:raise ResultUnavailable('Redrawn data exceeds storage limit')
+        indices=sorted({round(i*(len(rows)-1)/127) for i in range(min(128,len(rows)))}) if len(rows)>128 else range(len(rows))
+        return dict(analysis_id=analysis_id,file=name,source_sha256=source['sha256'],
+            x=x,y=y,x_unit=columns[xi]['unit'],y_unit=columns[yi]['unit'],
+            rows=len(rows),sampled=len(rows)>128,
+            preview=[[rows[i][1][xi],rows[i][1][yi]] for i in indices],
+            csv_sha256=sha256(raw),csv_size=len(raw),csv=raw)
+
     def derived(self, identifier, analysis_id, name):
         """Complete task-scoped CSV bytes from one saved, accounted receipt only."""
         from . import site_thermodynamics as site

@@ -79,6 +79,29 @@ class ResultsTests(unittest.TestCase):
                 self.assertNotIn(hidden,download.text)
         self.assertEqual(before,self.fixture.ledger.events(self.fixture.request_id))
 
+    def test_complete_chart_data_uses_verified_numeric_source_and_units(self):
+        saved=self.analysis.run_analysis()
+        analysis_id=saved['context']['analysis_id']
+        table=self.reader.tables(self.doc['id'],analysis_id)['tables'][0]
+        x,y=(column['name'] for column in table['columns'][:2])
+        chart=self.reader.chart_data(self.doc['id'],analysis_id,table['file'],x,y)
+        self.assertEqual((chart['x'],chart['y'],chart['rows']),(x,y,table['total_rows']))
+        self.assertEqual((chart['x_unit'],chart['y_unit']),tuple(column['unit'] for column in table['columns'][:2]))
+        self.assertEqual(chart['csv_sha256'],sha256(chart['csv']))
+        self.assertEqual(len(chart['preview']),table['total_rows'])
+        before=self.fixture.ledger.events(self.fixture.request_id)
+        response=self.client.get(self.url+'/'+analysis_id+'/chart-data',params={'file':table['file'],'x':x,'y':y})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.content,chart['csv'])
+        self.assertEqual(response.headers['x-source-sha256'],chart['source_sha256'])
+        self.assertEqual(response.headers['x-data-sha256'],chart['csv_sha256'])
+        self.assertEqual(before,self.fixture.ledger.events(self.fixture.request_id))
+        with self.assertRaises(ValueError):
+            self.reader.chart_data(self.doc['id'],analysis_id,table['file'],x,x)
+        with self.assertRaises(ValueError):
+            self.reader.chart_data(self.doc['id'],analysis_id,'unknown.dat',x,y)
+        self.assertEqual(self.client.get(self.url+'/'+analysis_id+'/chart-data',params={'file':table['file'],'x':x,'y':x}).status_code,409)
+
     def test_persistence_reopens_and_reference_roles_never_enter_product_view(self):
         self.analysis.run_analysis()
         ledger=self.fixture.ledger
@@ -99,6 +122,8 @@ class ResultsTests(unittest.TestCase):
         url='/api/tasks/'+other['id']+'/results'
         self.assertEqual(self.client.get(url).json()['evaluations'],[])
         self.assertEqual(self.client.get(url+'/'+saved['context']['analysis_id']+'/download').status_code,409)
+        self.assertEqual(self.client.get(url+'/'+saved['context']['analysis_id']+'/chart-data',
+            params={'file':'curve.dat','x':'strain','y':'stress'}).status_code,409)
         self.assertEqual(self.client.get('/api/tasks/'+'f'*32+'/results').status_code,404)
 
     def test_changed_report_or_collection_receipt_hides_values(self):

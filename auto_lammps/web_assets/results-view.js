@@ -41,7 +41,7 @@ function numericTableColumns(table){
   return (table.columns||[]).map((column,index)=>({column,index})).filter(({index})=>
     table.rows.every(row=>Array.isArray(row)&&Number.isFinite(row[index])));
 }
-function customPreviewPlot(table,identity){
+function customPreviewPlot(table,identity,taskId,analysisId){
   const numeric=numericTableColumns(table),box=node('article',undefined,'result-widget');
   box.append(node('h4',`自选图表 · ${table.file}`),node('p','选择横轴和纵轴；图只使用下方已核验的数值数据。','form-note'));
   if(numeric.length<2){box.append(node('p','该数据表没有足够的数值列，无法绘制二维图。','form-note'));return box;}
@@ -67,8 +67,10 @@ function customPreviewPlot(table,identity){
     download.href='#';download.onclick=()=>{
       download.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));
     };
-    area.append(svg,download,
-      node('p',`${table.total_rows} 行来源数据；当前图显示${table.sampled?'等间隔抽样的 '+table.rows.length+' 行预览':'全部 '+table.rows.length+' 行'}。这只是重新绘图，没有生成新的计算或统计结论；完整数据可从下载区获取。`,'plot-caption'));
+    const dataDownload=node('a','下载完整绘图数据 CSV','quiet');
+    dataDownload.href=`/api/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(analysisId)}/chart-data?file=${encodeURIComponent(table.file)}&x=${encodeURIComponent(x)}&y=${encodeURIComponent(y)}`;
+    area.append(svg,download,dataDownload,
+      node('p',`${table.total_rows} 行来源数据；当前图显示${table.sampled?'等间隔抽样的 '+table.rows.length+' 行预览':'全部 '+table.rows.length+' 行'}。CSV 含全部已核验行与来源行号；这只是重新绘图，没有生成新的计算或统计结论。`,'plot-caption'));
   };
   const changed=()=>{selectedResultAxes.set(identity,{x:Number(axis.x.value),y:Number(axis.y.value)});draw();};
   axis.x.onchange=changed;axis.y.onchange=changed;draw();return box;
@@ -179,7 +181,7 @@ function renderOrdinaryResults(box){
       const remembered=selectedResultPlots.get(plotIdentity);
       select.value=options.some(option=>option.value===remembered)?remembered:options[0].value;
       label.append(select);area.append(label);const chart=node('article',undefined,'result-widget');area.append(chart);
-      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.table){chart.append(customPreviewPlot(selected.table,plotIdentity+':'+selected.table.file+':'+selected.table.sha256));return;}if(selected.site){chart.append(siteCurvePlot(selected.site,sitePreviews.find(p=>p.id===selected.site.id)?.curves),siteDownloads(selected.site,current.id,report.id));return;}if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};
+      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.table){chart.append(customPreviewPlot(selected.table,plotIdentity+':'+selected.table.file+':'+selected.table.sha256,current.id,report.id));return;}if(selected.site){chart.append(siteCurvePlot(selected.site,sitePreviews.find(p=>p.id===selected.site.id)?.curves),siteDownloads(selected.site,current.id,report.id));return;}if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};
       select.onchange=()=>{selectedResultPlots.set(plotIdentity,select.value);draw();};draw();
     }
   }
