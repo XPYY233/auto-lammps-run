@@ -88,6 +88,8 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual((chart['x'],chart['y'],chart['rows']),(x,y,table['total_rows']))
         self.assertEqual((chart['x_unit'],chart['y_unit']),tuple(column['unit'] for column in table['columns'][:2]))
         self.assertEqual(chart['csv_sha256'],sha256(chart['csv']))
+        self.assertEqual(chart['csv'].decode().splitlines()[0],
+            f"source_line,{x} ({chart['x_unit']}),{y} ({chart['y_unit']})")
         self.assertEqual(len(chart['preview']),table['total_rows'])
         before=self.fixture.ledger.events(self.fixture.request_id)
         response=self.client.get(self.url+'/'+analysis_id+'/chart-data',params={'file':table['file'],'x':x,'y':y})

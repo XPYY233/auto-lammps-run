@@ -542,7 +542,7 @@ class ResultsReader:
         xi,yi=names.index(x),names.index(y)
         buffer=io.StringIO(newline='')
         writer=csv.writer(buffer,lineterminator='\n')
-        writer.writerow(['source_line',x,y])
+        writer.writerow(['source_line',f"{x} ({columns[xi]['unit']})",f"{y} ({columns[yi]['unit']})"])
         for line,values in rows:
             writer.writerow([line,repr(values[xi]),repr(values[yi])])
         raw=buffer.getvalue().encode('utf-8')

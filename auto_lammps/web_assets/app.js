@@ -2337,7 +2337,38 @@ function renderPlotGallery(report,box){
  const controls=node('div',undefined,'chart-toolbar'),label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择图表');for(const [key,value] of Object.entries(options))select.append(new Option(value,key));select.value=selectedPlot;label.append(select);controls.append(label);box.append(controls);const area=node('div',undefined,'chart-area');box.append(area);
  const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
 }
-async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；发送后会保留问题、答复与模型用量。助手只解读已有结果，不能提交新的计算或执行任意分析代码。':'请先在“设置 → 模型 API”中保存当前所选模型的密钥和模型 ID；保存后即可在这里提问。';const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;}
+function renderAICharts(items,taskId){
+ const box=$('#discussion-charts');box.replaceChildren();if(!items.length)return;
+ box.append(node('h3','AI 绘图请求与结果'));
+ for(const item of items){
+  const row=node('article',undefined,'result-widget');row.append(node('h4',item.question));
+  const chart=item.chart;
+  if(item.state!=='completed'||!chart){row.append(node('p',item.state==='source_unavailable'?'来源数据暂未通过核验，图与下载已隐藏。':chart?.message||'这次选图未完成；请求记录已保留，没有自动重发。','form-note'));box.append(row);continue;}
+  const table={columns:[{name:chart.x,unit:chart.x_unit},{name:chart.y,unit:chart.y_unit}],rows:chart.preview};
+  const xs=chart.preview.map(values=>values[0]);
+  const svg=numericalPlot(table,{method:'raw_preview',x:chart.x,y:chart.y,window:[Math.min(...xs),Math.max(...xs)],values:{}});
+  const metadata=document.createElementNS('http://www.w3.org/2000/svg','metadata');
+  metadata.textContent=JSON.stringify({task_id:taskId,analysis_id:chart.analysis_id,source_file:chart.file,
+    source_sha256:chart.source_sha256,data_sha256:chart.csv_sha256,x:chart.x,y:chart.y,
+    total_rows:chart.rows,plotted_rows:chart.preview.length,sampled:chart.sampled});svg.append(metadata);
+  const csv=node('a','下载完整数据 CSV','quiet');csv.href=`/api/tasks/${encodeURIComponent(taskId)}/charts/${encodeURIComponent(item.id)}/download`;
+  const svgLink=node('a','下载图表 SVG','quiet');svgLink.download='auto-lammps-ai-chart.svg';svgLink.href='#';
+  svgLink.onclick=()=>{svgLink.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));};
+  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部行'}。横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。仅重绘已有结果，科学结论尚待核验。`,'plot-caption'));
+  box.append(row);
+ }
+}
+async function refreshDiscussion(){
+ if(!current)return;const id=current.id;
+ const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;
+ const box=$('#discussion-history');box.replaceChildren();
+ for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}
+ $('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；问题、答复与模型用量会保留。需要绘图时点“让 AI 生成数据图”。':'请先在“设置 → 模型 API”中保存当前所选模型的密钥和模型 ID；保存后即可在这里提问。';
+ const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;
+ const chartButton=$('#discussion-ai-chart');chartButton.disabled=!result.enabled||result.provider!=='deepseek-official';
+ try{const charts=await api(`/api/tasks/${id}/charts`);if(current?.id===id)renderAICharts(charts.charts||[],id);}
+ catch{if(current?.id===id)$('#discussion-charts').replaceChildren(node('p','已保存的数据图暂不可读取，请稍后刷新。','form-note'));}
+}
 $('#discussion-open-plots').onclick=()=>{
  if(!current)return;
  resultTab='plots';
@@ -2345,6 +2376,19 @@ $('#discussion-open-plots').onclick=()=>{
  renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});
 };
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
+let chartRequest=null;
+$('#discussion-ai-chart').onclick=()=>action(async()=>{
+ if(!current)return;const id=current.id,question=$('#discussion-prompt').value.trim();
+ if(!question||question.length>1000){$('#discussion-status').textContent='请用 1000 字以内描述要绘制的图。';return;}
+ if(!chartRequest||chartRequest.task!==id||chartRequest.question!==question)chartRequest={id:crypto.randomUUID().replaceAll('-',''),task:id,question};
+ $('#discussion-status').textContent='应用内 AI 正在从已核验数据选择图表…';
+ try{const result=await api(`/api/tasks/${id}/charts`,{request_id:chartRequest.id,provider:'deepseek-official',question});
+  if(current?.id!==id)return;
+  if(result.state==='completed'){$('#discussion-prompt').value='';chartRequest=null;}
+  await refreshDiscussion();
+  $('#discussion-status').textContent=result.state==='completed'?'数据图已生成，完整 CSV 和 SVG 可在上方下载。':result.chart?.message||'这次选图未完成；请求记录已保留。';
+ }catch(error){if(current?.id===id)$('#discussion-status').textContent=error.message;throw error;}
+});
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
 
 function uiIcon(name){

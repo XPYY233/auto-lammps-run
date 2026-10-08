@@ -28,6 +28,7 @@ from .results import ResultsReader
 from .operator_workspace import ModelPreferences, ReferenceViews
 from .paper_evidence import PaperEvidenceViews
 from .model_connections import ModelConnections
+from .result_charts import ResultCharts
 from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
@@ -208,6 +209,11 @@ class DiscussionInput(ProviderInput):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class ChartInput(ProviderInput):
+    request_id: str = Field(min_length=32, max_length=32)
+    question: str = Field(min_length=1, max_length=1000)
+
+
 class HPCInput(Input):
     connection_id: str | None = None
     as_new: bool = False
@@ -263,6 +269,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         raise ValueError('Results must belong to the same task store')
     if results_reader and collections_directory is not None and Path(collections_directory).absolute()!=results_reader.collections:
         raise ValueError('Raw downloads and results must share the same collection directory')
+    charts = ResultCharts(store,connections,results_reader) if results_reader is not None else None
     raw_outputs = RawOutputs(store,papers,
         collections=results_reader.collections if results_reader else collections_directory,
         ledger=results_reader.ledger if results_reader else None)
@@ -521,6 +528,26 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             context['frozen_scientific_conditions']=conditions
             context['condition_record_sha256']=document['record_sha256']
         return connections.discuss(identifier, data.request_id, data.provider, data.question, context)
+
+    @app.get('/api/tasks/{identifier}/charts')
+    def chart_history(identifier: str):
+        store.get(identifier)
+        return {'charts': charts.history(identifier) if charts else [], 'configured': charts is not None}
+
+    @app.post('/api/tasks/{identifier}/charts')
+    def create_chart(identifier: str, data: ChartInput):
+        if charts is None:raise TaskError('结果服务尚未配置，无法生成数据图。')
+        return charts.create(identifier,data.request_id,data.provider,data.question)
+
+    @app.get('/api/tasks/{identifier}/charts/{request_id}/download')
+    def download_chart(identifier: str, request_id: str):
+        if charts is None:return JSONResponse({'detail':'结果服务尚未配置。'},status_code=404)
+        try:raw,chart=charts.download(identifier,request_id)
+        except (TaskError,ValueError,KeyError,TypeError,OSError,RuntimeError):
+            return JSONResponse({'detail':'绘图数据或来源未通过核验，未提供下载。'},status_code=409)
+        return Response(raw,media_type='text/csv',headers={
+            'Content-Disposition':'attachment; filename="ai-chart-data.csv"',
+            'X-Source-SHA256':chart['source_sha256'],'X-Data-SHA256':chart['csv_sha256']})
 
     @app.get('/api/tasks/{identifier}/reference-result')
     def reference_result(identifier: str):
