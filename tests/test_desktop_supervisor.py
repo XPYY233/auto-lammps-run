@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -125,6 +127,38 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(self.receipt()['reason'], 'page_closed')
         self.assertFalse(self.receipt()['stopped'])
         self.assertFalse(browser.called)  # --no-browser keeps the test headless
+
+    def test_close_leaves_an_isolated_real_service_process_alive(self):
+        """A real local listener must outlive the entry when the page closes."""
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        code = ('from http.server import BaseHTTPRequestHandler, HTTPServer; '
+                'import sys; HTTPServer(("127.0.0.1", int(sys.argv[1])), BaseHTTPRequestHandler).serve_forever()')
+        service = subprocess.Popen([sys.executable, '-c', code, str(port)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (service.terminate(), service.wait(timeout=5)) if service.poll() is None else None)
+        for _ in range(100):
+            if supervisor.port_listening(port):
+                break
+            time.sleep(0.02)
+        self.assertTrue(supervisor.port_listening(port))
+        config={'port':port,'state_directory':str(self.state),'args':[],'release':'synthetic-test'}
+        first=iter([{'sessions': {'tok': {'at': time.time(), 'hidden': False}}}])
+        closed={'sessions': {}, 'closed_session': 'tok'}
+        with mock.patch.object(supervisor.launch_local, 'read_config', return_value=config), \
+             mock.patch.object(supervisor.launch_local, 'launch',
+                               return_value={'started':True,'url':f'http://127.0.0.1:{port}/#home'}), \
+             mock.patch.object(supervisor, 'activity_enabled', return_value={'enabled':True}), \
+             mock.patch.object(supervisor, 'read_activity', side_effect=lambda _: next(first, closed)), \
+             mock.patch.object(supervisor, 'stop_service') as stopper:
+            result=supervisor.supervise(self.args(no_browser=True))
+        self.assertEqual(result,0)
+        self.assertEqual(self.receipt()['reason'],'page_closed')
+        stopper.assert_not_called()
+        self.assertIsNone(service.poll())
+        self.assertTrue(supervisor.port_listening(port))
 
     def test_started_service_is_stopped_when_the_page_never_connects(self):
         code, launch, browser = self.run_supervise(started=True, activity={'sessions': {}})

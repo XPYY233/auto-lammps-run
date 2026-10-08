@@ -103,6 +103,8 @@ async function openTask(id) {
   $('#task-quick-note').textContent='';
   $('#plan-review-panel').hidden=true;
   $('#ai-activity').replaceChildren();$('#discussion-history').replaceChildren();
+  const discussionSubmit=$('#discussion-form button[type=submit]');
+  if(discussionSubmit)discussionSubmit.disabled=true;
   let task;
   try { task=await api('/api/tasks/'+id); }
   catch(error) {
@@ -127,14 +129,19 @@ async function openTask(id) {
   $('#results-content').replaceChildren();
   $('#results-status').textContent='正在读取记录…';
   window.scrollTo({top:0});
-  await listTasks();
-  await renderHistory();
-  await refreshCandidate(); await refreshGuidance(); await refreshPlanReview();
-  await refreshActivity();
-  await refreshResults();
-  await refreshReferenceHistory();
-  await refreshWorkspace();
-  await refreshDiscussion();
+  const reads=[
+    ['任务列表',listTasks],['修订记录',renderHistory],['方案准备',refreshCandidate],
+    ['补充要求',refreshGuidance],['方案审核',refreshPlanReview],['AI 进度',refreshActivity],
+    ['计算历史',refreshResults],['文献记录',refreshReferenceHistory],
+    ['数据与图表',refreshWorkspace],['结果讨论',refreshDiscussion],
+  ];
+  const failures=[];
+  for(const [label,read] of reads){
+    if(current?.id!==id||pendingRoute!==null||generation!==openTask.generation)return;
+    try{await read();}catch(error){failures.push(label);}
+  }
+  if(current?.id===id&&pendingRoute===null&&generation===openTask.generation&&failures.length)
+    notice('部分记录暂未读取：'+failures.join('、')+'。已显示可读取的内容；点击任务顶部“刷新状态”重试。',true);
 }
 function showNew(){requestRoute('#new');}
 async function renderNew() {
@@ -882,12 +889,25 @@ function renderNextAction(){
       note.textContent=`应用正在后台跟进${job.job_id?'作业 '+job.job_id:'提交'}；可关闭页面，稍后再来查看。`;
       jump('查看计算进度','#execution-flow',note.textContent);return;
     }
-    if(job.state==='analyzed'||job.state==='completed'){
+    if(job.state==='analyzed'){
       jump('查看数据与图表','#research-results','结果已保存；科学结论仍待核验。');return;
+    }
+    if(job.state==='completed'){
+      jump('查看回收与分析进度','#execution-flow','计算已结束；输出与分析尚待核验。');return;
     }
     if(job.state==='attention'||job.can_retry){
       jump('查看问题与恢复操作','#execution-flow','应用保留了本次作业和费用记录；请先查看原因。');return;
     }
+    if(job.state==='awaiting_approval'){
+      jump('查看并确认计算方案','#plan-review-panel','请先核对方案，再决定是否提交计算。');return;
+    }
+    if(['analysis_failed','diagnostics_saved','failed','timeout','rejected'].includes(job.state)){
+      jump('查看失败原因与记录','#execution-flow','本次执行未完成；已有提交与费用记录保留。');return;
+    }
+    if(['unknown','reconcile_required'].includes(job.state)){
+      jump('核对提交状态','#execution-flow','提交或计算回执待核对；不会自动再次提交。');return;
+    }
+    jump('查看计算记录','#execution-flow','已有执行记录；请先核对其状态与可用操作。');return;
   }
   if(candidateRecord){
     if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state)){
@@ -1546,6 +1566,14 @@ function taskMatchesFilter(task,filter){
  if(filter==='finished')return taskFinished(task);
  return state===filter;
 }
+function taskRecordActionBlocker(task){
+ const active=new Set(['reserved','dispatching','accepted','queued','pending','running','waiting','cancel_requested']);
+ const uncertain=new Set(['unknown','reconcile_required','attention','interrupted','uncertain','needs_reconciliation']);
+ const states=[task.execution_state,task.reference_state,task.preparation_state,task.condition_preparation_state];
+ if(states.some(state=>uncertain.has(state)))return '运行记录待核对，暂不能结束或删除。';
+ if(states.some(state=>active.has(state))||['generating','validating','repairing','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(task.preparation_state)||['generating','validating','repairing'].includes(task.condition_preparation_state))return '任务仍在准备或计算，暂不能结束或删除。';
+ return '';
+}
 function taskCards(){
  const box=$('#task-cards');box.replaceChildren();statsFor(taskCache,$('#task-stats'));
  const filters=$('#task-filters');filters.replaceChildren();for(const [key,label] of Object.entries({all:'全部任务',attention:'待我处理',running:'运行中',queued:'排队中',completed:'计算结束',validated:'验收通过',finished:'已确认结束',failed:'失败',draft:'待准备'})){const b=node('button',label,taskFilter===key?'primary':'quiet');b.onclick=()=>{taskFilter=key;taskCards();};filters.append(b);}
@@ -1570,12 +1598,40 @@ function taskCards(){
  if(t.submission_count!==undefined)counts.append(node('small',(phases.length>1||t.mode==='reproduction'?'B 提交：':'提交：')+t.submission_count+' / '+(t.max_submissions||2)));
  const changed=node('td',t.updated_at?new Date(t.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'),actions=node('td'),go=node('button','查看详情','quiet');go.onclick=()=>requestRoute('#'+t.id);actions.append(go);
  const manage=async operation=>{await api(`/api/tasks/${t.id}/lifecycle`,{revision:t.revision,lifecycle_revision:t.lifecycle_revision||0,action:operation});await listTasks();taskCards();notice(operation==='delete'?'任务已从列表删除；计算账本和费用记录保留。':'已记录你确认任务结束；科学验收结论保持独立。');};
- if(!taskFinished(t))actions.append(removalButton('确认任务结束','再次点击确认结束',()=>manage('finish')));
- actions.append(removalButton('删除任务记录','确认从列表删除',()=>manage('delete')));
+ const lifecycleBlocker=taskRecordActionBlocker(t);
+ if(lifecycleBlocker)actions.append(node('small',lifecycleBlocker,'form-note'));
+ else{
+  if(!taskFinished(t))actions.append(removalButton('确认任务结束','再次点击确认结束',()=>manage('finish')));
+  actions.append(removalButton('删除任务记录','确认从列表删除',()=>manage('delete')));
+ }
  tr.append(info,progress,next,counts,changed,actions);body.append(tr);}box.append(table);
 
 }
-async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');recordRoute('#tasks');await listTasks();taskCards();}
+function markTaskListFresh(){
+ const note=$('#tasks-last-sync');
+ if(note)note.textContent='状态更新于 '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})+' · 页面停留时会自动更新';
+}
+async function showTasks(){current=null;hideViews('tasks-view');selectNavigation('tasks');recordRoute('#tasks');await listTasks();taskCards();markTaskListFresh();}
+let taskSummaryRefreshing=false;
+async function refreshVisibleTaskSummaries(force=false){
+ const tasksVisible=!$('#tasks-view').hidden,homeVisible=!$('#home-view').hidden;
+ if((!tasksVisible&&!homeVisible)||taskSummaryRefreshing||busy||document.hidden||document.querySelector('dialog[open]'))return;
+ if(!force && (tasksVisible?$('#tasks-view'):$('#home-view')).contains(document.activeElement))return;
+ taskSummaryRefreshing=true;
+ try{
+  await listTasks();
+  if(tasksVisible&&!$('#tasks-view').hidden){taskCards();markTaskListFresh();}
+  if(homeVisible&&!$('#home-view').hidden){
+   statsFor(taskCache,$('#home-stats'));
+   const computing=$('#home-status dd');
+   if(computing)computing.textContent=taskCache.some(t=>taskState(t)==='running')?'有任务正在运行':'以任务记录为准';
+  }
+ }catch(error){
+  if(tasksVisible&&!$('#tasks-view').hidden)$('#tasks-last-sync').textContent='状态暂未更新：'+error.message+'。点击“刷新状态”重试；已有列表保留。';
+ }finally{taskSummaryRefreshing=false;}
+}
+$('#tasks-refresh').onclick=()=>refreshVisibleTaskSummaries(true);
+setInterval(()=>refreshVisibleTaskSummaries(),30000);
 let resourceFilter='all',resourceRows=[];
 function potentialResourceRows(p){
  const report=p.potential_acquisition||{},files=report.files||[];
@@ -2210,7 +2266,7 @@ if(taskQuickLinks)taskQuickLinks.onclick=event=>{
 };
 bind('ai-activity-refresh',event=>{if(event&&event.preventDefault)event.preventDefault();if(event&&event.stopPropagation)event.stopPropagation();refreshActivity();});bind('guidance-send',()=>action(sendGuidance));
 bind('plan-refresh',()=>action(refreshPlanReview));bind('task-pause',()=>action(togglePause));
-$("#refresh-workspace").onclick=()=>action(async()=>{await refreshResults();await refreshWorkspace();notice("已读取最新记录，没有提交计算。");});
+$("#refresh-workspace").onclick=()=>action(async()=>{if(current)await openTask(current.id);});
 
 // Shared navigation follows the approved home; all counts come from saved evidence.
 let taskFilter='all', selectedPlot='full', discussionRequest=null;
@@ -2282,6 +2338,12 @@ function renderPlotGallery(report,box){
  const draw=()=>{selectedPlot=select.value;area.replaceChildren();let curves=report.curves,xmax=.5;if(selectedPlot==='virial')curves=curves.slice(0,1);if(selectedPlot==='pressure')curves=curves.slice(1);if(selectedPlot.startsWith('elastic')){xmax=selectedPlot==='elastic05'?.05:.06;curves=curves.slice(0,1);}area.append(node('h3',options[selectedPlot]),curvePlot({...report,curves,xmax}));const legend=node('div',undefined,'plot-legend');for(const c of curves)legend.append(node('span',c.label));area.append(legend,node('p','同一真实基准工况的不同视图，不代表复现了多个工况或整篇论文。','plot-caption'));};select.onchange=draw;draw();
 }
 async function refreshDiscussion(){if(!current)return;const id=current.id;const result=await api(`/api/tasks/${id}/discussion`);if(current?.id!==id)return;const box=$('#discussion-history');box.replaceChildren();for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}$('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；发送后会保留问题、答复与模型用量。助手只解读已有结果，不能提交新的计算或执行任意分析代码。':'结果助手尚未启用：可以下载数据，或先在“设置 → 模型 API”配置连接，再由管理员启用。';const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;}
+$('#discussion-open-plots').onclick=()=>{
+ if(!current)return;
+ resultTab='plots';
+ for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='可视化图表'));
+ renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});
+};
 $('#discussion-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!current)return;const question=$('#discussion-prompt').value.trim();const pref=await api('/api/model-preference');if(!discussionRequest||discussionRequest.question!==question||discussionRequest.task!==current.id)discussionRequest={id:crypto.randomUUID().replaceAll('-',''),question,task:current.id};$('#discussion-status').textContent='正在分析已有结果…';try{const reply=await api(`/api/tasks/${current.id}/discussion`,{request_id:discussionRequest.id,provider:pref.provider,question});if(reply.state==='completed'){$('#discussion-prompt').value='';discussionRequest=null;}await refreshDiscussion();}catch(error){$('#discussion-status').textContent=error.message;throw error;}});};
 setInterval(()=>{if(current&&!busy&&!document.querySelector('dialog[open]')&&!$('#discussion-prompt').value)action(async()=>{await refreshResults();await refreshWorkspace();});},30000);
 

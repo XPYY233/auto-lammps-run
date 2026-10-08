@@ -1,5 +1,6 @@
 /* Ordinary research results: only task-bound, verified output previews. */
 const sourceTableCache=new Map();
+const selectedResultPlots=new Map(),selectedResultAxes=new Map();
 const numberText=value=>Number.isFinite(value)?Number(value.toPrecision(8)).toString():'—';
 function equationText(text){
   if(/\\\(|\$/.test(text))return text;
@@ -17,7 +18,7 @@ function numericalPlot(table,operation){
   const names=table.columns.map(c=>c.name),xi=names.indexOf(operation.x),yi=names.indexOf(operation.y);
   const points=table.rows.filter(r=>r[xi]>=operation.window[0]&&r[xi]<=operation.window[1]).map(r=>[r[xi],r[yi]]);
   if(!points.length)return node('p','预览中没有此区间的数据。完整选取范围见分析报告。');
-  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('class','plot-svg');svg.setAttribute('viewBox','0 0 620 355');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${operation.y} 随 ${operation.x} 变化，${operation.method==='saved_curve'?'已保存统计值':'真实数据与冻结拟合'}`);
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('class','plot-svg');svg.setAttribute('viewBox','0 0 620 355');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${operation.y} 随 ${operation.x} 变化，${operation.method==='linear_fit'?'真实数据与冻结拟合':operation.method==='saved_curve'?'已保存统计值':'真实数据预览'}`);
   const add=(tag,attrs,text)=>{const el=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,v);if(text!==undefined)el.textContent=text;svg.append(el);return el;};
   let xmin=Math.min(...points.map(p=>p[0])),xmax=Math.max(...points.map(p=>p[0])),ymin=Math.min(...points.map(p=>p[1])),ymax=Math.max(...points.map(p=>p[1]));
   const fit=operation.method==='linear_fit'&&Number.isFinite(operation.values.slope)&&Number.isFinite(operation.values.intercept);
@@ -34,6 +35,43 @@ function numericalPlot(table,operation){
   for(const p of points)add('circle',{cx:X(p[0]),cy:Y(p[1]),r:4,fill:'#245dc8',stroke:'white','stroke-width':1});
   add('text',{x:82,y:27,fill:'#245dc8','font-size':12},operation.method==='saved_curve'?'● 保存的统计值':'● 原始数据');if(fit)add('text',{x:215,y:27,fill:'#952459','font-size':12},'– – 冻结区间拟合（含外推）');
   return svg;
+}
+function numericTableColumns(table){
+  if(!Array.isArray(table?.rows)||!table.rows.length)return [];
+  return (table.columns||[]).map((column,index)=>({column,index})).filter(({index})=>
+    table.rows.every(row=>Array.isArray(row)&&Number.isFinite(row[index])));
+}
+function customPreviewPlot(table,identity){
+  const numeric=numericTableColumns(table),box=node('article',undefined,'result-widget');
+  box.append(node('h4',`自选图表 · ${table.file}`),node('p','选择横轴和纵轴；图只使用下方已核验的数值数据。','form-note'));
+  if(numeric.length<2){box.append(node('p','该数据表没有足够的数值列，无法绘制二维图。','form-note'));return box;}
+  const toolbar=node('div',undefined,'chart-toolbar'),axis={};
+  for(const [key,label] of [['x','横轴'],['y','纵轴']]){
+    const group=node('label',label),select=node('select');select.setAttribute('aria-label',`自选图表${label}`);
+    numeric.forEach(({column,index})=>select.append(new Option(`${column.name} (${column.unit})`,String(index))));
+    const saved=selectedResultAxes.get(identity)?.[key];
+    select.value=String(numeric.some(item=>item.index===saved)?saved:key==='x'?numeric[0].index:numeric[1].index);
+    axis[key]=select;group.append(select);toolbar.append(group);
+  }
+  const area=node('div',undefined,'chart-area');box.append(toolbar,area);
+  const draw=()=>{
+    area.replaceChildren();const xi=Number(axis.x.value),yi=Number(axis.y.value);
+    if(xi===yi){area.append(node('p','请选择不同的横轴和纵轴。','form-note'));return;}
+    const x=table.columns[xi].name,y=table.columns[yi].name,values=table.rows.map(row=>row[xi]);
+    const svg=numericalPlot(table,{method:'raw_preview',x,y,window:[Math.min(...values),Math.max(...values)],values:{}});
+    const metadata=document.createElementNS('http://www.w3.org/2000/svg','metadata');
+    metadata.textContent=JSON.stringify({source_file:table.file,source_sha256:table.sha256||null,x,y,
+      total_rows:table.total_rows,plotted_rows:table.rows.length,sampled:Boolean(table.sampled)});
+    svg.append(metadata);
+    const download=node('a','下载当前图表 SVG','quiet');download.download='auto-lammps-result-plot.svg';
+    download.href='#';download.onclick=()=>{
+      download.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));
+    };
+    area.append(svg,download,
+      node('p',`${table.total_rows} 行来源数据；当前图显示${table.sampled?'等间隔抽样的 '+table.rows.length+' 行预览':'全部 '+table.rows.length+' 行'}。这只是重新绘图，没有生成新的计算或统计结论；完整数据可从下载区获取。`,'plot-caption'));
+  };
+  const changed=()=>{selectedResultAxes.set(identity,{x:Number(axis.x.value),y:Number(axis.y.value)});draw();};
+  axis.x.onchange=changed;axis.y.onchange=changed;draw();return box;
 }
 function structuralPlot(result){
   const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
@@ -134,10 +172,15 @@ function renderOrdinaryResults(box){
     if(resultTab==='data'||resultTab==='overview')for(const result of structures)area.append(structuralDetails(result,{data:true}));
     if(resultTab==='data'||resultTab==='overview')for(const result of sites)area.append(siteDetails(result,current.id,report.id,{data:true,preview:sitePreviews.find(p=>p.id===result.id)?.curves}));
     if(resultTab==='plots'||resultTab==='overview'){
-      const options=[...report.results.map((op,i)=>({value:`numeric:${i}`,label:`${op.y} 对 ${op.x} · ${analysisMethods[op.method]||op.method}`,op})),...structures.map((result,i)=>({value:`structural:${i}`,label:`短程有序 · ${result.id}`,result})),...sites.map((site,i)=>({value:`site:${i}`,label:`逐位点统计热力学 · ${site.id}`,site}))];
+      const options=[...report.results.map((op,i)=>({value:`numeric:${i}`,label:`${op.y} 对 ${op.x} · ${analysisMethods[op.method]||op.method}`,op})),...tables.filter(table=>numericTableColumns(table).length>=2).map((table,i)=>({value:`custom:${i}`,label:`自选图表 · ${table.file}`,table})),...structures.map((result,i)=>({value:`structural:${i}`,label:`短程有序 · ${result.id}`,result})),...sites.map((site,i)=>({value:`site:${i}`,label:`逐位点统计热力学 · ${site.id}`,site}))];
       if(!options.length){area.append(node('p','当前报告没有可核验的图表。'));continue;}
-      const label=node('label','选择图表'),select=node('select');select.setAttribute('aria-label','选择计算结果图表');options.forEach(option=>select.append(new Option(option.label,option.value)));label.append(select);area.append(label);const chart=node('article',undefined,'result-widget');area.append(chart);
-      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.site){chart.append(siteCurvePlot(selected.site,sitePreviews.find(p=>p.id===selected.site.id)?.curves),siteDownloads(selected.site,current.id,report.id));return;}if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};select.onchange=draw;draw();
+      const label=node('label','选择图表'),select=node('select'),plotIdentity=current.id+':'+report.id;
+      select.setAttribute('aria-label','选择计算结果图表');options.forEach(option=>select.append(new Option(option.label,option.value)));
+      const remembered=selectedResultPlots.get(plotIdentity);
+      select.value=options.some(option=>option.value===remembered)?remembered:options[0].value;
+      label.append(select);area.append(label);const chart=node('article',undefined,'result-widget');area.append(chart);
+      const draw=()=>{const selected=options.find(option=>option.value===select.value)||options[0];chart.replaceChildren();if(selected.table){chart.append(customPreviewPlot(selected.table,plotIdentity+':'+selected.table.file+':'+selected.table.sha256));return;}if(selected.site){chart.append(siteCurvePlot(selected.site,sitePreviews.find(p=>p.id===selected.site.id)?.curves),siteDownloads(selected.site,current.id,report.id));return;}if(selected.result){chart.append(structuralDetails(selected.result,{plot:true}));return;}const op=selected.op,table=tables.find(t=>t.file===op.file);if(!table){chart.append(node('p','此图的数据未通过来源核验。'));return;}chart.append(numericalPlot(table,op),node('p',`${op.sample_count} 行参与原有分析；图中${table.sampled?'数据为预览采样':'展示原始点'}。选取区间：${op.window.join(' 至 ')}。`,'plot-caption'));if(op.method==='linear_fit')chart.append(node('p',`\\(y=${numberText(op.values.slope)}x+${numberText(op.values.intercept)}\\)；\\(R^2=${numberText(op.values.r_squared)}\\)。外推值不是新增计算。`));};
+      select.onchange=()=>{selectedResultPlots.set(plotIdentity,select.value);draw();};draw();
     }
   }
 }
