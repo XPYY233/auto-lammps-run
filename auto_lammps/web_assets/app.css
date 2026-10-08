@@ -770,7 +770,7 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 #task-view .ai-current #next-action-note{max-width:190px;text-align:center;line-height:1.45}
 .task-quick-links{padding:16px 20px;scroll-margin-top:92px}
 .task-quick-links>strong{display:block;margin-bottom:11px;font-size:14px;color:#253e60}
-.task-quick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.task-quick-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
 .task-quick-grid button{padding:8px 10px;text-align:left;border:1px solid #dce7f6;background:#f8fbff;color:#28548b;font-size:12px}
 .task-quick-grid button:hover,.task-quick-grid button:focus-visible{background:#e8f2ff;border-color:#a9c7ee}
 #task-quick-note{margin:9px 0 0}

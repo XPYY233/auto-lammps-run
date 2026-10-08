@@ -195,6 +195,27 @@ test('a reference with retained submissions and no receipt cannot inherit an old
  assert.match(textContent(elements.get('#task-cards')),/A 提交：2 次（含失败）/);
 });
 
+test('task filters expose approvals and clarifications without calling them failures',async()=>{
+ const tasks=[
+  {id:OLD,title:'Plan needs approval',status:'conditions_frozen',preparation_state:'prepared'},
+  {id:NEXT,title:'AI asks a question',status:'conditions_frozen',preparation_state:'clarification'},
+  {id:'c'.repeat(32),title:'Plan failed',status:'conditions_frozen',preparation_state:'failed'},
+  {id:'d'.repeat(32),title:'Job is running',status:'conditions_frozen',execution_state:'running'},
+ ];
+ const {c,elements}=setupTaskList(tasks);await c.listTasks();
+ c.taskFilter='attention';c.taskCards();
+ const attention=textContent(elements.get('#task-cards'));
+ assert.match(attention,/Plan needs approval/);assert.match(attention,/AI asks a question/);
+ assert.match(attention,/Plan failed/);assert.doesNotMatch(attention,/Job is running/);
+ c.taskFilter='draft';c.taskCards();
+ const preparing=textContent(elements.get('#task-cards'));
+ assert.match(preparing,/Plan needs approval/);assert.match(preparing,/AI asks a question/);
+ assert.doesNotMatch(preparing,/Plan failed/);
+ c.taskFilter='failed';c.taskCards();
+ const failed=textContent(elements.get('#task-cards'));
+ assert.match(failed,/Plan failed/);assert.doesNotMatch(failed,/AI asks a question/);
+});
+
 function setupAfterChange(){
  const state=setupCandidateNavigation(),{c,renders}=state,refreshes=[],notices=[];
  c.targetPreviewGeneration=0;

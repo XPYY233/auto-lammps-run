@@ -1537,10 +1537,19 @@ function taskNextLabel(task){
  if(state==='frozen')return task.mode==='reproduction'?'查看 P–A–B 进度':'准备方案';
  return '查看任务';
 }
+function taskMatchesFilter(task,filter){
+ const state=taskState(task);
+ if(filter==='all')return true;
+ if(filter==='attention')return ['draft','frozen','prepared','clarification','condition_attention','condition_failed','preparation_failed','failed','timeout','reconcile_required','unknown','completed'].includes(state);
+ if(filter==='draft')return ['draft','frozen','prepared','preparing','understanding','clarification','condition_attention'].includes(state);
+ if(filter==='failed')return ['failed','timeout','preparation_failed','condition_failed'].includes(state);
+ if(filter==='finished')return taskFinished(task);
+ return state===filter;
+}
 function taskCards(){
  const box=$('#task-cards');box.replaceChildren();statsFor(taskCache,$('#task-stats'));
- const filters=$('#task-filters');filters.replaceChildren();for(const [key,label] of Object.entries({all:'全部任务',running:'运行中',queued:'排队中',completed:'计算结束',validated:'验收通过',finished:'已确认结束',failed:'失败',draft:'待准备'})){const b=node('button',label,taskFilter===key?'primary':'quiet');b.onclick=()=>{taskFilter=key;taskCards();};filters.append(b);}
- const tasks=taskCache.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase())&&(taskFilter==='all'||(taskFilter==='finished'?taskFinished(t):taskFilter==='failed'?['failed','timeout','preparation_failed','clarification'].includes(taskState(t)):taskState(t)===taskFilter)));
+ const filters=$('#task-filters');filters.replaceChildren();for(const [key,label] of Object.entries({all:'全部任务',attention:'待我处理',running:'运行中',queued:'排队中',completed:'计算结束',validated:'验收通过',finished:'已确认结束',failed:'失败',draft:'待准备'})){const b=node('button',label,taskFilter===key?'primary':'quiet');b.onclick=()=>{taskFilter=key;taskCards();};filters.append(b);}
+ const tasks=taskCache.filter(t=>t.title.toLowerCase().includes(($('#task-search').value||'').toLowerCase())&&taskMatchesFilter(t,taskFilter));
  if(!tasks.length){box.append(emptyState('此分类暂无任务','新建一项研究，或调整搜索条件。'));return;}
  const table=node('table',undefined,'research-table'),head=node('thead'),hr=node('tr'),body=node('tbody');for(const label of ['任务','当前阶段','下一步','作业 / 提交次数','最近更新','操作'])hr.append(node('th',label));head.append(hr);table.append(head,body);
  for(const t of tasks){
