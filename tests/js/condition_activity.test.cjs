@@ -22,6 +22,18 @@ test('saved condition failure is shown in task list but never overrides actual H
  assert.equal(c.taskStateLabel({status:'conditions_frozen',execution_state:'running',condition_preparation_state:'failed'}),'运行中');
 });
 
+test('task list points to in-app AI when saved conditions remain missing',()=>{
+ const c=vm.createContext({taskFinished:()=>false});
+ vm.runInContext(source.slice(source.indexOf('function taskState(t)'),source.indexOf('function statsFor(')),c);
+ vm.runInContext(source.slice(source.indexOf('function taskNextLabel(task)'),source.indexOf('function taskCards()')),c);
+ const draft={status:'draft',condition_preparation_state:'imported',outstanding:19};
+ assert.equal(c.taskStateLabel(draft),'条件已整理 · 待补齐');
+ assert.equal(c.taskNextLabel(draft),'让应用 AI 补齐条件');
+ assert.equal(c.taskNextLabel({status:'draft'}),'整理需求');
+ assert.equal(c.taskStateLabel({...draft,execution_state:'running'}),'运行中');
+ assert.equal(c.taskNextLabel({...draft,execution_state:'running'}),'查看进度');
+});
+
 test('refreshing or opening progress is read only and does not occupy the mutation lock',async()=>{
  const clicks={};let reads=0,mutations=0;
  const panel={open:true},c=vm.createContext({document:{getElementById:()=>panel},bind:(id,fn)=>clicks[id]=fn,
