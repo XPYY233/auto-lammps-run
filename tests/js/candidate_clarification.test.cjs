@@ -36,7 +36,7 @@ function setupPanel({status='conditions_frozen',automatic=false,candidatePrepara
     $:selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);},
     api:(path,data)=>{calls.push({path,data});return Promise.resolve(documents.length?documents.shift():{id:TASK,revision:22});},
     notice:(message,error)=>{notices.push({message,error:Boolean(error)});},
-    renderHistory:async()=>{},refreshModelStatus:async()=>{},refreshWorkspace:async()=>{},
+    renderHistory:async()=>{},refreshModelStatus:async()=>{},refreshWorkspace:async()=>{},renderWorkspaceResults:()=>{},
     number:(value,digits=4)=>String(value),
     duration:seconds=>String(seconds),
     action:async work=>work(),

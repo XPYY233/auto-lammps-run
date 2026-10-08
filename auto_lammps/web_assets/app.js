@@ -1273,7 +1273,7 @@ async function refreshCandidate() {
   $('#candidate-outcome').textContent=candidateOutcome||'';
   if(automatic && schema.task_resource_policy) summary.append(node('p',schema.task_resource_policy.description));
   if(!candidate && automatic){const r=schema.automatic_workflow.resources;summary.append(node('p',`按已确认条件生成并核对方案；你批准后才提交 HPC 和分析结果。计算资源：${r.cores} 核 · ${number(r.memory_bytes/1024**3,1)} GiB · 单次最长 ${number(r.wall_seconds/3600,2)} 小时 · 最多 ${schema.automatic_workflow.max_submissions} 次提交。`));}
-  if(!candidate) {renderCandidateClarification(null);renderNextAction();return;}
+  if(!candidate) {renderCandidateClarification(null);renderNextAction();renderWorkspaceResults();return;}
   const result=candidate.result||{};
   if(result.summary) summary.append(node('p',result.summary));
   if(candidate.state==='failed') {
@@ -1296,6 +1296,7 @@ async function refreshCandidate() {
     $('#candidate-downloads').append(node('p','文件来自已准备的方案快照；下载不代表已提交计算，也不代表科学验证通过。','form-note'));
   }
   renderNextAction();
+  renderWorkspaceResults();
 }
 $('#prepare-candidate').onclick=()=>action(async()=>{
   const id=current.id, before=candidateTask===id?candidateRecord:null;
@@ -1998,6 +1999,27 @@ function renderCloseout(reference,box){
  box.append(limitations({limitations:[...reference.limitations,...r.limitations]}),closeoutCoverage(r));
 }
 function taskTimeline(){const list=node('ol',undefined,'task-timeline');for(const item of $('#history-list').children)list.append(item.cloneNode(true));return list;}
+function emptyResultGuidance(){
+ const job=executionState?.job||ordinaryExecutionJob();
+ if(job){
+  if(['queued','running','waiting','dispatching','collecting','analyzing'].includes(job.state))return ['计算与分析正在进行','应用正在后台跟进；刷新或关闭页面都不会重新提交计算。','查看计算进度','#execution-flow'];
+  if(job.state==='awaiting_approval')return ['计算方案等待确认','方案尚未提交计算。请先核对方案与执行范围。','查看计算方案','#plan-review-panel'];
+  if(job.state==='completed')return ['计算已结束，结果仍待核对','应用还在核对输出与分析记录。调度结束不等于已有可用结果。','查看回收与分析进度','#execution-flow'];
+  if(job.state==='unknown'||job.state==='reconcile_required')return ['提交状态待核对','现有回执尚不能确认计算是否完成；应用不会据此再次提交。','查看提交记录','#execution-flow'];
+  return ['本次计算尚无可用结果','请先核对作业状态、失败原因和已有提交记录。','查看计算问题','#execution-flow'];
+ }
+ if(candidateRecord){
+  if(['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state))return ['应用 AI 正在准备方案','方案完成并确认后才能提交计算；这里不会显示尚未产生的结果。','查看准备进度','#candidate-panel'];
+  if(candidateRecord.state==='clarification')return ['方案需要补充条件','应用 AI 留下了待回答的问题；完成条件前还没有计算结果。','回答方案问题','#candidate-attention'];
+  if(['failed','interrupted','configuration_changed'].includes(candidateRecord.state))return proposalRoundsExhausted(candidateRecord)
+   ? ['方案机会已用完，尚无计算结果','三轮方案机会已用完或历史轮次无法核验；已有记录保留，不会自动追加调用。','查看未完成原因','#candidate-attention']
+   : ['计算方案尚未准备好','请查看失败原因与已有记录；目前没有计算结果。','查看未完成原因','#candidate-attention'];
+  if(candidateRecord.state==='prepared')return ['计算方案等待确认','方案已准备，但尚未提交计算。请先核对方案与执行范围。','查看计算方案','#plan-review-panel'];
+ }
+ if(current.mode==='reproduction')return ['复现结果尚未生成','请查看 P–A–B 进度；作者参考运行、独立计算和科学核验分别记录。','查看 P–A–B 进度','#reference-progress'];
+ if(current.status==='conditions_frozen')return ['研究条件已确认，尚未计算','下一步由应用 AI 准备计算方案；方案确认后才会提交计算。','查看方案准备','#candidate-panel'];
+ return ['先完成研究条件','需求已保存。确认材料、势函数与计算条件后，应用才能准备方案。','核对研究条件','#advanced-task'];
+}
 function renderWorkspaceResults(){
  const box=$('#research-results');box.replaceChildren();const r=workspaceReport;
  const phase=workspaceState.task===current?.id?workspaceState.phase:'loading';
@@ -2013,7 +2035,16 @@ function renderWorkspaceResults(){
   for(const f of jobs.values())box.append(node('p',`作业 ${f.job_id} · ${requestStates[f.state]||f.state}`));
   return;
  }
- if(!r){const empty=emptyState('还没有计算结果',current.status==='conditions_frozen'?'研究条件已保存。方案与计算记录会在服务就绪后显示。':'研究需求已保存。方案、计算与分析就绪后，真实结果会显示在这里。');const button=node('button','查看模型设置','quiet');button.onclick=()=>action(openModel);empty.append(button);box.append(empty);return;}
+ if(!r){
+  const [title,detail,label,target]=emptyResultGuidance(),empty=emptyState(title,detail),button=node('button',label,'quiet');
+  button.type='button';button.onclick=()=>{
+   const destination=$(target);
+   if(!destination||destination.closest('[hidden]')||destination.hidden){$('#task-quick-note').textContent='这一步尚无可查看的记录；请查看上方当前进展。';$('#ai-current-title').scrollIntoView({block:'start'});return;}
+   if(destination.closest('#advanced-task'))$('#advanced-task').open=true;
+   destination.scrollIntoView({block:'start',behavior:'smooth'});
+  };
+  empty.append(button);box.append(empty);return;
+ }
  if(resultTab==='targets'){box.append(node('h2','论文图表与计算结果'));if(r.closeout){box.append(evidenceLegend());renderEvidenceGallery(r,box);box.append(closeoutCoverage(r.closeout));}else box.append(node('p','全文图表审计尚未接入。'));return;}
  if(r.closeout && ['overview','data','plots','report'].includes(resultTab)){renderCloseout(r,box);return;}
  if(resultTab==='overview'){
@@ -2363,10 +2394,11 @@ const taskContents=$('#task-contents');
 function updateTaskContents(){
   if(!current||!taskContents)return;
   const hasReport=Boolean(workspaceReport||normalResult?.evaluations?.some(e=>e.requests?.some(q=>q.reports?.length)));
+  const hasRaw=typeof rawResult!=='undefined'&&rawResult?.task===current.id&&Boolean(rawResult.files?.length);
   $('#task-view').classList.toggle('results-first',hasReport);
   $('#result-workspace-heading').textContent=current.mode==='reproduction'?'复现结果':'计算结果';
-  taskContents.querySelector('.task-contents-primary').firstChild.textContent=current.mode==='reproduction'?'复现结果 ':'计算结果 ';
-  $('#result-priority-note').textContent=hasReport?'以下内容来自已保存的计算与分析记录；科学结论以核验状态为准。':'尚无可展示的计算结果；可以查看当前进展与计算记录。';
+  taskContents.querySelector('.task-contents-primary').firstChild.textContent=(current.mode==='reproduction'?'复现结果':'计算结果')+(hasReport?' ':hasRaw?' · 原始输出 ':' · 尚未生成 ');
+  $('#result-priority-note').textContent=hasReport?'以下内容来自已保存的计算与分析记录；科学结论以核验状态为准。':hasRaw?'原始输出已回收，可下载核对；分析结果尚未生成。':'尚无可展示的计算结果；可以查看当前进展与计算记录。';
   for(const button of taskContents.querySelectorAll('button[data-contents-target]')){
     const target=$(button.dataset.contentsTarget),tab=button.dataset.resultTab;
     button.hidden=Boolean((tab&&!['overview','history'].includes(tab)&&!hasReport)||(tab==='targets'&&!workspaceReport?.closeout)||
