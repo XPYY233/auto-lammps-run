@@ -2364,6 +2364,7 @@ async function refreshDiscussion(){
  const box=$('#discussion-history');box.replaceChildren();
  for(const m of result.messages){const row=node('article',undefined,'discussion-message');row.append(researchContent(m.question,'discussion-question'),researchContent(m.answer||'请求状态待核对，未重复发送。'),node('small',m.provider+' / '+m.model+' · '+new Date(m.at).toLocaleString('zh-CN')));box.append(row);}
  $('#discussion-status').textContent=result.enabled?'可围绕已有数据提问；问题、答复与模型用量会保留。需要绘图时点“让 AI 生成数据图”。':'请先在“设置 → 模型 API”中保存当前所选模型的密钥和模型 ID；保存后即可在这里提问。';
+ if(result.enabled&&result.provider!=='deepseek-official')$('#discussion-status').textContent+=' 自动选图使用 DeepSeek；请在模型设置中切换到已连接的 DeepSeek。';
  const discussionSubmit=$('#discussion-form button[type=submit]');if(discussionSubmit)discussionSubmit.disabled=!result.enabled;
  const chartButton=$('#discussion-ai-chart');chartButton.disabled=!result.enabled||result.provider!=='deepseek-official';
  try{const charts=await api(`/api/tasks/${id}/charts`);if(current?.id===id)renderAICharts(charts.charts||[],id);}
