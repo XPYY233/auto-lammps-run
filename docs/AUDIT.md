@@ -2126,3 +2126,6 @@ FeAl在原任务普通页面恢复后已真实调用首版，收到六项澄清�
 - 证据：Git 传输多次超时，`gh api` 只读连接正常。本地 UX 相对远端 `3ccd52d` 修改的 8 个公开文件经 GitHub blob 接口上传，8 个返回 SHA 均与本地 `git hash-object` 一致；以远端树为基创建的 GitHub 树 SHA `4c7d0c2` 与本地 HEAD 树完全一致。新提交 `d4ce9c1` 的父提交是已核对远端头；此时仅创建了未引用的 Git 对象，分支尚未移动。
 - 首次用 GitHub 连接器的原子 expected-SHA 更新分支遭 `Resource not accessible by integration` 拒绝。影响：远端 ref 未经该连接器更新；已创建对象可重复引用，没有更改 main、PR、模型或 HPC。原因是连接器权限，不是文件内容或树不一致。
 - 纠正：改用已成功创建 blob/tree/commit 的本机授权 GitHub CLI，在即时只读核对远端仍为 `3ccd52d` 后以 `force=false` 快进更新该同一分支；若分支变化或 API 拒绝，停止并重新对账，不覆盖其他工作。验证待完成。
+- 验证：8 个公开文件最终树与本地 HEAD 树 SHA `8b438d1` 一致；`gh api` 对远端旧头即时核对后，以 `force=false` 从 `3ccd52d` 快进到 `a20a9be`。草稿 PR #161 已创建，三个 CI 作业启动。随后的 PR 文件清单检查发现对 `main` 比较有约 101 个变更文件，包含先于 UX 分支的 P–A–B 基础提交；原因是 UX 分支从尚未进入 main 的 `cdc21e5` 之后建立。此 PR 当前比较范围过宽，不能让它接受审查或合并。
+- 纠正：用 `cdc21e5` 这个已存在的共同基线建立仅供堆叠审查的远端基线分支，把 PR #161 的 base 改到该基线；本地对该基线比较只有 16 个 UX 文件。核对 PR 实际文件清单后再声明范围正确。P–A–B 基线未合并 main 前，PR 继续草稿待审；不把基线分支当 main 发布。
+- 复验：已创建只作审查基线的 `codex/ux-review-base-pab`，指向原共同祖先 `cdc21e5`；PR #161 改为该 base 后 GitHub 回报可合并、16 个文件，文件清单只含本轮 UX、桌面入口、文档与检查。PR 描述明确依赖 P–A–B 基线及日后重定 base；三个 CI 作业（offline-checks、macOS/Ubuntu portable-analysis）均通过。它仍是待审草稿，未进入 main 或当前安装版，也不能直接合并到该审查基线。
