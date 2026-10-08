@@ -47,6 +47,23 @@ class ModelConnectionTests(unittest.TestCase):
         self.connections.discuss(task['id'],identifier,'deepseek-official','解释数据',{'verified':True})
         self.transport.assert_called_once()
 
+    def test_saving_selected_connection_unlocks_result_questions_without_startup_flag(self):
+        task=self.store.create(title='synthetic',prompt='synthetic',mode='research')
+        connections=ModelConnections(self.store,transport=self.transport)
+        client=TestClient(create_app(self.store,model_connections=connections),base_url='http://127.0.0.1:8765')
+        self.addCleanup(client.close)
+        url='/api/tasks/'+task['id']+'/discussion'
+        self.assertFalse(client.get(url).json()['enabled'])
+        self.assertFalse(connections.assistant_enabled)
+        connections.save('deepseek-official','synthetic-model','test-key-sentinel')
+        self.assertTrue(client.get(url).json()['enabled'])
+        self.assertTrue(connections.assistant_enabled)
+        result=connections.discuss(task['id'],'b'*32,'deepseek-official','解释合成结果',{'synthetic':True})
+        self.assertEqual(result['state'],'completed')
+        self.transport.assert_called_once()
+        connections.save('deepseek-official','',remove=True)
+        self.assertFalse(client.get(url).json()['enabled'])
+
     def test_connection_discovery_and_failed_transport_do_not_leak(self):
         # A first-time user can save the key and discover IDs without knowing one.
         self.connections.save('openai','','test-key-sentinel')

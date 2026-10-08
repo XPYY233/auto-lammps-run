@@ -42,14 +42,15 @@ test('exhausted preparation routes to the retained error rather than generating 
  c.$('#next-action').onclick();assert.deepEqual(scrolls,['#candidate-attention']);assert.deepEqual(clicks,[]);
 });
 test('active condition preparation waits and unrelated progress cannot become the previous step',()=>{
- const {c,clicks}=setup({activityData:{task_id:TASK,condition_preparation:{state:'repairing'},steps:[]}});
- c.renderNextAction();assert.equal(c.$('#next-action').hidden,true);assert.match(c.$('#next-action-note').textContent,/正在整理研究条件/);
+ const {c,clicks,scrolls}=setup({activityData:{task_id:TASK,condition_preparation:{state:'repairing'},steps:[]}});
+ c.renderNextAction();assert.equal(c.$('#next-action').hidden,false);assert.match(c.$('#next-action-note').textContent,/正在整理研究条件/);
+ c.$('#next-action').onclick();assert.deepEqual(scrolls,['#ai-activity-panel']);
  c.activityData={task_id:'b'.repeat(32),steps:[{title:'old stage'},{title:'old latest'}]};c.renderNextAction();
  assert.doesNotMatch(c.$('#previous-step').textContent,/old stage/);assert.deepEqual(clicks,[]);
 });
 test('shortcut navigation refuses unavailable result discussion without issuing requests',()=>{
  const elements=new Map(),scrolls=[];
- const nav={contains:()=>true},button={dataset:{taskTarget:'.discussion-panel'},closest:()=>button};
+ const nav={contains:()=>true},button={dataset:{taskTarget:'.discussion-panel'},closest:selector=>selector==='button[data-task-target]'?button:null};
  const target={closest:()=>({hidden:true}),scrollIntoView:()=>scrolls.push('discussion')},note={textContent:''};
  elements.set('#task-quick-links',nav);elements.set('.discussion-panel',target);elements.set('#task-quick-note',note);
  const c=vm.createContext({$:selector=>elements.get(selector)});

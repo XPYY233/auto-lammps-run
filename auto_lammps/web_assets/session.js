@@ -3,7 +3,7 @@
  * When the entry opens the page with ?session=<token>, this file tells the supervising
  * process that the page is still open (every 5 s, plus on visibility changes) and that it is
  * closing (pagehide/beforeunload). The local service records only "recent activity" in one
- * small file; the supervisor stops the service about 30 s after the page is gone. Nothing is
+ * small file; its research workers continue after the page closes. Nothing is
  * stored in the browser, nothing leaves this computer, and no task state is touched.
  *
  * Without ?session= (an ordinary launch, a bookmark, a second tab opened by hand) this file
@@ -21,7 +21,7 @@
     const note = document.createElement('div');
     note.id = 'session-lifecycle-hint';
     note.setAttribute('role', 'note');
-    note.textContent = '关闭本页约 30 秒后，本地服务会自动停止；任务记录、账本与运行记录保留。';
+    note.textContent = '关闭网页后任务仍在后台继续；重新打开 Auto-LAMMPS 即可查看进度。';
     const style = note.style;
     style.position = 'fixed';
     style.right = '10px';

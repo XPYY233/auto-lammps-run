@@ -93,7 +93,7 @@ class ReferenceChartUserTests(unittest.TestCase):
         self.transport.assert_called_once()
 
     def test_disabled_assistant_blocks_before_model_and_intent(self):
-        self.connections.assistant_enabled = False
+        self.connections._assistant_policy = False
         result = self.send()
         self.assertEqual(result.status_code, 422)
         self.assertIn('尚未启用', result.json()['detail'])
