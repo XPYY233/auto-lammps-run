@@ -440,6 +440,8 @@ function setupTaskCreation(){
  const state=setupAfterChange(),{c}=state,routes=[],modes=[];
  let submitted;
  c.current=null;c.resultTab='overview';c.schema.model_calls_enabled=false;c.$('#task-view').hidden=true;
+ vm.runInContext('let newGeometryCatalog=null;',c);
+ c.Option=function(label,value){this.label=label;this.value=value;};
  c.FormData=function(form){return new Map(Object.entries(form.values));};
  c.action=work=>{submitted=work();return submitted;};c.recordRoute=route=>routes.push(route);c.setMode=mode=>modes.push(mode);
  c.generateConditions=()=>assert.fail('creating a task with model calls disabled must not request a model');
@@ -471,12 +473,40 @@ test('a queued navigation still prevents the actual create handler from repainti
  assert.equal(c.current,mutation);assert.equal(c.$('#task-view').hidden,true);assert.equal(c.$('#target-planning').children[0],marker);
  assert.deepEqual(renders,[]);assert.deepEqual(refreshes,[]);assert.deepEqual(notices,[]);
 });
+test('new research task adopts a chosen catalog structure before any model preparation',async()=>{
+ const state=setupTaskCreation(),{c,calls,form}=state;
+ const digest='a'.repeat(64),pin='b'.repeat(64);
+ vm.runInContext(`newGeometryCatalog={catalog_sha256:'${digest}',entries:[{pin:'${pin}'}]};`,c);
+ c.$('#new-geometry-choice').value=pin;
+ const mutation={id:NEXT,title:form.values.title,prompt:form.values.prompt,mode:'research',status:'draft',revision:1};
+ const selected={...mutation,revision:2,initial_geometry:{catalog_sha256:digest,entry:{pin}}};
+ c.api=async(path,data)=>{calls.push({path,data});if(path==='/api/tasks')return mutation;
+  if(path.endsWith('/initial-geometry'))return selected;
+  return calls.some(call=>call.path.endsWith('/initial-geometry'))?selected:mutation;};
+ await state.submit();
+ assert.deepEqual(calls.map(call=>call.path),['/api/tasks','/api/tasks/'+NEXT,'/api/tasks/'+NEXT+'/initial-geometry','/api/tasks/'+NEXT]);
+ assert.equal(calls[2].data.revision,1);assert.equal(calls[2].data.catalog_sha256,digest);assert.equal(calls[2].data.pin,pin);
+ assert.equal(c.current,selected);
+});
+test('new-task literature CSV is validated before creation and opens source review without a model request',async()=>{
+ const state=setupTaskCreation(),{c,calls,form}=state;
+ c.TextDecoder=TextDecoder;c.schema.model_calls_enabled=true;
+ const csv='material,conditions\nW,300 K\n';let opened='';
+ c.$('#new-literature-file').files=[{size:Buffer.byteLength(csv),arrayBuffer:async()=>new TextEncoder().encode(csv).buffer}];
+ c.openLiteratureDialog=value=>{opened=value;};
+ const mutation={id:NEXT,title:form.values.title,prompt:form.values.prompt,mode:'research',status:'draft',revision:1};
+ c.api=async(path,data)=>{calls.push({path,data});return path==='/api/tasks'?mutation:path==='/api/literature/preview'?{source_sha256:'a'.repeat(64)}:mutation;};
+ await state.submit();
+ assert.deepEqual(calls.map(call=>call.path),['/api/literature/preview','/api/tasks','/api/tasks/'+NEXT]);
+ assert.equal(calls[0].data.csv_text,csv);assert.equal(opened,csv);
+ assert.equal(c.current.id,NEXT);
+});
 
 function setupTaskTagWorkspace(fields){
  const state=setupCandidateNavigation(),{c,calls}=state;
  c.current={id:OLD,status:'draft',mode:'research',updated_at:'2026-01-01T00:00:00Z',fields,prompt:'Complete research request'};
  c.workspaceState={task:OLD,phase:'ready',updated:null};c.resultTab='overview';
- for(const name of ['renderRefreshStatus','renderTargetPlanning','renderFlow','addInfo','renderRawFiles','renderExecutionControls','renderReferenceProgress'])c[name]=()=>{};
+ for(const name of ['renderRefreshStatus','renderTargetPlanning','renderFlow','addInfo','renderRawFiles','renderAuthorFilesInRail','renderExecutionControls','renderReferenceProgress'])c[name]=()=>{};
  c.currentRawFiles=()=>[];
  const replies={
   'reference-result':{report:null},execution:{job:null},'raw-files':{files:[]},

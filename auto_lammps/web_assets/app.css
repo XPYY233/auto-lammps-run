@@ -886,6 +886,8 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 .workflow-action>button {display:block;margin-top:8px}
 .workflow-action .form-note {margin-bottom:0}
 .author-reference {margin:20px 0;border-left:4px solid #244b83}
+.paper-workflow-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.paper-workflow-heading h2{margin:0}
 .reference-output-status {font-weight:600;color:#244b83}
 .reference-identities {display:grid;grid-template-columns:auto 1fr;gap:6px 16px}
 .reference-identities dd {margin:0;overflow-wrap:anywhere}
@@ -920,6 +922,9 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 #task-view.results-first .task-hero{order:-3}
 #task-view.results-first .result-workspace{order:-2}
 #task-view.results-first .ai-current{order:-1}
+#task-view.author-results-first .author-reference{order:-2;margin:0}
+#task-view.author-results-first .result-workspace{order:-1}
+#task-view.author-results-first .ai-current{order:0}
 #task-view #research-results,#task-view #reference-progress,#task-view #reference-ai-charts,#task-view #execution-flow,#task-view #task-files,#task-view #advanced-task,#task-view .discussion-panel,#task-view #ai-current-title{scroll-margin-top:100px}
 #task-view .reference-ai-charts{margin:18px 20px 20px;padding:18px;border:1px solid #d5e3f4;border-radius:10px;background:#f8fbff}
 #task-view .reference-ai-charts .section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -932,8 +937,17 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
  #task-view .task-contents>strong,#task-view .task-contents-divider{display:none}
  #task-view .task-contents-group{display:flex;padding:0}
  #task-view .task-contents button{width:auto;flex:none;padding:7px 10px}
- #task-view .task-contents .task-contents-primary{margin:0}
+#task-view .task-contents .task-contents-primary{margin:0}
 }
+
+.new-task-resources{margin-top:14px}
+.new-task-resource-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:13px}
+.new-task-resource-grid section{min-width:0;padding:15px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.new-task-resource-grid h3{margin:0 0 10px;font-size:14px}
+.new-task-resource-grid label{display:block;margin-top:10px}
+.new-task-resource-grid select,.new-task-resource-grid input[type=file]{width:100%;min-width:0}
+.new-task-resource-grid .source-context{margin-top:10px}
+@media(max-width:760px){.new-task-resource-grid{grid-template-columns:1fr}}
 @media(max-width:760px){
  #task-view .task-contents{top:98px}
  #task-view .result-workspace-heading{display:block}
