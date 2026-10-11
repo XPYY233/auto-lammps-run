@@ -107,21 +107,55 @@ class AdapterPlanningTests(unittest.TestCase):
     def test_malformed_review_never_regenerates_scientific_proposal(self):
         import json
         from auto_lammps.agent_candidates import generate_candidate_draft, ReviewContractError
+        from auto_lammps.candidate_jobs import proposal_rounds
         from auto_lammps.deepseek import DeepSeekClient, ModelCalls
+        from auto_lammps.manifest import canonical, sha256
         from test_deepseek import response
         value=deepcopy(self.value)
         value['workflow']='run 0\nemit_table final.data "0 $(pe)"'
+        original=deepcopy(value)
+        invalid={'issues':'invalid','coverage':[],'summary':'invalid'}
         calls=ModelCalls(self.root/'bad-review.sqlite',self.calls.config,max_requests=4)
-        seen=[]
+        seen=[]; saved=[]; events=[]; stages=[]
+        def reserve(request_id,kind):
+            events.append({'state':'proposal_request','payload':{'request_id':request_id,'kind':kind}})
+        def save(link):
+            saved.append(link)
+            events.append({'state':'model_proposal','payload':link})
         def transport(body,*args):
             messages=json.loads(body)['messages'];seen.append(messages)
-            answer={'issues':'invalid','coverage':[],'summary':'invalid'} if len(seen)>1 else value
+            answer=invalid if messages[0]['content'].startswith('Audit a proposed') else value
             return 200,response(answer)
         client=DeepSeekClient(calls,transport=transport,key_reader=lambda:'synthetic-key')
-        with self.assertRaises(ReviewContractError):
+        with self.assertRaisesRegex(ReviewContractError,'one review-report repair exhausted'):
             generate_candidate_draft(client,self.adapter,task_text='synthetic task',units='metal',
-                resources=self.resources,store=self.root/'bad-review',require_analysis_plan=True,review_plan=True)
-        self.assertEqual(len(seen),2)
+                resources=self.resources,store=self.root/'bad-review',require_analysis_plan=True,review_plan=True,
+                before_proposal_request=reserve,on_proposal=save,on_stage=stages.append)
+        self.assertEqual([messages[0]['content'].startswith('Audit a proposed') for messages in seen],
+                         [False,True,True])
+        self.assertEqual([event['payload']['kind'] for event in events if event['state']=='proposal_request'],
+                         ['initial'])
+        self.assertEqual(len(saved),1)
+        self.assertEqual(saved[0]['proposal_sha256'],sha256(canonical(original)))
+        self.assertEqual(proposal_rounds(events),
+                         {'limit':3,'used':1,'remaining':2,'historical_count_unknown':False})
+        self.assertEqual(value,original)
+        self.assertEqual(stages.count('model_requested'),1)
+        self.assertNotIn('repairing_plan',stages)
+        # The repair retains all original requirement/artifact/Adapter messages,
+        # appending only the bad report and one report-format instruction.
+        self.assertEqual(seen[2][:2],seen[1])
+        self.assertEqual(json.loads(seen[2][-2]['content']),invalid)
+        self.assertIn('Repair ONLY the static review report',seen[2][-1]['content'])
+        for messages in seen[1:]:
+            self.assertIn('scientific_adapter',json.loads(messages[1]['content']))
+        history=calls.history()
+        self.assertEqual(len(history),3)
+        self.assertTrue(all(item['receipt']['state']=='completed' for item in history))
+        self.assertEqual(sum(item['receipt']['usage']['total_tokens'] for item in history),90)
+        self.assertEqual([item['receipt']['structured_output'] for item in history].count(original),1)
+        self.assertEqual([item['receipt']['structured_output'] for item in history].count(invalid),2)
+        self.assertFalse((self.root/'bad-review').exists())
 
     def test_accounted_reviewer_repairs_omission_before_freezing(self):
         import json

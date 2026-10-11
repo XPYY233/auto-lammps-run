@@ -6,6 +6,39 @@ class ReviewEvidenceError(ValueError):
     pass
 
 
+def normalized_review_issues(value):
+    """Accept the existing single-key issue aliases without dropping content."""
+    if not isinstance(value, list):
+        return value
+    return [next(iter(item.values()))
+            if isinstance(item, dict) and set(item) in ({'error'}, {'issue'})
+            and isinstance(next(iter(item.values())), str) else item for item in value]
+
+
+def validate_report(value, required, sources):
+    """Return a complete grounded report, preserving every blocking issue.
+
+    This validates report shape and literal references, not scientific meaning.
+    An overlong issue list must be repaired by its author, never truncated here.
+    """
+    if not isinstance(value, dict) or set(value) != {'issues', 'coverage', 'summary'}:
+        raise ReviewEvidenceError('Static review report must contain exactly issues, coverage and summary')
+    issues = normalized_review_issues(value['issues'])
+    if not isinstance(issues, list):
+        raise ReviewEvidenceError('Static review issues must be a list of nonempty strings')
+    if len(issues) > 12:
+        raise ReviewEvidenceError(
+            f'Static review returned {len(issues)} issues; maximum is 12. '
+            'Merge duplicate issues and include only genuine blocking errors; '
+            'retain every genuine blocking error without truncation')
+    if any(not isinstance(issue, str) or not issue.strip() for issue in issues):
+        raise ReviewEvidenceError('Static review issues must be nonempty strings or single-key issue/error aliases')
+    if not isinstance(value['summary'], str):
+        raise ReviewEvidenceError('Static review summary must be a string')
+    validate_coverage(value['coverage'], required, sources, blocking_issues=issues)
+    return {**value, 'issues': issues}
+
+
 def requirements(text, *, guidance=None, answers=None):
     if not isinstance(text, str) or not text.strip() or len(text) > 24000:
         raise ReviewEvidenceError('Missing permitted research requirements')

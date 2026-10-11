@@ -25,9 +25,10 @@ from .candidate_tools import (GUIDE, expand_tools, check_table_writers, workflow
 from .coordination_analysis import GUIDE as STRUCTURAL_GUIDE
 from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
+from .plan_review import normalized_review_issues
 
 GENERATOR_VERSION = 22
-PLAN_REVIEW_VERSION = 2
+PLAN_REVIEW_VERSION = 3
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
     'Preserve the scientific scope, material identity, every specified value and method, and any immutable initial geometry. '
@@ -180,12 +181,6 @@ def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
     if sampled:
         result['type_sampler'] = {key:sampled[key] for key in ('prefix','type_count','seed')}
     return result
-
-
-def normalized_review_issues(value):
-    if not isinstance(value,list): return value
-    return [next(iter(item.values())) if isinstance(item,dict) and set(item) in ({'error'},{'issue'})
-            and isinstance(next(iter(item.values())),str) else item for item in value]
 
 
 def validate_body(body, outputs, *, output_prefix='/output/', structures=None, type_count=None, packages=(),
@@ -1043,7 +1038,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                 reviewed_binding=adapter.resolve_potential(proposal['potential_pin'], type_elements=_structure_metadata(proposal, initial_geometry)['type_elements'], units=units)
                 reviewed_script=render_candidate_script(proposal,units,reviewed_binding.commands,output_layout=output_layout,
                     initial_geometry=initial_geometry).decode('ascii')
-                from .plan_review import requirements, validate_coverage, ReviewEvidenceError
+                from .plan_review import requirements, validate_report, ReviewEvidenceError
                 required = requirements(task_text, guidance=guidance, answers=answers)
                 geometry_checks = {name:{**{k:g.receipt[k] for k in
                     ('atom_count','composition','type_elements','boundary')},
@@ -1069,7 +1064,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'Evidence source names are rendered_script, resource_metadata, geometry_checks and analysis_plan. '
                      'Quotes must occur verbatim in the named supplied source; do not paraphrase or invent a command. '
                      'An unimplemented requirement may have empty evidence only with explicit blocking issues. '
-                     'At most 12 issues. Audit rendered_script, the COMPLETE adapter-expanded LAMMPS input, '
+                     'At most 12 issues, containing ONLY concrete blocking errors. Do not put acceptable choices, '
+                     'non-blocking caveats, provenance already retained by the controller, or warnings in issues. '
+                     'Combine repeated descriptions of the same blocking error without omitting any real error. '
+                     'Audit rendered_script, the COMPLETE adapter-expanded LAMMPS input, '
                      'not the partial proposal.workflow. The adapter already supplies units, atom_style, boundary, '
                      'initial read_data, atom_modify map, exact potential commands, and all load_structure switches. '
                      'capture and emit_table are adapter operations: they MUST expand into variable and print '
@@ -1077,6 +1075,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'begin_cycle/end_cycle, run_schedule, sample_swap_types, save_state and scan_sites are compiler operations. Their exact bounded '
                      'loop/label/next/jump and constant type-variable expansions are permitted trusted controls, '
                      'not raw model dispatch or extra retries. workflow_screen retains their declared counts. '
+                     'sample_swap_types chooses i=floor(random(1,n+1)) and r=floor(random(1,n)); '
+                     'j=r+(r>=i), giving two distinct types in 1..n, never n+1. Audit the complete expression, '
+                     'not an intermediate bound or variable name. The potential adapter copies verified source bytes '
+                     'under canonical model filenames and binds pin/checksums/type mapping; a canonical filename '
+                     'different from the source basename is not a fabricated potential or a provenance failure. '
                      'run_schedule lowers only the supplied explicit timestep list into literal run lengths, preserving the declared '
                      'fix and sampler lifecycle. Planned MC attempts describe declared work, never observed accepted swaps. '
                      'Complete scan_sites includes ALL frozen states/sites/variants; every variant restores the SAME '
@@ -1094,6 +1097,10 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'Check actual commands, not claims in summary: every condition and '
                      'stage is implemented; relaxation/deletion order, atom counts/site IDs, variable lifetime, '
                      'formulas, units, output quantity, declared analysis operations and output formatting agree. '
+                     'A coordinate equal to step is the global simulation timestep, not relative production time. '
+                     'Account for all preceding runs/minimizations and any reset_timestep; check the declared '
+                     'analysis window and final-frame index against the full emitted sampling schedule. '
+                     'Omitting the requested production endpoint from a window or trajectory is a blocking error. '
                      'Each requested derived property must actually be calculated and extracted, not just prose. '
                      + MODEL_PLANNING_GUIDE +
                      'Check summary against the actual artifacts for the declared choices, rationale and assumptions; '
@@ -1123,26 +1130,39 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                                    'requirements': required, 'artifact_sources': review_sources}
                 try:
                     review_messages, _ = prepare_stage_messages('candidate_review', review_messages, review_evidence)
-                    validate_prepared_messages('candidate_review', review_messages, review_evidence)
                 except ScientificAdapterError as error:
                     raise ReviewContractError(str(error)) from None
-                review=client.complete_json(review_id, review_messages, thinking=False)
-                value=review['value']; receipt=review['receipt']
-                if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
-                    raise ModelError('plan_review_not_completed')
-                receipts.append(receipt)
-                if isinstance(value,dict):
-                    value={**value,'issues':normalized_review_issues(value.get('issues'))}
-                if (not isinstance(value,dict) or set(value)!={'issues','coverage','summary'}
-                        or not isinstance(value['issues'],list) or len(value['issues'])>12
-                        or any(not isinstance(i,str) or not i.strip() for i in value['issues'])
-                        or not isinstance(value['summary'],str)):
-                    raise ReviewContractError('Static reviewer returned an invalid requirement-to-step report; the existing calculation proposal is retained, not rewritten')
-                try:
-                    validate_coverage(value['coverage'], required, review_sources,
-                                      blocking_issues=value['issues'])
-                except ReviewEvidenceError as error:
-                    raise ReviewContractError(str(error)+'; existing proposal retained, not regenerated') from None
+                for report_attempt in range(2):
+                    try:
+                        validate_prepared_messages('candidate_review', review_messages, review_evidence)
+                    except ScientificAdapterError as error:
+                        raise ReviewContractError(str(error)) from None
+                    # Only a completed but malformed review can be repaired.
+                    # Unknown transport outcomes never reach this repair branch.
+                    review=client.complete_json(review_id, review_messages, thinking=False)
+                    value=review['value']; receipt=review['receipt']
+                    if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
+                        raise ModelError('plan_review_not_completed')
+                    receipts.append(receipt)
+                    try:
+                        value=validate_report(value, required, review_sources)
+                        break
+                    except ReviewEvidenceError as error:
+                        if report_attempt:
+                            raise ReviewContractError(str(error)+'; one review-report repair exhausted; existing proposal retained, not regenerated') from None
+                        problem=str(error)
+                        review_messages += [
+                            {'role':'assistant','content':canonical(value).decode()},
+                            {'role':'user','content':canonical({'review_report_error':problem,
+                                'action':'Repair ONLY the static review report for the SAME unchanged proposal. '
+                                'Return exactly issues/coverage/summary; issues contains at most 12 concrete '
+                                'blocking errors, never acceptable choices or non-blocking warnings. '
+                                'Combine duplicate blockers but retain all real blockers. Retain every requirement ID '
+                                'and cite literal evidence from the original supplied sources; never invent evidence '
+                                'or alter the calculation plan. This is the sole report-format repair.'}).decode()}]
+                        review_id=sha256(canonical({'protocol_version':PLAN_REVIEW_VERSION,
+                            'repair_of':review_id,'invalid_output_sha256':receipt['output_sha256'],
+                            'thinking':False,'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
                 reviews.append({'proposal_sha256':sha256(canonical(proposal)),'receipt':receipt,**value})
                 if value['issues']:
                     raise CandidateError('Requirement-to-workflow review: '+'; '.join(value['issues']))
