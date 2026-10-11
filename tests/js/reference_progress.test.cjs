@@ -18,7 +18,7 @@ function render(progress){
 const request=(id,job,state,accounted=false)=>({id,job_id:job,state,accounted,actual_core_seconds:accounted?3600:null,resources:{cores:32,memory_bytes:8589934592,wall_seconds:604800},events:[{kind:'scheduler_observed',at:Date.now()/1000}],monitoring:null});
 const progress=()=>({task_id:'task',entries:[{paper:{title:'Synthetic scientific paper',doi:'10.1000/example',doi_url:'https://doi.org/10.1000/example',scope:'Full declared reference scope'},evaluation:{available:true,dispatch_claims:2,max_attempts:3,requests:[request('first','12345','failed',true),request('second','12346','running')]}}]});
 test('running reference shows both real jobs and failure without a completed report',()=>{
- const r=render(progress());assert.equal(r.hidden,false);assert.match(r.text,/12345/);assert.match(r.text,/12346/);assert.match(r.text,/A 第 1 次 · 计算失败/);assert.match(r.text,/A 第 2 次 · 运行中/);assert.ok(r.info.some(([key,value])=>key==='A 作业号'&&value==='12346'));assert.match(r.text,/尚未最终核算/);assert.match(r.text,/不代表科学复现通过/);
+ const r=render(progress());assert.equal(r.hidden,false);assert.match(r.text,/12345/);assert.match(r.text,/12346/);assert.match(r.text,/A 第 1 次 · 计算失败/);assert.match(r.text,/A 第 2 次 · 运行中/);assert.ok(r.info.some(([key,value])=>key==='A 作业号'&&value==='12346'));assert.match(r.text,/尚未最终核算/);assert.match(r.text,/查看 2 次/);
  assert.ok(r.info.every(([key])=>key.startsWith('A ')));
 });
 test('reference status cannot leak from a different current task',()=>{

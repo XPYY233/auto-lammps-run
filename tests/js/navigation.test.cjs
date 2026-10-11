@@ -441,6 +441,7 @@ function setupTaskCreation(){
  let submitted;
  c.current=null;c.resultTab='overview';c.schema.model_calls_enabled=false;c.$('#task-view').hidden=true;
  vm.runInContext('let newGeometryCatalog=null;',c);
+ vm.runInContext('let newPaperCatalog=null;',c);
  c.Option=function(label,value){this.label=label;this.value=value;};
  c.FormData=function(form){return new Map(Object.entries(form.values));};
  c.action=work=>{submitted=work();return submitted;};c.recordRoute=route=>routes.push(route);c.setMode=mode=>modes.push(mode);
@@ -462,6 +463,52 @@ test('the actual create handler opens its saved task from a hidden view and rejo
  assert.deepEqual(routes,['#'+NEXT]);assert.deepEqual(modes,['research']);assert.equal(form.resetCount,1);
  assert.match(textContent(c.$('#target-planning')),/文献工作台 · 论文结果 P/);
  assert.equal(findElement(c.$('#target-planning'),item=>item.tagName==='img').src,`/api/tasks/${NEXT}/paper-evidence/files/fixture.png`);
+});
+test('reproduction creation links the selected paper before opening P and never starts model preparation',async()=>{
+ const state=setupTaskCreation(),{c,calls,form}=state;
+ const paperId='c'.repeat(32),paper={id:paperId,title:'Selected paper',revision:7,selection:'selected'};
+ vm.runInContext(`newPaperCatalog={papers:[${JSON.stringify(paper)}]};`,c);
+ c.$('#new-paper-select').value=paperId;form.values.mode='reproduction';c.schema.model_calls_enabled=true;
+ const mutation={id:NEXT,title:form.values.title,prompt:form.values.prompt,mode:'reproduction',status:'draft',revision:1};
+ c.api=async(path,data)=>{calls.push({path,data});return path==='/api/tasks'?mutation:path===`/api/papers/${paperId}/tasks`?{...paper,revision:8}:mutation;};
+ await state.submit();
+ assert.deepEqual(calls.map(call=>call.path),['/api/tasks',`/api/papers/${paperId}/tasks`,'/api/tasks/'+NEXT]);
+ assert.equal(calls[1].data.revision,7);assert.equal(calls[1].data.task_id,NEXT);
+ assert.equal(c.current.id,NEXT);assert.equal(form.resetCount,1);
+});
+test('reproduction creation requires a selected paper before writing a task',async()=>{
+ const state=setupTaskCreation(),{c,calls,form,notices}=state;
+ form.values.mode='reproduction';c.$('#new-paper-select').value='missing';
+ let pending;c.action=work=>{pending=(async()=>{try{await work();}catch(error){c.notice(error.message,true);}})();};
+ state.submit();await pending;
+ assert.equal(calls.length,0);assert.match(notices[0],/请先选择已选入复现计划的论文/);
+});
+test('failed paper association keeps the created task and tells the user to link that record',async()=>{
+ const state=setupTaskCreation(),{c,calls,form,routes,notices}=state;
+ const paperId='d'.repeat(32),paper={id:paperId,title:'Selected paper',revision:4,selection:'selected'};
+ vm.runInContext(`newPaperCatalog={papers:[${JSON.stringify(paper)}]};`,c);
+ c.$('#new-paper-select').value=paperId;form.values.mode='reproduction';
+ const mutation={id:NEXT,title:form.values.title,prompt:form.values.prompt,mode:'reproduction',status:'draft',revision:1};
+ c.api=async(path,data)=>{calls.push({path,data});if(path==='/api/tasks')return mutation;
+  if(path===`/api/papers/${paperId}/tasks`)throw new Error('文献版本已更新');
+  if(path===`/api/papers/${paperId}`)return {...paper,tasks:[]};return mutation;};
+ await state.submit();
+ assert.deepEqual(calls.map(call=>call.path),['/api/tasks',`/api/papers/${paperId}/tasks`,`/api/papers/${paperId}`,'/api/tasks/'+NEXT]);
+ assert.equal(c.current.id,NEXT);assert.equal(form.resetCount,0);assert.deepEqual(routes,['#'+NEXT]);
+ assert.match(notices.at(-1),/不要重复创建/);
+});
+test('a lost paper link response is reconciled before showing an error or retrying',async()=>{
+ const state=setupTaskCreation(),{c,calls,form,notices}=state;
+ const paperId='e'.repeat(32),paper={id:paperId,title:'Selected paper',revision:4,selection:'selected'};
+ vm.runInContext(`newPaperCatalog={papers:[${JSON.stringify(paper)}]};`,c);
+ c.$('#new-paper-select').value=paperId;form.values.mode='reproduction';
+ const mutation={id:NEXT,title:form.values.title,prompt:form.values.prompt,mode:'reproduction',status:'draft',revision:1};
+ c.api=async(path,data)=>{calls.push({path,data});if(path==='/api/tasks')return mutation;
+  if(path===`/api/papers/${paperId}/tasks`)throw new Error('response lost');
+  if(path===`/api/papers/${paperId}`)return {...paper,tasks:[{id:NEXT}]};return mutation;};
+ await state.submit();
+ assert.deepEqual(calls.map(call=>call.path),['/api/tasks',`/api/papers/${paperId}/tasks`,`/api/papers/${paperId}`,'/api/tasks/'+NEXT]);
+ assert.equal(c.current.id,NEXT);assert.match(notices.at(-1),/论文与任务已关联/);
 });
 test('a queued navigation still prevents the actual create handler from repainting after its late task GET',async()=>{
  const state=setupTaskCreation(),{c,calls,renders,refreshes,notices,form}=state;let resolve;

@@ -20,7 +20,7 @@ function setup(){
  const files={details:[{open:false},{open:false}],scrollCount:0,querySelectorAll(){return this.details;},scrollIntoView(){this.scrollCount++;},closest:()=>null};
  elements.set('#task-quick-links',quick);elements.set('#task-quick-note',note);
  elements.set('#author-reference .reference-discussion',panel);elements.set('#task-files',files);
- const c=vm.createContext({$:selector=>elements.get(selector),Event,prepareResultReview(){throw Error('wrong action');},openPaperExtraction(){extracts++;}});
+ const c=vm.createContext({$:selector=>elements.get(selector),Event,paperWorkflowState:()=>({}),prepareResultReview(){throw Error('wrong action');},openPaperExtraction(){extracts++;}});
  vm.runInContext(source.slice(source.indexOf('const taskQuickLinks='),source.indexOf('const taskContents=')),c);
  return {quick,note,input,panel,files,extracts:()=>extracts};
 }
