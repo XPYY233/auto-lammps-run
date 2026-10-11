@@ -171,7 +171,7 @@ def _stage_context(stage, evidence):
         'site_thermodynamics_contract': site_thermodynamics.GUIDE,
         'saved_report_identity': 'the report frozen identity remains authoritative',
     }}
-    if stage not in {'result_discussion','result_chart'}:
+    if stage not in {'result_discussion', 'result_chart'}:
         from . import structures, candidate_tools
         # No deployment atom bound is known in these non-executing stages. Do
         # not substitute a guessed bound for the configured candidate service.

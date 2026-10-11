@@ -63,9 +63,14 @@ class ReferenceWebTests(unittest.TestCase):
 
     def test_research_and_missing_tasks_cannot_use_reference_flow(self):
         research = self.store.create('Research', 'No paper required', 'research')
+        history = self.http.get(f"/api/tasks/{research['id']}/reference-evidence")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()['requests'], [])
+        self.assertFalse(history.json()['execution_authorized'])
         for identifier, expected in ((research['id'],422), ('f'*32,404)):
             url = f'/api/tasks/{identifier}/reference-evidence'
-            self.assertEqual(self.http.get(url).status_code, expected)
+            if identifier == 'f'*32:
+                self.assertEqual(self.http.get(url).status_code, expected)
             self.assertEqual(self.http.post(url, json={'revision':1, 'csv_texts':[self.csv]},
                 headers=HEADERS).status_code, expected)
         self.transport.assert_not_called()

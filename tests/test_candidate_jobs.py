@@ -319,6 +319,32 @@ class CandidateJobTests(unittest.TestCase):
         value['workflow']='include forbidden-'+str(index)+'.lmp'
         return value
 
+    def test_same_proposal_gets_independent_feedback_in_one_bounded_repair(self):
+        rejected=self.invalid_plan(1)
+        rejected['analysis']['quantity']=''
+        original=deepcopy(rejected)
+        self.bounded_service([rejected,deepcopy(self.fixture.value)])
+        self.enqueue();job=self.finished()
+        self.assertEqual(job['state'],'prepared',job['result'])
+        self.assertEqual(job['proposal_rounds']['used'],2)
+        self.assertEqual(self.fixture.transport.call_count,2)
+        validation=[e['payload'] for e in job['events']
+                    if e['state']=='model_proposal' and 'validation' in e['payload']]
+        self.assertEqual(len(validation),1)
+        issues=validation[0]['validation']['diagnostics']
+        self.assertIn('/analysis/quantity',[item['path'] for item in issues])
+        self.assertIn('/workflow/lines/0',[item['path'] for item in issues])
+        payload=json.loads(self.fixture.transport.call_args_list[1].args[0])
+        repair=json.loads(payload['messages'][-1]['content'])
+        self.assertEqual(repair['diagnostics'],issues)
+        self.assertEqual(json.loads(payload['messages'][-2]['content']),original)
+        self.assertEqual(rejected,original)
+        # Repeated immutable validation events retain the same request ID and
+        # do not become extra model rounds or override the prepared result.
+        request_ids={e['payload']['request_id'] for e in job['events']
+                     if e['state']=='proposal_request'}
+        self.assertEqual(len(request_ids),2)
+
     def test_three_rounds_succeed_and_keep_complete_plan_approvable_without_fourth(self):
         self.bounded_service([self.invalid_plan(1),self.invalid_plan(2),deepcopy(self.fixture.value)])
         self.enqueue();job=self.finished()
@@ -392,6 +418,12 @@ class CandidateJobTests(unittest.TestCase):
         requests=[e for e in job['events'] if e['state']=='proposal_request']
         self.assertEqual([e['payload']['kind'] for e in requests],['initial','json_repair','validation_repair'])
         self.assertEqual(job['proposal_rounds']['used'],3)
+        self.assertIn('最后检查问题',job['result']['detail'])
+        self.assertIn('include',job['result']['detail'])
+        validation=[e for e in job['events'] if e['state']=='model_proposal'
+                    and 'validation' in e['payload']]
+        self.assertEqual(len(validation),2)
+        self.assertTrue(all(e['payload']['validation']['diagnostics'] for e in validation))
 
     def test_round_reservations_are_atomic_and_reading_does_not_spend_or_reset(self):
         with patch.object(self.service.pool,'submit'):

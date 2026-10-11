@@ -103,6 +103,7 @@ test('clear selection uses current revision and no resource or workflow payload'
 test('geometry selection and invalidation history explain saved events in ordinary language',async()=>{
   const c=setup();c.context.schema={fields:{material:'材料与成分'}};
   c.elements.set('#history-list',c.context.node('ol'));
+  c.elements.set('#task-view',c.context.node('section'));
   vm.runInContext(source.slice(source.indexOf('async function renderHistory() {'),source.indexOf('async function afterChange(')),c.context);
   const reading=c.context.renderHistory();
   c.pending.shift().resolve({events:[

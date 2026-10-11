@@ -6,10 +6,11 @@ const vm=require('node:vm');
 const source=fs.readFileSync('auto_lammps/web_assets/app.js','utf8');
 const guidance=source.slice(source.indexOf('function emptyResultGuidance(){'),source.indexOf('function renderWorkspaceResults(){'));
 
-function forTask({job=null,candidate=null,mode='research',status='conditions_frozen',exhausted=false}={}){
+function forTask({job=null,candidate=null,mode='research',status='conditions_frozen',exhausted=false,authorReport=null}={}){
  const context=vm.createContext({
   executionState:job?{job}:null,ordinaryExecutionJob:()=>null,
   candidateRecord:candidate,current:{mode,status},proposalRoundsExhausted:()=>exhausted,
+  paperWorkflowState:()=>({report:authorReport}),authorEvidenceIdentity:report=>report?.role==='reference'?'bound-source':null,
  });
  vm.runInContext(guidance,context);
  return Array.from(context.emptyResultGuidance());
@@ -41,4 +42,9 @@ test('paper reproduction without a result directs the user to its P–A–B reco
  const [title,,,target]=forTask({mode:'reproduction'});
  assert.match(title,/复现结果尚未生成/);
  assert.equal(target,'#reference-progress');
+});
+
+test('a saved human A result points to its actual evidence while B remains pending',()=>{
+ const [title,detail,,target]=forTask({status:'draft',authorReport:{role:'reference'}});
+ assert.match(title,/作者 A 已有结果/);assert.match(detail,/独立计算/);assert.equal(target,'#author-reference');
 });

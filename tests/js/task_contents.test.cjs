@@ -30,7 +30,9 @@ function setup(){
   const tabs=['overview','targets','plots','history'].map(key=>{const tab=element('tab-'+key);tab.dataset.resultTab=key;return tab;});
   $('#result-tabs').children=tabs;
   let renders=0;
-  const c=vm.createContext({$,current:{mode:'reproduction'},workspaceReport:{closeout:{}},normalResult:null,resultTab:'overview',renderWorkspaceResults(){renders++;}});
+  const c=vm.createContext({$,current:{id:'task',mode:'reproduction'},workspaceReport:{closeout:{}},normalResult:null,resultTab:'overview',
+    paperWorkflowState:()=>({task_id:'task',report:null,identity:null}),authorEvidenceIdentity:()=>null,
+    renderWorkspaceResults(){renders++;}});
   vm.runInContext(section,c);
   return {c,$,buttons,overview,targets,plots,history,progress,plan,discussion,scrolled,tabs,renders:()=>renders};
 }
@@ -54,6 +56,19 @@ test('without saved results the directory keeps history but hides empty plot and
   assert.equal(s.history.hidden,false);assert.equal(s.progress.hidden,true);
   s.$('#task-contents').onclick({target:s.plots});
   assert.equal(s.renders(),0);assert.deepEqual(s.scrolled,[]);
+});
+
+test('a source-bound A report gets the primary directory entry before independent B exists',()=>{
+  const s=setup();s.c.workspaceReport=null;
+  const report={task_id:'task',role:'reference'};
+  s.c.paperWorkflowState=()=>({task_id:'task',report,identity:'task:source:manifest'});
+  s.c.authorEvidenceIdentity=value=>value===report?'task:source:manifest':null;
+  s.c.updateTaskContents();
+  assert.equal(s.$('#task-view').classList.values.has('author-results-first'),true);
+  assert.equal(s.overview.dataset.contentsTarget,'#author-reference');
+  assert.equal(s.$('#result-workspace-heading').textContent,'独立计算结果');
+  s.$('#task-contents').onclick({target:s.overview});
+  assert.deepEqual(s.scrolled,['#author-reference']);
 });
 
 test('a saved baseline comparison replaces stale preparation progress with a result entry',()=>{

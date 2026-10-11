@@ -13,6 +13,21 @@ test('a rejected source quote remains the current visible stage after reopening'
  assert.match(elements.get('#ai-current-meta').textContent,/尚未生成方案或提交计算/);
 });
 
+test('saved author A output replaces a stale new-task heading while B keeps its normal next action',()=>{
+ const elements=new Map(),report={task_id:'paper-task',output_status:'partial',output_valid:false,job_id:'63402794',
+  coverage:[{label:'逐位点扫描状态',available:1,required:50}]};
+ const c=vm.createContext({current:{id:'paper-task',status:'draft',mode:'reproduction',fields:{temperature:{selected:null}},generated_batches:{}},
+  candidateRecord:null,executionState:null,workspaceReport:null,normalResult:null,activityData:{task_id:'paper-task',now:'已收到需求',steps:[]},
+  ordinaryExecutionJob:()=>null,paperWorkflowState:()=>({task_id:'paper-task',report}),
+  $:key=>{if(!elements.has(key))elements.set(key,{hidden:false,disabled:false,scrollIntoView(){}});return elements.get(key)}});
+ vm.runInContext(source.slice(source.indexOf('function renderCurrentActivity()'),source.indexOf('function scheduleActivityRefresh()')),c);
+ c.renderCurrentActivity();
+ assert.equal(elements.get('#ai-current-title').textContent,'作者 A 已有部分输出');
+ assert.match(elements.get('#ai-current-meta').textContent,/1\/50/);
+ assert.match(elements.get('#previous-step').textContent,/作者 A：作业 63402794 · 部分输出已保存/);
+ assert.equal(elements.get('#next-action').textContent,'让应用 AI 整理需求');
+});
+
 test('saved condition failure is shown in task list but never overrides actual HPC state',()=>{
  const c=vm.createContext({taskFinished:()=>false});
  vm.runInContext(source.slice(source.indexOf('function taskState(t)'),source.indexOf('function statsFor(')),c);
