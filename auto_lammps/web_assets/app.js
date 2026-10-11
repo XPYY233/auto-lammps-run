@@ -983,6 +983,8 @@ function renderCurrentActivity(){
   if(generate)generate.textContent='根据需求整理条件';
   const taskActivity=activityData?.task_id===current?.id?activityData:null;
   const job=executionState?.job||ordinaryExecutionJob();
+  const reference=typeof paperWorkflowState==='function'?paperWorkflowState():null;
+  const author=reference&&reference.task_id===current?.id?reference.report:null;
   const preparing=candidateRecord&&['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files'].includes(candidateRecord.state);
   if(preparing){
     title.textContent=candidateStatus(candidateRecord).label;
@@ -1009,6 +1011,15 @@ function renderCurrentActivity(){
     detail.textContent=condition.detail||'模型答复和来源核对分开记录；未通过核对的条件不会写入方案。';
     meta.textContent='条件整理已记录 '+(condition.call_count||0)+' 次模型调用 · '+(condition.state==='failed'?'尚未生成方案或提交计算；失败和费用保留。':'条件确认后才能准备方案。');
     if(generate)generate.textContent=condition.recovery_required&&!condition.reconstructed?'恢复已返回的条件（不新增调用）':'根据需求整理条件';
+  }else if(candidateRecord?.state==='prepared'){
+    title.textContent='计算方案等待确认';
+    detail.textContent='查看应用 AI 准备的方案，确认后才能提交计算。';
+    meta.textContent=proposalRoundLabel(candidateRecord);
+  }else if(author){
+    const incomplete=(author.coverage||[]).find(item=>item.available<item.required);
+    title.textContent=author.output_status==='complete'&&author.output_valid===true?'作者 A 已有完整输出':'作者 A 已有部分输出';
+    detail.textContent='作者原代码运行结果已保存；独立计算 B 仍按下方研究流程继续。';
+    meta.textContent=incomplete?`${incomplete.label} ${incomplete.available}/${incomplete.required}`:'';
   }else{
     title.textContent=taskActivity?.now||'等待准备计算方案';
     detail.textContent=candidateRecord?.state==='prepared'?'方案已准备，等待你的确认。':current?.status==='conditions_frozen'?'应用按已确认的研究条件组织方案。':'需求已保存；先整理并确认必要条件，应用才会准备计算方案。';
@@ -1038,7 +1049,10 @@ function renderNextAction(){
   if(!button||!current)return;
   const steps=activityData?.task_id===current.id?(activityData.steps||[]):[];
   const prior=steps.length>1?steps[steps.length-2]:null;
-  previous.textContent=prior?`上一条记录：${prior.title||'阶段记录'} · ${new Date(prior.at).toLocaleString('zh-CN')}`:'还没有可核对的上一条阶段记录。';
+  const reference=typeof paperWorkflowState==='function'?paperWorkflowState():null;
+  const author=reference&&reference.task_id===current.id?reference.report:null;
+  previous.textContent=prior?`上一条记录：${prior.title||'阶段记录'} · ${new Date(prior.at).toLocaleString('zh-CN')}`:
+    author?`作者 A：${author.job_id?'作业 '+author.job_id+' · ':''}${author.output_status==='complete'&&author.output_valid===true?'完整输出已保存':'部分输出已保存'}`:'还没有可核对的上一条阶段记录。';
   button.hidden=true;button.disabled=false;button.onclick=null;note.textContent='';
   const jump=(label,selector,explain,expand)=>{
     const target=$(selector);
@@ -2879,6 +2893,7 @@ async function refreshPaperWorkflow(){
  active.error=replies.some(reply=>reply.status==='rejected')?'参考视图暂未刷新，保留上次已读取内容；这不表示计算失败。':null;
  renderPaperWorkflow();
  if(active.report)await refreshAuthorDiscussion(id,active.identity);
+ if(paperWorkflowCurrent(id,generation))renderCurrentActivity();
 }
 function renderPaperWorkflow(){
  const panels=paperWorkflowPanels();if(!panels||!current)return;
@@ -3142,7 +3157,7 @@ function renderPaperEvidence(box,report){
  const choice=renderPaperEvidence.selection;
  const generation=renderPaperEvidence.generation=(renderPaperEvidence.generation||0)+1;
  const panel=node('section',undefined,'paper-workbench');
- panel.append(node('h2','文献工作台 · 论文结果 P'),node('h3',report.title));
+ panel.append(node('h2','论文结果 P · 已登记图表'),node('h3',report.title));
  const sourceDetails=node('details',undefined,'paper-source-details');sourceDetails.append(node('summary','论文来源与版本'));
  const doi=node('a','DOI '+report.doi);doi.href='https://doi.org/'+report.doi;doi.target='_blank';doi.rel='noopener noreferrer';sourceDetails.append(doi,node('p',report.source_note,'subtle'));panel.append(sourceDetails);
  const tabs=node('div',undefined,'evidence-view-tabs'),area=node('section',undefined,'paper-evidence-content');tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','切换论文图表');panel.append(tabs,area);
@@ -3204,7 +3219,7 @@ function renderTargetPlanning() {
       show.onclick=()=>{resultTab='targets';for(const tab of $('#result-tabs').children)tab.setAttribute('aria-selected',String(tab.textContent==='论文目标'));renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});};
       box.append(show,node('p','这是对已完成基准的补充审计；原 PAB 验收、提交次数和历史不变。','form-note'));
     }else if(paper){
-      box.append(node('p',frozen?'P 已提取并显示；此历史任务没有事前图表计划，不能追写为事前冻结。':'P 已提取并显示。请查看工况、资源与缺项，再保存目标范围；未确定的比较标准仍需确认。','form-note'));
+      box.append(node('p',frozen?'论文 P 图表已登记；此历史任务没有事前图表计划。':'论文 P 图表已登记。请核对工况、资源与缺项，再保存目标范围。','form-note'));
       if(!frozen&&paper.target_import_allowed===true&&paper.target_inventory){const load=node('button','读取工作台图表清单并选择目标','primary');load.onclick=()=>action(async()=>{current=await api(`/api/tasks/${current.id}/paper-evidence/import-targets`,{revision:current.revision});await afterChange('已读取登记的工作台清单；选择范围不会提交计算。');});box.append(load);}
     }else box.append(node('p',frozen?'此历史任务没有事前图表计划；原有验收与运行记录保留。':'尚未接入文献工作台图表产物；这不表示正文不存在或不可复现。请先完成资源匹配与 P 提取接线。'));
     return;

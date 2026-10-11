@@ -405,7 +405,7 @@ test('after saving, a task GET rejoins human-only evidence and renders the actua
  assert.deepEqual(calls,[{path:'/api/tasks/'+OLD,data:undefined}]);assert.equal(c.current,enriched);
  assert.equal(renders.length,1);assert.equal(renders[0],enriched);
  const box=c.$('#target-planning'),text=textContent(box);assert.equal(box.hidden,false);
- assert.match(text,/文献工作台 · 论文结果 P/);assert.match(text,/Synthetic paper title/);
+ assert.match(text,/论文结果 P · 已登记图表/);assert.match(text,/Synthetic paper title/);
  assert.match(text,/10\.0000\/synthetic-fixture/);assert.match(text,/Synthetic caption, page 2/);
  const image=findElement(box,item=>item.tagName==='img');assert.equal(image.alt,'Synthetic figure 1');
  assert.equal(image.src,`/api/tasks/${OLD}/paper-evidence/files/fixture.png`);
@@ -461,7 +461,7 @@ test('the actual create handler opens its saved task from a hidden view and rejo
  assert.equal(calls[0].data.prompt,form.values.prompt);assert.equal(calls[0].data.mode,'research');
  assert.deepEqual(calls[1],{path:'/api/tasks/'+NEXT,data:undefined});
  assert.deepEqual(routes,['#'+NEXT]);assert.deepEqual(modes,['research']);assert.equal(form.resetCount,1);
- assert.match(textContent(c.$('#target-planning')),/文献工作台 · 论文结果 P/);
+ assert.match(textContent(c.$('#target-planning')),/论文结果 P · 已登记图表/);
  assert.equal(findElement(c.$('#target-planning'),item=>item.tagName==='img').src,`/api/tasks/${NEXT}/paper-evidence/files/fixture.png`);
 });
 test('reproduction creation links the selected paper before opening P and never starts model preparation',async()=>{

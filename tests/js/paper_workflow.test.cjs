@@ -27,7 +27,7 @@ function setup(){
  const c=vm.createContext({Date,Promise,crypto:{randomUUID:()=> 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'},current:{id:TASK,revision:1,mode:'reproduction'},
   $:selector=>constants.get(selector)||descendants(main).find(node=>node.id===selector.slice(1))||null,node:element,
   researchContent:(value,className)=>element('div',value,className),evidenceSourceHeading:role=>element('span',role),
-  action:fn=>fn(),notice(){},afterChange:async()=>{},renderWorkspaceResults(){},resultTab:'overview',
+  action:fn=>fn(),notice(){},afterChange:async()=>{},renderWorkspaceResults(){},renderCurrentActivity(){},resultTab:'overview',
   api:(path,data)=>{calls.push({path,data});return new Promise((resolve,reject)=>pending.push({path,data,resolve,reject}));},
   document:{createElement:tag=>element(tag)}});
  vm.runInContext(source.slice(source.indexOf('function paperWorkflowState(){'),source.indexOf('let targetPreviewGeneration=0;')),c);
