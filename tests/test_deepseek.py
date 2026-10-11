@@ -90,6 +90,51 @@ class DeepSeekTests(unittest.TestCase):
         self.assertTrue(result['receipt']['thinking'])
         self.assertEqual(self.calls.status()['remaining_requests'],0)
 
+    def test_per_request_thinking_override_does_not_change_shared_default(self):
+        client = self.client(2)
+        client.thinking = True
+        first = client.complete_json('a'*32, MESSAGES, thinking=False, reasoning_effort='low')
+        self.assertTrue(client.thinking)
+        body = json.loads(self.transport.call_args.args[0])
+        self.assertEqual(body['thinking'], {'type': 'disabled'})
+        self.assertNotIn('reasoning_effort', body)
+        self.assertFalse(first['receipt']['thinking'])
+        self.assertIsNone(first['receipt']['reasoning_effort'])
+        second = client.complete_json('b'*32, MESSAGES)
+        self.assertTrue(second['receipt']['thinking'])
+        self.assertEqual(self.calls.status()['remaining_requests'], 0)
+
+    def test_invalid_thinking_override_is_rejected_before_accounting(self):
+        client = self.client(1)
+        for value in (0, 1, 'false', [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ModelError, 'invalid_thinking_mode'):
+                client.complete_json('a'*32, MESSAGES, thinking=value)
+        self.assertEqual(self.calls.history(), [])
+        self.transport.assert_not_called()
+
+    def test_incomplete_response_keeps_safe_finish_reason_without_upstream_text(self):
+        envelope = json.loads(response())
+        envelope['choices'][0]['finish_reason'] = 'length'
+        envelope['choices'][0]['message']['reasoning_content'] = 'SECRET_CANARY'
+        envelope['usage']['completion_tokens_details'] = {'reasoning_tokens': 9}
+        client = self.client(1, transport=Mock(return_value=(200, canonical(envelope))))
+        with self.assertRaisesRegex(ModelError, 'incomplete_generation'):
+            client.complete_json('a'*32, MESSAGES)
+        receipt = self.calls.history()[0]['receipt']
+        self.assertEqual(receipt['finish_reason'], 'length')
+        self.assertEqual(receipt['reasoning_tokens'], 9)
+        self.assertEqual(receipt['max_output_tokens'], 4096)
+        self.assertNotIn('SECRET_CANARY', json.dumps(receipt))
+        self.assertNotIn('structured_output', receipt)
+
+    def test_unknown_finish_reason_and_invalid_reasoning_counts_do_not_leak(self):
+        from auto_lammps.deepseek import response_diagnostics
+        envelope = json.loads(response())
+        envelope['choices'][0]['finish_reason'] = 'SECRET_CANARY'
+        for value in (True, -1, 11, '9'):
+            envelope['usage']['completion_tokens_details'] = {'reasoning_tokens': value}
+            self.assertEqual(response_diagnostics(canonical(envelope)), {'finish_reason': 'unrecognized'})
+
     def test_concurrent_workers_share_last_request_slot(self):
         self.client(1)
         def execute(index):

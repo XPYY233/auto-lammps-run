@@ -325,6 +325,27 @@ def usage_from_response(content):
         return None
 
 
+def response_diagnostics(content):
+    """Safe protocol metadata only; never retain upstream text or reasoning."""
+    try:
+        data = strict_json(content)
+        choices = data.get('choices') if isinstance(data, dict) else None
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            return {}
+        reason = choices[0].get('finish_reason')
+        allowed = {'stop', 'length', 'tool_calls', 'content_filter', 'insufficient_system_resource'}
+        result = {'finish_reason': reason if reason in allowed else 'unrecognized'} if isinstance(reason, str) else {}
+        usage = data.get('usage')
+        details = usage.get('completion_tokens_details') if isinstance(usage, dict) else None
+        tokens = details.get('reasoning_tokens') if isinstance(details, dict) else None
+        completion = usage.get('completion_tokens') if isinstance(usage, dict) else None
+        if type(tokens) is int and type(completion) is int and 0 <= tokens <= completion:
+            result['reasoning_tokens'] = tokens
+        return result
+    except ModelError:
+        return {}
+
+
 class DeepSeekClient:
     def __init__(self, calls, *, transport=https_transport, key_reader=None, model=None, thinking=False):
         if model is not None and (not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,100}', model)):
@@ -338,10 +359,15 @@ class DeepSeekClient:
         # receipt always records the model actually requested.
         self.model = model or calls.config.model
 
-    def complete_json(self, identifier, messages, *, reasoning_effort=None):
-        body = request_body(self.calls.config, messages, model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort)
+    def complete_json(self, identifier, messages, *, reasoning_effort=None, thinking=None):
+        effective_thinking = self.thinking if thinking is None else thinking
+        if type(effective_thinking) is not bool:
+            raise ModelError('invalid_thinking_mode')
+        body = request_body(self.calls.config, messages, model=self.model, thinking=effective_thinking, reasoning_effort=reasoning_effort)
         self.calls.reserve(identifier, body)
-        receipt = dict(provider='deepseek', requested_model=self.model, thinking=self.thinking, reasoning_effort=reasoning_effort,
+        receipt = dict(provider='deepseek', requested_model=self.model, thinking=effective_thinking,
+                       reasoning_effort=reasoning_effort if effective_thinking else None,
+                       request_bytes=len(body), max_output_tokens=self.calls.config.max_output_tokens,
                        request_sha256=sha256(body), state='not_sent', usage=None,
                        http_status=None, response_sha256=None, output_sha256=None)
         try:
@@ -355,7 +381,7 @@ class DeepSeekClient:
             status, content = self.transport(body, key, self.calls.config.timeout_seconds)
             if type(status) is not int or not isinstance(content, bytes) or len(content) > MAX_RESPONSE_BYTES:
                 raise ModelError('invalid_transport_response')
-            receipt.update(http_status=status, response_sha256=sha256(content))
+            receipt.update(http_status=status, response_sha256=sha256(content), **response_diagnostics(content))
             if status != 200:
                 receipt['state'] = 'rejected'
                 raise ModelError('provider_request_failed')

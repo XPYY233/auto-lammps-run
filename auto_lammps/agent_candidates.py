@@ -27,6 +27,7 @@ from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
 
 GENERATOR_VERSION = 22
+PLAN_REVIEW_VERSION = 2
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
     'Preserve the scientific scope, material identity, every specified value and method, and any immutable initial geometry. '
@@ -1053,7 +1054,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                     resource_metadata=canonical(compatible).decode(),
                     geometry_checks=canonical(geometry_checks).decode(),
                     analysis_plan=canonical(proposal['analysis'].get('plan')).decode())
-                review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal}))[:32]
+                review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal,
+                    'protocol_version':PLAN_REVIEW_VERSION, 'thinking':False,
+                    'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
                 if on_stage: on_stage('checking_plan')
                 review_messages = [
                     {'role':'system','content':
@@ -1098,10 +1101,13 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'model-proposed implementation choices or treat those proposals as missing requirements. '
                      'Prefer the newest guidance over old condition suggestions. Do not invent extra scientific requirements or expected values. Unsupported/missing agreed '
                      'requirements are issues; no stylistic issues. An empty issues list means static consistency '
-                     'only, never scientific success. '+GUIDE+'\n'+STRUCTURAL_GUIDE+'\n'+SITE_THERMODYNAMICS_GUIDE},
+                     'only, never scientific success. Use the supplied mandatory adapter contracts to check '
+                     'operations; return short literal evidence quotes and a concise summary, not a rewritten plan.'},
                     {'role':'user','content':canonical({'requirements':task_text,'requirement_references':required,
                         'guidance':guidance or [],
-                        'proposal':proposal,'rendered_script':reviewed_script,'resource_metadata':compatible,
+                        'proposal':{k:v for k,v in proposal.items() if k not in ('workflow', 'analysis')},
+                        'analysis_description':{k:v for k,v in proposal['analysis'].items() if k != 'plan'},
+                        'rendered_script':reviewed_script,'resource_metadata':compatible,
                         'analysis_plan':proposal['analysis'].get('plan'),
                         'geometry_adapter':context['geometry_adapter'],
                         'workflow_adapter':context['workflow_adapter'],
@@ -1120,7 +1126,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                     validate_prepared_messages('candidate_review', review_messages, review_evidence)
                 except ScientificAdapterError as error:
                     raise ReviewContractError(str(error)) from None
-                review=client.complete_json(review_id, review_messages, reasoning_effort='low')
+                review=client.complete_json(review_id, review_messages, thinking=False)
                 value=review['value']; receipt=review['receipt']
                 if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
                     raise ModelError('plan_review_not_completed')

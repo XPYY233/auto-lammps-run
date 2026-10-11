@@ -108,7 +108,9 @@ class ModelPlanningChoicesTests(unittest.TestCase):
                           payload['geometry_adapter']['missing_scientific_parameters'])
         review_payload = assert_planning_policy(self, request_messages(transport.call_args_list[2]), 'candidate_review')
         self.assertEqual(review_payload['requirement_references'], required)
-        self.assertEqual(review_payload['proposal'], proposal)
+        self.assertEqual(review_payload['proposal'], {k:v for k,v in proposal.items() if k not in ('workflow','analysis')})
+        self.assertEqual(review_payload['analysis_description'], {k:v for k,v in proposal['analysis'].items() if k != 'plan'})
+        self.assertEqual(review_payload['analysis_plan'], proposal['analysis']['plan'])
         self.assertIn('summary alone is not implementation evidence',
                       request_messages(transport.call_args_list[2])[0]['content'])
         self.assertIn('minimize 1e-10 1e-8 100 1000', review_payload['rendered_script'])

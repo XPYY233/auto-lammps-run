@@ -81,7 +81,7 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         proposal['workflow'] = 'run 0\nemit_table result.dat "0 $(pe)"'
         calls = ModelCalls(self.root / f'{directory}.sqlite', self.calls.config, max_requests=3)
         transport = Mock(side_effect=[(200, response(proposal)), (200, response(review))])
-        client = DeepSeekClient(calls, transport=transport, key_reader=lambda: 'synthetic-key')
+        client = DeepSeekClient(calls, transport=transport, key_reader=lambda: 'synthetic-key', thinking=True)
         saved = []
         result = generate_candidate_draft(client, self.adapter,
             task_text='Synthetic complete request.\nRetain all synthetic stages.', units='metal',
@@ -103,6 +103,14 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         actual = json.loads(json.loads(transport.call_args.args[0])['messages'][1]['content'])
         self.assertEqual(len(actual['requirement_references']), 2)
         self.assertIn('run 0', actual['rendered_script'])
+        requests = [json.loads(call.args[0]) for call in transport.call_args_list]
+        self.assertEqual(requests[0]['thinking'], {'type': 'enabled'})
+        self.assertEqual(requests[1]['thinking'], {'type': 'disabled'})
+        self.assertNotIn('workflow', actual['proposal'])
+        self.assertNotIn('plan', actual['analysis_description'])
+        self.assertIn('analysis_plan', actual)
+        self.assertIn('analysis_adapter', actual)
+        self.assertIn('scientific_adapter', actual)
 
     def test_empty_or_fabricated_success_never_freezes_or_regenerates_the_proposal(self):
         from auto_lammps.agent_candidates import ReviewContractError
