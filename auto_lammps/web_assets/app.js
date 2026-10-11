@@ -2963,23 +2963,22 @@ function appendWorkbenchEntry(box){
   if(latestRecord&&latestRecord.source_sha256!==record.source_sha256)sourceChanged=true;
   latestRecord=record;content.replaceChildren();
   if(sourceChanged)content.append(node('p','论文全文来源版本已变化；原请求与费用保留，未自动重新提取。','form-note'));
-  const messages=record.messages||[],latest=messages.at(-1);
+  const messages=record.messages||[],latest=messages.at(-1);let history=null;
   if(latest){
    const state={completed:'P 已提取并保存',completed_with_limitations:'P 已保存，仍有缺项',no_evidence_published:'尚无可发布的 P 数据',failed:'P 提取中断',failed_or_unknown:'P 提取状态待核对',unknown:'P 提取进行中'}[latest.state]||latest.state;
    content.append(node('p',state+' · '+(latest.at?new Date(latest.at).toLocaleString('zh-CN'):'时间待核对'),'workbench-latest '+(latest.state==='failed'?'error':'')));
    if(latest.error)content.append(node('p',latest.error_code==='literature_job_state_invalid'?'工作台保存状态校验失败；已成功的模型答复仍保留。':latest.error,'workspace-freshness error'));
    if(latest.counts)content.append(node('p',`已保存 ${latest.counts.published_item_count+latest.counts.existing_item_count} 项数据 · ${latest.counts.figure_candidate_count} 图 · ${latest.counts.table_candidate_count} 表`,'form-note'));
-   const history=node('details',undefined,'workbench-history');history.append(node('summary',`查看提取记录与请求编号（${messages.length}）`));
+   history=node('details',undefined,'workbench-history');history.append(node('summary',`提取记录（${messages.length}）`));
    for(const message of messages){const label={completed:'已保存',completed_with_limitations:'已保存，有限制',failed:'中断',failed_or_unknown:'待核对',unknown:'进行中'}[message.state]||message.state;history.append(node('p',`${label} · ${message.request_id} · ${message.error_code||'无错误码'}`));}
-   content.append(history);
   }
   if(record.disabled_reason)content.append(node('p',record.disabled_reason,'form-note'));
   const terminal=['completed','completed_with_limitations','no_evidence_published','failed'];
   if(!pending&&pendingRequest&&(record.messages||[]).some(message=>message.request_id===pendingRequest.request_id&&terminal.includes(message.state)))pendingRequest=null;
   const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state));
   const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state)||message.model_request_ids?.length>0);
-  const runButton=(label,options={},style='quiet')=>{
-   const run=node('button',label,style);run.disabled=pending;content.append(run);
+  const runButton=(label,options={},style='quiet',host=content)=>{
+   const run=node('button',label,style);run.disabled=pending;host.append(run);
    run.onclick=()=>action(async()=>{
     if(!active()||pending||pendingRequest||latestRecord!==record)return;
     const request={request_id:crypto.randomUUID().replaceAll('-',''),source_sha256:record.source_sha256};
@@ -2992,20 +2991,23 @@ function appendWorkbenchEntry(box){
    const resumable=(record.recoveries||[]).filter(item=>item.enabled===true&&/^[a-f0-9]{32}$/.test(item.resume_of));
    if(resumable.length){
     for(const recovery of resumable){
-     content.append(node('p',`复用 ${recovery.reused_model_calls} 次已有答复；后续模型调用仍记账。`,'form-note'));
      runButton('从断点继续提取 P',{resume_of:recovery.resume_of},'primary');
+     content.append(node('p',`复用 ${recovery.reused_model_calls} 次已有答复；后续模型调用仍记账。`,'form-note'));
     }
    }
    else if(!saved)runButton('让应用 AI 提取并核验论文',{},'primary');
    else{
-    content.append(node('p','重新扫描或修复图表会新增模型调用并记账；已有证据、请求和费用保留。','form-note'));
-    runButton('重新扫描全文（新增模型调用）',{force_rescan:true});
-    if((record.messages||[]).some(message=>['completed_with_limitations','no_evidence_published'].includes(message.state)||message.visual_evidence_ready===false))runButton('修复图表提取（新增模型调用）',{repair_visuals:true});
+    const retry=node('details',undefined,'workbench-maintenance');retry.append(node('summary','重新提取或修复'));
+    retry.append(node('p','会新增模型调用并记账；已有证据、请求和费用保留。','form-note'));
+    runButton('重新扫描全文（新增模型调用）',{force_rescan:true},'quiet',retry);
+    if((record.messages||[]).some(message=>['completed_with_limitations','no_evidence_published'].includes(message.state)||message.visual_evidence_ready===false))runButton('修复图表提取（新增模型调用）',{repair_visuals:true},'quiet',retry);
+    content.append(retry);
    }
   }
-  if(pending){const progress=node('p',pendingRequest?.resume_of?'应用 AI 正从保存阶段继续核验，成功答复不会重新收费。可以关闭浏览器后再查看记录；不会提交 HPC。':'应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
+  if(pending){const progress=node('p',pendingRequest?.resume_of?'应用 AI 正从保存阶段继续核验，成功答复不会重新收费。':'应用 AI 正在提取并自动核验全文。','form-note');progress.setAttribute('role','status');content.append(progress);}
   if(uncertain)content.append(node('p','已有请求尚未得到终态；先核对原回执，不能换编号自动重提。','form-note'));
-  const refresh=node('button','查看提取进度与已保存数据','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
+  const refresh=node('button','刷新提取状态','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
+  if(history)content.append(history);
   const evidence=record.evidence;if(!evidence)return;
   content.append(node('h3',evidence.title),node('p','DOI '+evidence.doi+' · 论文原文结果 P'));
   if(evidence.items?.length){

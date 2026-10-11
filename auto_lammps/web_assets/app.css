@@ -906,8 +906,9 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
 .paper-workflow-stages li.current>span {background:#185adb;color:#fff}
 .paper-workflow-actions {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:18px 0}
 .paper-workflow-actions:empty{display:none}
-.paper-role-guide,.paper-workflow-more,.workbench-history{border-top:1px solid var(--line);padding:10px 0;margin-top:12px}
-.paper-role-guide>summary,.paper-workflow-more>summary,.workbench-history>summary{cursor:pointer;font-size:13px;color:#36577f;font-weight:600}
+.paper-role-guide,.paper-workflow-more,.workbench-history,.workbench-maintenance{border-top:1px solid var(--line);padding:10px 0;margin-top:12px}
+.paper-role-guide>summary,.paper-workflow-more>summary,.workbench-history>summary,.workbench-maintenance>summary{cursor:pointer;font-size:13px;color:#36577f;font-weight:600}
+.workbench-maintenance>button{margin:4px 8px 4px 0}
 .paper-role-guide .paper-role-definitions{margin-top:12px}
 .paper-workflow-more h3{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
 .paper-source-details,.reference-discussion{border-top:1px solid var(--line);margin-top:14px;padding-top:12px}

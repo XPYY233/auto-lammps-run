@@ -244,6 +244,9 @@ test('saved workbench recovery reuses the original request without force rescan 
  const s=setup();publish(s);const original='d'.repeat(32);
  const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:original,model_request_ids:['native-call']}],recoveries:[{resume_of:original,enabled:true,reused_model_calls:24,reason:'Resume authenticated checkpoint'}]}));
  assert.match(text(entry),/复用 24 次已有答复/);assert.match(text(entry),/后续模型调用仍记账/);
+ const recovery=find(entry,n=>n.textContent==='从断点继续提取 P'),history=find(entry,n=>n.className==='workbench-history');
+ assert.ok(history);assert.equal(history.open,undefined);
+ assert.ok(descendants(entry).indexOf(recovery)<descendants(entry).indexOf(history));
  assert.equal(find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）'),undefined);
  const button=find(entry,n=>n.textContent==='从断点继续提取 P');const request=button.onclick();await flush();
  assert.equal(s.pending[1].data.resume_of,original);assert.equal(s.pending[1].data.source_sha256,SHA);
@@ -251,6 +254,14 @@ test('saved workbench recovery reuses the original request without force rescan 
  assert.match(text(entry),/正从保存阶段继续/);assert.equal(button.disabled,true);
  s.pending[1].resolve({state:'completed'});await flush();s.pending[2].resolve(workbenchRecord({messages:[{state:'failed',request_id:original},{state:'completed',request_id:'e'.repeat(32)}]}));await request;
  assert.match(text(entry),/已提取并保存/);assert.match(text(entry),new RegExp('中断 · '+original));
+});
+test('completed P keeps billable rescan controls in a collapsed secondary area',async()=>{
+ const s=setup();publish(s);
+ const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'completed',request_id:'d'.repeat(32)}]}));
+ const maintenance=find(entry,n=>n.className==='workbench-maintenance');
+ assert.ok(maintenance);assert.equal(maintenance.open,undefined);
+ assert.ok(find(maintenance,n=>n.textContent==='重新扫描全文（新增模型调用）'));
+ assert.equal(find(entry,n=>n.textContent==='从断点继续提取 P'),undefined);
 });
 test('uncertain workbench receipt blocks a recovery even when a stale option is present',async()=>{
  const s=setup();publish(s);const original='d'.repeat(32);
