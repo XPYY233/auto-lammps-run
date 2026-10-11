@@ -498,13 +498,14 @@ function renderReference() {
   }
 }
 async function refreshReferenceHistory() {
-  if(!current || current.mode!=='reproduction') return;
+  if(!current) return;
   const id=current.id,generation=refreshReferenceHistory.generation=(refreshReferenceHistory.generation||0)+1;
   const result=await api(`/api/tasks/${id}/reference-evidence`);
   if(current?.id!==id||$('#task-view').hidden||generation!==refreshReferenceHistory.generation) return;
-  $('#reference-history').replaceChildren();
-  if(!result.requests.length) $('#reference-history').append(node('li','尚无文献整理请求。'));
-  for(const r of result.requests) {
+  if(current.mode==='reproduction'){
+   $('#reference-history').replaceChildren();
+   if(!result.requests.length) $('#reference-history').append(node('li','尚无文献整理请求。'));
+   for(const r of result.requests) {
     const row=node('li',`${new Date(r.at).toLocaleString('zh-CN')} · ${r.label}`);
     if(r.state==='completed' && current.status!=='conditions_frozen') {
       const recover=node('button','恢复已返回草稿','quiet');
@@ -515,13 +516,14 @@ async function refreshReferenceHistory() {
       row.append(recover);
     }
     $('#reference-history').append(row);
+   }
   }
   await refreshReferenceCharts(result.report||null);
 }
 async function refreshReferenceCharts(report){
   const panel=$('#reference-ai-charts'),id=current?.id,read=++referenceChartRead;
   if(!panel)return;
-  const valid=current?.mode==='reproduction'&&report?.task_id===id&&report?.role==='reference'&&
+  const valid=Boolean(id)&&report?.task_id===id&&report?.role==='reference'&&
     /^[a-f0-9]{64}$/.test(report.source_sha256||'')&&/^[a-f0-9]{64}$/.test(report.manifest_sha256||'');
   if(!valid){panel.hidden=true;referenceChartSource=null;referenceChartRequest=null;$('#reference-ai-chart-history').replaceChildren();if(typeof updateTaskContents==='function')updateTaskContents();return;}
   if(referenceChartSource?.task!==id||referenceChartSource.sha!==report.source_sha256||referenceChartSource.manifest!==report.manifest_sha256){

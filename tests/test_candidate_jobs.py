@@ -446,6 +446,71 @@ class CandidateJobTests(unittest.TestCase):
         self.assertEqual(self.history.get(self.doc['id'])['id'],job['id'])
         self.fixture.transport.assert_not_called()
 
+    def recovery_grant(self, job):
+        return {'task_id':self.doc['id'], 'condition_sha256':job['condition_sha256'],
+                'original_request_ids':sorted({e['payload']['request_id'] for e in job['events']
+                                              if e['state']=='proposal_request'}),
+                'authorization_id':'a'*32, 'approved_at':'2026-10-11T00:00:00+00:00',
+                'additional_rounds':3}
+
+    def test_explicit_recovery_retains_original_failures_and_stops_at_six(self):
+        self.bounded_service([self.invalid_plan(i) for i in range(6)])
+        self.enqueue(); original=self.finished(); grant=self.recovery_grant(original)
+        events=deepcopy(original['events'])
+        amended=self.history.authorize_development_recovery(grant)
+        self.assertEqual((amended['used'],amended['limit'],amended['remaining']),(3,6,3))
+        self.assertEqual(self.history.get(self.doc['id'])['state'],'failed')
+        self.assertEqual(self.fixture.transport.call_count,3)
+        self.service.enqueue(self.doc['id'],self.doc['revision'],answers='Repair the same rejected plan')
+        final=self.finished()
+        self.assertEqual(final['proposal_rounds']['used'],6,final)
+        self.assertEqual(final['proposal_rounds']['remaining'],0)
+        self.assertFalse(final['proposal_rounds']['within_original_limit'])
+        self.assertEqual(final['events'][:len(events)],events)
+        self.assertEqual(final['id'],original['id'])
+        self.assertEqual(self.fixture.transport.call_count,6)
+        # Reloading the identical private approval is idempotent, not another grant.
+        self.history.authorize_development_recovery(grant)
+        self.assertEqual(self.history.get(self.doc['id'])['proposal_rounds']['remaining'],0)
+        with self.assertRaises(PlanIterationLimit):
+            self.make_service().enqueue(self.doc['id'],self.doc['revision'],answers='Seventh')
+
+    def test_recovery_grant_is_bound_and_cannot_be_replaced(self):
+        self.bounded_service([self.invalid_plan(i) for i in range(3)])
+        self.enqueue(); job=self.finished(); grant=self.recovery_grant(job)
+        for key,value in [('condition_sha256','f'*64), ('additional_rounds',4),
+                          ('original_request_ids',['0'*32,'1'*32,'2'*32])]:
+            with self.assertRaises(Exception):
+                self.history.authorize_development_recovery({**grant,key:value})
+        self.assertEqual(self.history.get(self.doc['id'])['proposal_rounds']['remaining'],0)
+        self.history.authorize_development_recovery(grant)
+        with self.assertRaises(Exception):
+            self.history.authorize_development_recovery({**grant,'authorization_id':'b'*32})
+        self.assertEqual(self.fixture.transport.call_count,3)
+
+    def test_recovery_reservations_remain_atomic_under_concurrent_workers(self):
+        self.bounded_service([self.invalid_plan(i) for i in range(3)])
+        self.enqueue(); self.history.authorize_development_recovery(self.recovery_grant(self.finished()))
+        def reserve(index):
+            try: return self.history.reserve_proposal(self.doc['id'],str(index).zfill(32),'validation_repair')
+            except PlanIterationLimit: return None
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            results=list(pool.map(reserve,range(8)))
+        self.assertEqual(sum(x is not None for x in results),3)
+        self.assertEqual(self.history.get(self.doc['id'])['proposal_rounds']['used'],6)
+        self.assertEqual(self.fixture.transport.call_count,3)
+
+    def test_unknown_model_outcome_cannot_gain_recovery_rounds(self):
+        with patch.object(self.service.pool,'submit'): job=self.enqueue()
+        for index in range(3):
+            self.history.reserve_proposal(self.doc['id'],str(index).zfill(32),'initial')
+        with self.tasks.transaction() as db:
+            self.history._event(db,job['id'],'failed',{'error':'model_transport_unknown'})
+        with self.assertRaises(Exception):
+            self.history.authorize_development_recovery(self.recovery_grant(self.history.get(self.doc['id'])))
+        self.assertEqual(self.history.get(self.doc['id'])['proposal_rounds']['remaining'],0)
+        self.fixture.transport.assert_not_called()
+
     def test_corrupt_snapshot_cannot_be_downloaded(self):
         self.enqueue()
         job = self.finished()

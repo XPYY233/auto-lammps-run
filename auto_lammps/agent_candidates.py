@@ -909,7 +909,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'used':int(previous_proposal is not None), 'remaining':MAX_PROPOSAL_ROUNDS-int(previous_proposal is not None),
                'historical_count_unknown':False}
     messages[1]['content']=canonical({**json.loads(messages[1]['content']),'proposal_round_budget':budget}).decode()
-    context = {'generator_version': GENERATOR_VERSION, 'proposal_round_limit':MAX_PROPOSAL_ROUNDS,
+    context = {'generator_version': GENERATOR_VERSION, 'proposal_round_limit':budget['limit'],
                'proposal_round_budget':budget,
                'require_analysis_plan':require_analysis_plan, 'review_plan':review_plan, 'messages': messages,
                'answers': answers or '', 'guidance': list(guidance or []),
@@ -941,14 +941,17 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         context['previous_proposal']={'request_id':previous_proposal['request_id'],
                                       'sha256':previous_proposal['receipt']['output_sha256']}
     request_id = sha256(canonical(context))[:32]
-    proposal_requests = {previous_proposal['request_id']} if previous_proposal is not None else set()
+    # Rechecking a saved response is not a new call. Every additional request is
+    # still atomically reserved by CandidateHistory, including JSON repairs.
+    proposal_requests = set()
+    request_limit=min(MAX_PROPOSAL_ROUNDS,budget['remaining'])
 
     def complete_proposal(key, request_messages, kind):
         try:
             validate_prepared_messages('candidate_proposal', request_messages, adapter_evidence)
         except ScientificAdapterError as error:
             raise CandidateError(str(error)) from None
-        if key not in proposal_requests and len(proposal_requests) >= MAX_PROPOSAL_ROUNDS:
+        if key not in proposal_requests and len(proposal_requests) >= request_limit:
             raise PlanIterationLimit('方案已达到首版在内三轮上限；保留全部产物，不继续生成或强行批准。')
         if before_proposal_request:
             before_proposal_request(key, kind)
@@ -1002,7 +1005,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     prepared_geometry = {}
     last_error = None
     seen_proposals=set()
-    for attempt in range(MAX_PROPOSAL_ROUNDS):
+    validation_limit=request_limit + int(previous_proposal is not None)
+    for attempt in range(max(1,validation_limit)):
         if on_proposal:
             on_proposal({'request_id':completion['request_id'],
                          'proposal_sha256':sha256(canonical(proposal))})
@@ -1154,7 +1158,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             if on_proposal:
                 on_proposal({'request_id': completion['request_id'], 'proposal_sha256': digest,
                              'validation': feedback})
-            if attempt == MAX_PROPOSAL_ROUNDS-1:
+            if attempt == max(1,validation_limit)-1:
                 break
             repair_id = sha256(canonical({'base': request_id, 'repair': attempt + 1}))[:32]
             repair_messages = messages + [

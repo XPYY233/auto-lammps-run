@@ -1632,7 +1632,7 @@ def main():
         config_path = Path(args.candidate_config).expanduser()
         with root_descriptor(config_path.parent) as root:
             config = json.loads(read_file(root, config_path.name, 100000))
-        if set(config) - {'legacy_snap_pins', 'output_layout', 'remote_potential_catalog'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
+        if set(config) - {'legacy_snap_pins', 'output_layout', 'remote_potential_catalog', 'proposal_recovery_authorizations'} != {'potential_catalog', 'allowed_pins', 'software_sha256', 'packages', 'resources', 'max_atoms'}:
             parser.error('Invalid candidate configuration fields')
         catalog = PotentialCatalog(config['potential_catalog'])
         if config.get('remote_potential_catalog'):
@@ -1642,7 +1642,8 @@ def main():
                     software_sha256=config['software_sha256'], packages=config['packages'],
                     legacy_snap_pins=config.get('legacy_snap_pins', ()))
         candidate_service = CandidateService(store, model_client, adapter, resources=Resources(**config['resources']),
-                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'), review_plan=True)
+                    snapshots=store.path.parent / 'candidate-snapshots', max_atoms=config['max_atoms'], output_layout=config.get('output_layout','isolated'), review_plan=True,
+                    recovery_authorizations=config.get('proposal_recovery_authorizations', ()))
     execution_jobs=None
     if args.execution_config:
         if ledger is None:parser.error('Execution requires an existing ledger')

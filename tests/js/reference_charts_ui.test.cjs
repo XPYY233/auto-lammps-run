@@ -42,6 +42,27 @@ test('A chart history hides an old or non-A chart even if a response marks it co
  assert.equal(s.rendered[0].options.channel,'reference-charts');
 });
 
+test('linked research task can select A columns but an ordinary task without A cannot',async()=>{
+ const s=fixture();s.c.current.mode='research';
+ await s.c.refreshReferenceCharts(s.report);
+ assert.equal(s.$('#reference-ai-charts').hidden,false);
+ assert.equal(s.c.referenceChartSource.task,ID);
+ await s.c.refreshReferenceCharts(null);
+ assert.equal(s.$('#reference-ai-charts').hidden,true);
+ assert.equal(s.c.referenceChartSource,null);
+});
+
+test('research refresh reads its verified A report without exposing paper draft recovery',async()=>{
+ const s=fixture();s.c.current.mode='research';let reportRead=null;
+ s.c.refreshReferenceCharts=async value=>{reportRead=value;};
+ s.c.api=async path=>{s.calls.push(path);return {report:s.report,requests:[{state:'completed',request_id:'e'.repeat(32)}]};};
+ vm.runInContext(source.slice(source.indexOf('async function refreshReferenceHistory()'),source.indexOf('async function refreshReferenceCharts(')),s.c);
+ await s.c.refreshReferenceHistory();
+ assert.equal(reportRead,s.report);
+ assert.deepEqual(s.calls,[`/api/tasks/${ID}/reference-evidence`]);
+ assert.equal(s.$('#reference-history').children.length,0);
+});
+
 test('A chart request binds the verified source and reuses its id after an uncertain reply',async()=>{
  const s=fixture(),sent=[];let reads=0;
  s.c.api=async(path,data)=>{sent.push({path,data});throw new Error('connection lost');};

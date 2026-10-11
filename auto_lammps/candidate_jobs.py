@@ -18,7 +18,7 @@ from .potentials import PotentialError
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
-BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal', 'proposal_request'}
+BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal', 'proposal_request', 'development_recovery_authorized'}
 ACTIVE = {'diagnosing_failure','reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
 LABELS = {'proposal_request':'方案生成轮次已登记', 'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'diagnosing_failure':'AI 正在读取失败日志并诊断原因',
@@ -41,9 +41,18 @@ def proposal_rounds(events):
            if event['state'] in {'proposal_request', 'model_proposal'}
            and event['payload'].get('request_id')}
     unknown = not ids and any(event['state']=='prepared' for event in events)
-    return {'limit':MAX_PROPOSAL_ROUNDS, 'used':len(ids),
-            'remaining':0 if unknown else max(0,MAX_PROPOSAL_ROUNDS-len(ids)),
-            'historical_count_unknown':unknown}
+    grants = [e['payload'] for e in events if e['state'] == 'development_recovery_authorized']
+    limit = MAX_PROPOSAL_ROUNDS + (grants[0]['additional_rounds'] if grants else 0)
+    result = {'limit':limit, 'used':len(ids),
+              'remaining':0 if unknown else max(0,limit-len(ids)),
+              'historical_count_unknown':unknown}
+    if grants:
+        result.update(original_limit=MAX_PROPOSAL_ROUNDS,
+                      development_recovery={'authorization_id':grants[0]['authorization_id'],
+                          'limit':grants[0]['additional_rounds'],
+                          'used':max(0,len(ids)-MAX_PROPOSAL_ROUNDS)},
+                      within_original_limit=False)
+    return result
 
 
 class CandidateHistory:
@@ -101,8 +110,62 @@ class CandidateHistory:
             if budget['remaining']<=0:
                 raise PlanIterationLimit('方案已达到首版在内三轮上限，或历史轮次无法核验；不得继续追加。')
             self._event(db,row['id'],'proposal_request',
-                        {'request_id':request_id,'kind':kind,'round':budget['used']+1,'limit':MAX_PROPOSAL_ROUNDS})
+                        {'request_id':request_id,'kind':kind,'round':budget['used']+1,'limit':budget['limit'],
+                         **({'development_recovery':True} if budget.get('development_recovery') else {})})
             return {**budget,'used':budget['used']+1,'remaining':budget['remaining']-1}
+
+    def authorize_development_recovery(self, grant):
+        """Append an administrator's explicit amendment; never enqueue or erase history.
+
+        No browser/model can submit this grant. It binds the original three spent
+        request identities and frozen conditions, and survives removal from config.
+        """
+        fields = {'task_id', 'condition_sha256', 'original_request_ids',
+                  'authorization_id', 'approved_at', 'additional_rounds'}
+        if not isinstance(grant,dict) or set(grant) != fields:
+            raise CandidateError('Invalid development recovery authorization')
+        identifier=task_id(grant['task_id']); task_id(grant['authorization_id'])
+        requests=grant['original_request_ids']
+        if (not isinstance(requests,list) or len(requests)!=MAX_PROPOSAL_ROUNDS
+                or len(set(requests))!=MAX_PROPOSAL_ROUNDS
+                or requests!=sorted(requests)):
+            raise CandidateError('Recovery must bind all original proposal requests')
+        for key in requests: task_id(key)
+        if (type(grant['additional_rounds']) is not int or not 1<=grant['additional_rounds']<=3
+                or not isinstance(grant['condition_sha256'],str)
+                or len(grant['condition_sha256'])!=64
+                or any(c not in '0123456789abcdef' for c in grant['condition_sha256'])):
+            raise CandidateError('Invalid bounded recovery scope')
+        try:
+            approved_at=datetime.fromisoformat(grant['approved_at'])
+            if approved_at.tzinfo is None: raise ValueError()
+        except (ValueError,TypeError):
+            raise CandidateError('Recovery authorization needs a dated human approval') from None
+        with self.tasks.transaction() as db:
+            row=db.execute('SELECT * FROM candidate_jobs WHERE task_id=?',(identifier,)).fetchone()
+            if row is None or row['condition_sha256']!=grant['condition_sha256']:
+                raise CandidateError('Recovery does not match the original frozen task')
+            events=[{'state':r['state'],'payload':json.loads(r['payload'])} for r in
+                    db.execute('SELECT state,payload FROM candidate_events WHERE job_id=? ORDER BY sequence',(row['id'],))]
+            existing=[e['payload'] for e in events if e['state']=='development_recovery_authorized']
+            if existing:
+                if existing!=[grant]:
+                    raise CandidateError('Recovery already authorized; cannot extend or replace it')
+                return proposal_rounds(events)
+            ids={e['payload'].get('request_id') for e in events
+                 if e['state'] in {'proposal_request','model_proposal'}}
+            significant=[e for e in events if e['state'] not in BOOKKEEPING]
+            saved={e['payload'].get('request_id') for e in events if e['state']=='model_proposal'
+                   and e['payload'].get('condition_sha256')==row['condition_sha256']
+                   and isinstance(e['payload'].get('proposal_sha256'),str)
+                   and len(e['payload']['proposal_sha256'])==64
+                   and all(c in '0123456789abcdef' for c in e['payload']['proposal_sha256'])}
+            if (ids!=set(requests) or saved!=ids or not significant
+                    or significant[-1]['state']!='failed'
+                    or significant[-1]['payload'].get('error')!='plan_iteration_limit'):
+                raise CandidateError('Recovery requires the three recorded failed proposal rounds')
+            self._event(db,row['id'],'development_recovery_authorized',grant)
+            return proposal_rounds(events+[{'state':'development_recovery_authorized','payload':grant}])
 
     @contextmanager
     def lease(self, job):
@@ -137,7 +200,7 @@ class CandidateHistory:
 
 
 class CandidateService:
-    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000, output_layout='isolated', review_plan=False):
+    def __init__(self, tasks, client, adapter, *, resources, snapshots, max_atoms=100000, output_layout='isolated', review_plan=False, recovery_authorizations=()):
         output_prefix(output_layout)
         self.output_layout = output_layout
         self.review_plan = review_plan
@@ -146,6 +209,8 @@ class CandidateService:
         self.resources, self.max_atoms = resources, max_atoms
         self.snapshots = private_directory(snapshots)
         self.history = CandidateHistory(tasks)
+        for grant in recovery_authorizations:
+            self.history.authorize_development_recovery(grant)
         config = {'review_plan':review_plan, 'resources': asdict(resources), 'max_atoms': max_atoms, 'model': asdict(client.calls.config),
                   'requested_model': getattr(client,'model',client.calls.config.model), 'thinking':getattr(client,'thinking',False), 'model_ledger': str(client.calls.path.resolve()), 'catalog': str(adapter.catalog.directory),
                   'pins': sorted(adapter.allowed_pins), 'software': adapter.software_sha256,
