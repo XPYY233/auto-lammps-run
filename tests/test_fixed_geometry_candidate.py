@@ -162,7 +162,7 @@ class FixedGeometryCandidateTests(unittest.TestCase):
         result=self.generate(review_plan=True)
         context=json.loads(json.loads(self.transport.call_args_list[1].args[0])['messages'][1]['content'])
         self.assertEqual(context['geometry_adapter']['initial_geometry'],self.selected)
-        self.assertEqual(context['geometry_checks']['initial']['atom_count'],2)
+        self.assertEqual(json.loads(context['geometry_checks'])['initial']['atom_count'],2)
         self.assertIn('original data-file particle IDs',context['geometry_order'])
         candidate_check(result['snapshot'],max_atoms=100)
 

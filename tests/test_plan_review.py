@@ -2,7 +2,7 @@
 from copy import deepcopy
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from auto_lammps.plan_review import (
     requirements, normalized_review_issues, validate_coverage, validate_report, ReviewEvidenceError,
@@ -107,6 +107,55 @@ class ReportContractTests(unittest.TestCase):
                 self.assertIn('retain every genuine blocking error without truncation', message)
                 self.assertEqual(self.report, original)
 
+    def test_mixed_limit_unknown_source_and_reordered_quote_are_reported_together(self):
+        self.report['issues'] = [f'Blocking failure {index}' for index in range(14)]
+        self.report['coverage'][0]['evidence'][0] = {
+            'source': 'UNTRUSTED_SOURCE_SENTINEL', 'quote': 'UNTRUSTED_QUOTE_SENTINEL'}
+        self.report['coverage'][1]['evidence'][0]['quote'] = 'run 0\nunits metal'
+        original = deepcopy(self.report)
+        with self.assertRaises(ReviewEvidenceError) as caught:
+            validate_report(self.report, self.required, self.sources)
+        error = caught.exception
+        self.assertEqual({item['code'] for item in error.diagnostics},
+                         {'issues_limit', 'unknown_source', 'quote_not_literal'})
+        self.assertEqual(error.allowed_sources, ['rendered_script'])
+        self.assertIn({'path': 'coverage[0].evidence[0].source', 'code': 'unknown_source',
+                       'requirement': self.required[0]['id']}, error.diagnostics)
+        self.assertIn({'path': 'coverage[1].evidence[0].quote', 'code': 'quote_not_literal',
+                       'requirement': self.required[1]['id'], 'source': 'rendered_script'},
+                      error.diagnostics)
+        public_error = str(error)
+        for untrusted in ('UNTRUSTED_SOURCE_SENTINEL', 'UNTRUSTED_QUOTE_SENTINEL',
+                          'run 0', 'units metal', 'Blocking failure'):
+            self.assertNotIn(untrusted, public_error)
+        diagnostics = json.loads(public_error.split('; report_diagnostics=', 1)[1])
+        self.assertEqual(diagnostics, {'errors': error.diagnostics,
+                                     'allowed_sources': error.allowed_sources})
+        self.assertEqual(self.report, original)
+
+    def test_shape_coverage_and_reference_failures_are_all_safe_and_actionable(self):
+        invalid = deepcopy(self.report)
+        invalid['UNTRUSTED_EXTRA_KEY'] = 'UNTRUSTED_EXTRA_VALUE'
+        invalid['summary'] = None
+        invalid['issues'] = [{'UNTRUSTED_ISSUE_KEY': 'UNTRUSTED_ISSUE_TEXT'}]
+        invalid['coverage'] = [
+            {'requirement': self.required[0]['id'], 'evidence': None},
+            {'requirement': self.required[0]['id'], 'evidence': [
+                {'source': 'rendered_script', 'quote': 'units metal', 'extra': True},
+                {'source': 'rendered_script', 'quote': None}]},
+            {'requirement': 'UNTRUSTED_REQUIREMENT_ID', 'evidence': ['UNTRUSTED_REFERENCE']}]
+        original = deepcopy(invalid)
+        with self.assertRaises(ReviewEvidenceError) as caught:
+            validate_report(invalid, self.required, self.sources)
+        self.assertEqual({item['code'] for item in caught.exception.diagnostics}, {
+            'report_shape', 'summary_shape', 'issue_shape', 'coverage_count',
+            'evidence_shape', 'duplicate_requirement', 'reference_shape', 'quote_shape',
+            'unknown_requirement', 'missing_requirement'})
+        self.assertIn({'path': 'coverage', 'code': 'missing_requirement',
+                       'requirement': self.required[1]['id']}, caught.exception.diagnostics)
+        self.assertNotIn('UNTRUSTED_', str(caught.exception))
+        self.assertEqual(invalid, original)
+
     def test_exact_report_keys_and_string_summary_remain_required(self):
         invalid = [None, [], {'issues': []}, {**self.report, 'approved': True},
                    {**self.report, 'summary': None}, {**self.report, 'summary': {'text': 'ok'}}]
@@ -135,6 +184,45 @@ class ReportContractTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ReviewEvidenceError):
                 validate_report(value, self.required, self.sources)
 
+    def test_diagnostics_do_not_relax_the_existing_coverage_validator(self):
+        mutations = [None, {}, [], self.report['coverage'][:-1]]
+        for evidence in ([], None, {}, ['invalid'],
+                         [{'source': 'rendered_script', 'quote': 'units metal'}] * 17,
+                         [{'source': 'rendered_script', 'quote': 'units  metal'}],
+                         [{'source': 'rendered_script', 'quote': 'units metal\r\nrun 0'}],
+                         [{'source': 'rendered_script', 'quote': 'units metal\nrun 0 '}],
+                         [{'source': 'rendered_script', 'quote': 'x' * 4001}],
+                         [{'source': [], 'quote': 'units metal'}],
+                         [{'source': 'rendered_script', 'quote': []}]):
+            altered = deepcopy(self.report['coverage'])
+            altered[0]['evidence'] = evidence
+            mutations.append(altered)
+        for requirement in (self.required[1]['id'], 'unknown', None, []):
+            altered = deepcopy(self.report['coverage'])
+            altered[0]['requirement'] = requirement
+            mutations.append(altered)
+        malformed_item = deepcopy(self.report['coverage'])
+        malformed_item[0]['extra'] = True
+        mutations.extend([malformed_item, [None, self.report['coverage'][1]]])
+        for index, coverage in enumerate(mutations):
+            with self.subTest(case=index):
+                original = deepcopy(coverage)
+                with self.assertRaises(ReviewEvidenceError):
+                    validate_coverage(coverage, self.required, self.sources, blocking_issues=[])
+                with self.assertRaises(ReviewEvidenceError) as caught:
+                    validate_report({**self.report, 'coverage': coverage}, self.required, self.sources)
+                self.assertTrue(caught.exception.diagnostics)
+                self.assertEqual(coverage, original)
+
+    def test_valid_legacy_report_still_passes_the_original_acceptance_gate(self):
+        original = deepcopy(self.report)
+        with patch('auto_lammps.plan_review.validate_coverage', wraps=validate_coverage) as gate:
+            result = validate_report(self.report, self.required, self.sources)
+        gate.assert_called_once_with(self.report['coverage'], self.required, self.sources,
+                                     blocking_issues=[])
+        self.assertEqual(result, original)
+        self.assertEqual(self.report, original)
+
     def test_no_quotes_require_a_preserved_explicit_blocking_issue(self):
         self.report['coverage'][0]['evidence'] = []
         with self.assertRaises(ReviewEvidenceError):
@@ -160,8 +248,15 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         proposal['workflow'] = 'run 0\nemit_table result.dat "0 $(pe)"'
         calls = ModelCalls(self.root / f'{directory}.sqlite', self.calls.config, max_requests=3)
         reports = review if isinstance(review, list) else [review]
-        transport = Mock(side_effect=[(200, response(proposal))] + [
-            item if isinstance(item, Exception) else (200, response(item)) for item in reports])
+        responses = iter([proposal] + reports)
+        def transport_response(body, *args):
+            item = next(responses)
+            if isinstance(item, Exception):
+                raise item
+            if callable(item):
+                item = item(json.loads(body))
+            return 200, response(item)
+        transport = Mock(side_effect=transport_response)
         client = DeepSeekClient(calls, transport=transport, key_reader=lambda: 'synthetic-key', thinking=True)
         saved = []
         self.review_calls, self.review_transport, self.review_saved = calls, transport, saved
@@ -191,12 +286,37 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         self.assertIn('run 0', actual['rendered_script'])
         requests = [json.loads(call.args[0]) for call in transport.call_args_list]
         self.assertEqual(requests[0]['thinking'], {'type': 'enabled'})
-        self.assertEqual(requests[1]['thinking'], {'type': 'disabled'})
+        self.assertNotIn('reasoning_effort', requests[0])
+        self.assertEqual(requests[1]['thinking'], {'type': 'enabled'})
+        self.assertEqual(requests[1]['reasoning_effort'], 'low')
         self.assertNotIn('workflow', actual['proposal'])
         self.assertNotIn('plan', actual['analysis_description'])
         self.assertIn('analysis_plan', actual)
         self.assertIn('analysis_adapter', actual)
         self.assertIn('scientific_adapter', actual)
+
+    def test_all_four_canonical_source_texts_are_accepted_as_literal_evidence(self):
+        from auto_lammps.manifest import canonical
+        source_names = ('rendered_script', 'resource_metadata', 'geometry_checks', 'analysis_plan')
+        reviewed = []
+        def report_from_actual_sources(request):
+            actual = json.loads(request['messages'][1]['content'])
+            for source in source_names:
+                self.assertIsInstance(actual[source], str)
+                self.assertTrue(actual[source])
+                if source != 'rendered_script':
+                    self.assertEqual(actual[source], canonical(json.loads(actual[source])).decode())
+            report = {'issues': [], 'summary': 'Literal references only.', 'coverage': [
+                {'requirement': requirement['id'], 'evidence': [
+                    {'source': source, 'quote': actual[source][:80]}
+                    for source in source_names]} for requirement in actual['requirement_references']]}
+            reviewed.append(deepcopy(report))
+            return report
+        result, transport, saved = self.generate(report_from_actual_sources, 'canonical-sources')
+        self.assertEqual(transport.call_count, 2)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(result['generation']['plan_reviews'][0]['coverage'], reviewed[0]['coverage'])
+        self.assertFalse(result['generation']['scientific_conditions_verified'])
 
     def test_empty_or_fabricated_success_never_freezes_or_regenerates_the_proposal(self):
         from auto_lammps.agent_candidates import ReviewContractError
@@ -221,6 +341,9 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         from auto_lammps.manifest import canonical, sha256
         invalid = self.review()
         invalid['issues'] = [f'Nonblocking synthetic caveat {index}' for index in range(14)]
+        invalid['coverage'][0]['evidence'][0] = {
+            'source': 'UNTRUSTED_SOURCE_SENTINEL', 'quote': 'UNTRUSTED_QUOTE_SENTINEL'}
+        invalid['coverage'][1]['evidence'][0]['quote'] = 'run 0\nunits metal'
         valid = self.review()
         original = deepcopy(invalid)
         result, transport, saved = self.generate([invalid, valid], 'repaired-report')
@@ -239,11 +362,19 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         self.assertEqual(invalid, original)
         requests = [json.loads(call.args[0]) for call in transport.call_args_list]
         self.assertEqual(requests[0]['thinking'], {'type': 'enabled'})
-        self.assertTrue(all(request['thinking'] == {'type': 'disabled'} for request in requests[1:]))
+        self.assertNotIn('reasoning_effort', requests[0])
+        self.assertTrue(all(request['thinking'] == {'type': 'enabled'} for request in requests[1:]))
+        self.assertTrue(all(request['reasoning_effort'] == 'low' for request in requests[1:]))
         self.assertEqual(requests[1]['messages'], requests[2]['messages'][:2])
         self.assertEqual(json.loads(requests[2]['messages'][-2]['content']), original)
         feedback = json.loads(requests[2]['messages'][-1]['content'])
         self.assertIn('14 issues', feedback['review_report_error'])
+        diagnostics = json.loads(feedback['review_report_error'].split('; report_diagnostics=', 1)[1])
+        self.assertEqual({item['code'] for item in diagnostics['errors']},
+                         {'issues_limit', 'unknown_source', 'quote_not_literal'})
+        self.assertEqual(diagnostics['allowed_sources'],
+                         ['analysis_plan', 'geometry_checks', 'rendered_script', 'resource_metadata'])
+        self.assertNotIn('UNTRUSTED_', feedback['review_report_error'])
         self.assertIn('SAME unchanged proposal', feedback['action'])
         self.assertEqual(result['generation']['plan_reviews'][0]['proposal_sha256'],
                          sha256(canonical(self.review_proposal)))
