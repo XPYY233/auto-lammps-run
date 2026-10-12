@@ -93,3 +93,30 @@ test('refresh preserves expanded version differences and script previews',async(
  elements.get('#plan-files').children[0].open=true;elements.get('#plan-version-list').children[0].open=true;
  await c.refreshPlanReview();assert.equal(elements.get('#plan-files').children[0].open,true);assert.equal(elements.get('#plan-version-list').children[0].open,true);
 });
+
+test('mixed numeric and atomic trajectory outputs keep full plan visible and approvable',async()=>{
+ const script='units metal\n'+'# synthetic preview line\n'.repeat(1100)+'# final production endpoint';
+ const files=[{name:'in.lammps',size:script.length,sha256:'fixed-script',content:script},
+  {name:'structure.data',size:20,sha256:'fixed-structure',content:'synthetic geometry'},
+  {name:'analysis.json',size:20,sha256:'fixed-analysis',content:'synthetic analysis'}];
+ const review={state:'prepared',approved:false,workspace:{versions:[],current:{version:1,historical:false,
+  structure:{},additional_structures:[],resources:{cores:32,memory_bytes:8*1024**3,wall_seconds:3600},
+  potential:{},analysis:{files:['energy.dat','trajectory.dump'],plan:{tables:[
+   {file:'energy.dat',columns:[{name:'step',unit:'1'},{name:'energy',unit:'eV'}]},
+   {file:'trajectory.dump',format:'lammps_dump',length_unit:'angstrom',elements:{'3':'Ni','1':'Co','2':'Cr'},expected_counts:{'1':4,'2':4,'3':4},pbc:[true,true,true]}],operations:[]}},files}}};
+ const before=JSON.stringify(review),{c,elements,calls}=setup(null,review);
+ await c.refreshPlanReview();
+ const text=el=>[el.textContent,...el.children.map(text)].join('\n');
+ const summary=text(elements.get('#plan-summary'));
+ assert.match(summary,/energy.dat：step \[1\]、energy \[eV\]/);
+ assert.match(summary,/trajectory.dump：LAMMPS 原子轨迹/);
+ assert.match(summary,/长度单位 angstrom.*原子类型 1 → Co \/ 2 → Cr \/ 3 → Ni/);
+ assert.equal(elements.get('#plan-files').children.length,3);
+ assert.equal(elements.get('#plan-files').children[0].children.find(x=>x.tag==='pre').textContent,script);
+ assert.equal(elements.get('#plan-approve').disabled,false);
+ assert.equal(JSON.stringify(review),before);
+ await elements.get('#plan-approve').onclick();
+ assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),
+  ['/api/tasks/task/plan/approve','/api/tasks/task/execution']);
+ assert.equal(calls.some(x=>/candidate/.test(x.path)),false);
+});
