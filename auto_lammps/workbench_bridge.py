@@ -106,6 +106,7 @@ class WorkbenchRuntime:
     native_stage_reader: object = None
     native_recovery_reader: object = None
     native_source_reader: object = None
+    pdf_intake_root: object = None
 
 
 def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,

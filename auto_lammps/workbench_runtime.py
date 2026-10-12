@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import stat
+from dataclasses import replace
 
 from .manifest import canonical, sha256
 from .runtime_launcher import ExecutionDenied, absolute, directory, read_regular
@@ -194,6 +195,7 @@ def assemble_private_workbench(papers, config_path):
         checkpoints = checkpoint_type(service_type(store=store))
         runtime = installed_workbench_runtime(database=database, snapshot_blobs=blobs,
             checkpoint_runtime=checkpoints, session_id=config['session_id'])
+        runtime = replace(runtime, pdf_intake_root=root/'imports')
         return WorkbenchExtractionBridge(papers, runtime, recoveries=recoveries), bindings
     except WorkbenchRuntimeError:
         raise

@@ -187,7 +187,7 @@ async function renderNew() {
   $('#task-view').hidden = true;
   $('#message').hidden = true;
   await listTasks();
-  $('#create-form textarea').focus();
+  ($('#create-form').hidden?$('#paper-pdf-file'):$('#create-form textarea')).focus();
   window.scrollTo({top:0});
 }
 function conditionStatus(field) {
@@ -1656,6 +1656,10 @@ function setMode(mode){
   $('#mode-research').classList.toggle('selected',mode==='research');$('#mode-reproduction').classList.toggle('selected',mode==='reproduction');
   $('#mode-research').setAttribute('aria-pressed',String(mode==='research'));$('#mode-reproduction').setAttribute('aria-pressed',String(mode==='reproduction'));
   $('#reproduction-hint').hidden=mode!=='reproduction';
+  $('#create-form').hidden=mode==='reproduction';
+  $('#reproduction-hint').hidden=true;
+  $('#paper-intake-panel').hidden=mode!=='reproduction';
+  if(mode==='reproduction')refreshPaperIntake().catch(error=>paperIntakeError(error.message));
 }
 function taskPhaseLabels(task){
  const independent={...task,reference_state:null};
@@ -2481,6 +2485,65 @@ for(const id of ['top-new','tasks-new'])$('#'+id).onclick=showNew;
 $('#top-papers').onclick=()=>requestRoute('#papers');$('#pick-paper').onclick=()=>requestRoute('#papers');
 for(const id of ['top-resources'])$('#'+id).onclick=()=>requestRoute('#resources');
 for(const id of ['top-help','home-help'])$('#'+id).onclick=()=>requestRoute('#help');
+let paperIntakeRecord=null,paperUpload=null,paperIntakeRead=0;
+function paperIntakeError(message){const box=$('#paper-intake-error');box.textContent=message;box.hidden=!message;}
+function renderPaperIntake(record){
+ paperIntakeRecord=record;paperIntakeError('');
+ const form=$('#paper-identity-form'),start=$('#paper-import-start');form.hidden=!record;start.hidden=true;
+ if(!record){$('#paper-intake-status').textContent='选择 PDF 后保存；关闭页面也会保留已保存的导入。';return;}
+ const fixed=record.state!=='uploaded';
+ $('#paper-import-title').value=record.title||record.suggested_title||'';
+ $('#paper-import-doi').value=record.doi||(record.suggested_dois||[])[0]||'';
+ $('#paper-import-scope').value=record.scope||'先提取全文中的图、表和 LAMMPS 计算条件，再选择本次复现范围。';
+ for(const id of ['paper-import-title','paper-import-doi','paper-import-scope'])$('#'+id).disabled=fixed;
+ $('#paper-import-confirm').textContent=record.state==='prepared'?'继续完成登记':'核对并登记论文';
+ form.hidden=['bound','task_created'].includes(record.state);
+ $('#paper-intake-status').textContent=({uploaded:'PDF 已保存 · 待核对论文身份',prepared:'PDF 与论文身份已保存 · 继续完成登记',bound:'论文已登记 · 可以创建复现任务',task_created:'复现任务已保存 · 可以继续提取 P'}[record.state]||'导入状态待核对')+' · '+record.pages+' 页 · '+(record.size_bytes/1048576).toFixed(2)+' MiB';
+ if(['bound','task_created'].includes(record.state)){start.hidden=false;start.textContent=record.task_id?'打开复现任务 →':'创建复现任务，提取 P →';}
+}
+async function refreshPaperIntake(){
+ const read=++paperIntakeRead,active=paperIntakeRecord?.id;
+ const data=await api('/api/paper-imports');if(read!==paperIntakeRead)return;
+ $('#paper-pdf-file').disabled=!data.configured;$('#paper-import-upload').disabled=!data.configured||!paperUpload;
+ if(!data.configured){$('#paper-intake-status').textContent=data.reason;$('#paper-identity-form').hidden=true;$('#paper-import-start').hidden=true;return;}
+ const history=$('#paper-intake-history');history.replaceChildren();
+ for(const saved of data.imports){const row=node('div',undefined,'intake-history-row'),button=node('button',saved.title||saved.suggested_title||'PDF · '+saved.pages+' 页','quiet');button.type='button';button.onclick=()=>{paperIntakeRead++;renderPaperIntake(saved);};row.append(button,node('small',{uploaded:'待核对',prepared:'待完成登记',bound:'已登记',task_created:'已有任务'}[saved.state]||'待核对'));history.append(row);}
+ if(!data.imports.length)history.append(node('p','尚无已保存的导入。','subtle'));
+ if(active&&paperIntakeRecord?.id===active){const saved=data.imports.find(r=>r.id===active);if(saved)renderPaperIntake(saved);}
+ else if(!paperIntakeRecord&&!paperUpload)renderPaperIntake(null);
+}
+function paperIntakeWork(work){
+ return action(async()=>{paperIntakeError('');for(const id of ['paper-import-upload','paper-import-confirm','paper-import-start','paper-pdf-file'])$('#'+id).disabled=true;
+  try{await work();}catch(error){paperIntakeError(error.message);throw error;}
+  finally{for(const id of ['paper-import-confirm','paper-import-start','paper-pdf-file'])$('#'+id).disabled=false;$('#paper-import-upload').disabled=!paperUpload;}
+ });
+}
+$('#paper-pdf-file').onchange=()=>{
+ const file=$('#paper-pdf-file').files[0];if(!file)return;
+ if(file.size>20*1048576||!file.size){paperIntakeError('请选择不超过 20 MiB 的 PDF。');paperUpload=null;$('#paper-import-upload').disabled=true;return;}
+ paperIntakeRead++;paperUpload={id:crypto.randomUUID().replaceAll('-',''),file};renderPaperIntake(null);$('#paper-import-upload').disabled=false;$('#paper-intake-status').textContent='已选择 '+file.name+' · 点击保存 PDF';
+};
+$('#paper-import-upload').onclick=()=>paperIntakeWork(async()=>{
+ if(!paperUpload)return;const pending=paperUpload;
+ $('#paper-intake-status').textContent='正在保存并读取 PDF…';
+ const response=await fetch('/api/paper-imports/'+pending.id+'/pdf',{method:'POST',headers:{'Content-Type':'application/pdf','X-Task-Review':'1'},body:pending.file});
+ const result=await response.json();if(!response.ok)throw new Error(typeof result.detail==='string'?result.detail:'PDF 未能保存，请继续同一导入。');
+ paperUpload=null;renderPaperIntake(result);await refreshPaperIntake();
+});
+$('#paper-identity-form').onsubmit=event=>{event.preventDefault();paperIntakeWork(async()=>{
+ if(!paperIntakeRecord)return;$('#paper-intake-status').textContent='正在核对题目、DOI 与 PDF 来源…';
+ const saved=await api('/api/paper-imports/'+paperIntakeRecord.id+'/confirm',{title:$('#paper-import-title').value,doi:$('#paper-import-doi').value,scope:$('#paper-import-scope').value});
+ renderPaperIntake(saved);await refreshPaperIntake();
+});};
+$('#paper-import-start').onclick=()=>paperIntakeWork(async()=>{
+ if(!paperIntakeRecord)return;
+ if(paperIntakeRecord.task_id){requestRoute('#'+paperIntakeRecord.task_id);return;}
+ const task=await api('/api/paper-imports/'+paperIntakeRecord.id+'/task',{});
+ renderPaperIntake({...paperIntakeRecord,state:'task_created',task_id:task.id});
+ notice('论文与任务已保存。下一步由应用 AI 提取 P。');requestRoute('#'+task.id);
+});
+$('#paper-intake-existing').onclick=()=>requestRoute('#papers');
+$('#papers-import-pdf').onclick=()=>{showNew();setMode('reproduction');};
 $('#mode-research').onclick=()=>setMode('research');$('#mode-reproduction').onclick=()=>setMode('reproduction');
 $('#task-search').oninput=()=>{action(async()=>{await listTasks();if(!$('#tasks-view').hidden)taskCards();});};
 

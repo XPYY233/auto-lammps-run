@@ -454,6 +454,11 @@ class TaskStore:
         return doc
 
     def create(self, title, prompt, mode):
+        with self.transaction() as db:
+            return self._create(db, title, prompt, mode)
+
+    def _create(self, db, title, prompt, mode):
+        """Shared creation primitive for an atomic paper/task linkage."""
         if mode not in {'reproduction', 'research'}:
             raise TaskError('请选择复现或开放研究模式')
         doc = dict(schema_version=1, id=uuid.uuid4().hex, title=text(title, 160), prompt=text(prompt, 12000),
@@ -461,9 +466,8 @@ class TaskStore:
                    fields={key: dict(candidates=[], selected=None, confirmed=False, resolution='') for key in FIELDS})
         for field, choice in explicit_conditions(doc['prompt']):
             append_condition(doc, field, choice)
-        with self.transaction() as db:
-            db.execute('INSERT INTO tasks VALUES (?,0)', (doc['id'],))
-            return self._write(db, doc, 'created')
+        db.execute('INSERT INTO tasks VALUES (?,0)', (doc['id'],))
+        return self._write(db, doc, 'created')
 
     def add_candidate(self, identifier, revision, field, data):
         if field not in FIELDS:

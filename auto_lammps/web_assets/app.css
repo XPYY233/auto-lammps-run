@@ -1072,3 +1072,16 @@ main>section,.guided-layout>div,.resource-main,.help-grid>*{min-width:0;max-widt
  .top-nav button{padding:8px 4px;font-size:12px;gap:0}
  .top-nav .ui-icon{display:none}
 }
+/* PDF intake follows the new-task flow; technical history stays folded. */
+.paper-intake {margin-bottom:20px;min-width:0;}
+.paper-intake[hidden] {display:none;}
+.paper-intake h2 {margin-top:0;}
+.paper-intake label {display:grid;gap:8px;margin:16px 0;}
+.paper-intake input,.paper-intake textarea {width:100%;min-width:0;box-sizing:border-box;}
+.paper-intake input[type=file] {padding:12px;border:1px dashed var(--line,#d7e1ee);border-radius:8px;background:#f8faff;}
+.paper-intake button {max-width:100%;white-space:normal;}
+.intake-steps {display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0;color:var(--muted,#65758e);}
+.intake-steps li {padding:6px 10px;background:#f0f5ff;border-radius:6px;}
+.intake-history-row {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;}
+.intake-history-row button {text-align:left;overflow-wrap:anywhere;}
+.intake-history-row small {flex-shrink:0;}

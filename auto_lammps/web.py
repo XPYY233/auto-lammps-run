@@ -37,6 +37,7 @@ from .hpc_connections import HPCConnections
 from .raw_outputs import RawOutputs
 from .runtime_launcher import ExecutionDenied as runtime_denied
 from .session_activity import SessionActivity
+from .paper_intake import PaperIntake, MAX_PDF_BYTES
 
 ASSETS = Path(__file__).parent/'web_assets'
 
@@ -53,12 +54,15 @@ class LocalBoundary:
         for key, value in scope['headers']:
             headers.setdefault(key.lower(), []).append(value.decode('latin1'))
         status, error = None, ''
+        pdf_upload = (scope['method'] == 'POST' and
+            re.fullmatch(r'/api/paper-imports/[a-f0-9]{32}/pdf', scope['path']) is not None)
+        body_limit = MAX_PDF_BYTES if pdf_upload else 131072
         if headers.get(b'host') != [self.authority]:
             status, error = 403, '只能从本机地址访问'
         if scope['method'] not in {'GET', 'HEAD'} and (
             headers.get(b'origin') != ['http://'+self.authority]
             or headers.get(b'x-task-review') != ['1']
-            or headers.get(b'content-type') != ['application/json']
+            or headers.get(b'content-type') != ['application/pdf' if pdf_upload else 'application/json']
         ):
             status, error = 403, '请通过本机任务页面操作'
         body = bytearray()
@@ -68,7 +72,7 @@ class LocalBoundary:
                 if message['type'] == 'http.disconnect':
                     return
                 body.extend(message.get('body', b''))
-                if len(body) > 131072:
+                if len(body) > body_limit:
                     status, error = 413, '请求过大'
                     break
                 if not message.get('more_body', False):
@@ -149,6 +153,12 @@ class LiteratureImport(Revision):
 
 class LinkPaperTask(Revision):
     task_id: str
+
+
+class PaperIdentityInput(Input):
+    title: str = Field(min_length=1, max_length=500)
+    doi: str = Field(min_length=1, max_length=300)
+    scope: str = Field(min_length=1, max_length=4000)
 
 
 class PreferenceInput(Input):
@@ -304,13 +314,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
     from .discovery_library import DiscoveryLibrary
     discoveries = discovery_library or DiscoveryLibrary()
+    intake = PaperIntake(papers, workbench_bridge, workbench_bindings)
     def workbench_binding(identifier):
         store.get(identifier)
         with store.transaction() as db:
             rows = db.execute('SELECT paper_id FROM paper_tasks WHERE task_id=?', (identifier,)).fetchall()
-        if len(rows) != 1 or not workbench_bindings:
+        if len(rows) != 1:
             return None
-        return workbench_bindings.get(rows[0]['paper_id'])
+        return intake.binding(rows[0]['paper_id'])
 
     def workbench_status(identifier):
         binding = workbench_binding(identifier)
@@ -775,6 +786,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return {'fields': FIELDS, 'task_resource_policy': POLICY_RECORD | {'description': description()},
                 'model_calls_enabled': bool(status and status['remaining_requests']),
                 'model_status': status, 'execution_enabled': execution_jobs is not None,
+                'paper_intake': intake.availability(),
                 # Which copy of the application is really serving this port; the desktop launcher
                 # refuses to run when it differs from the environment its configuration names.
                 'installation': {'package': str(Path(__file__).resolve().parent), 'python': sys.executable},
@@ -816,6 +828,36 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/papers')
     def paper_list():
         return papers.list(transform=reproduction_status)
+
+    @app.get('/api/paper-imports')
+    def paper_import_list():
+        return intake.list()
+
+    @app.get('/api/paper-imports/{identifier}')
+    def paper_import_get(identifier: str):
+        return intake.get(identifier)
+
+    @app.post('/api/paper-imports/{identifier}/pdf')
+    async def paper_import_pdf(identifier: str, request: Request):
+        from starlette.concurrency import run_in_threadpool
+        try:
+            return await run_in_threadpool(intake.upload, identifier, await request.body())
+        except (OSError, runtime_denied):
+            raise TaskError('PDF 尚未保存。请检查本机存储空间后重试同一导入。') from None
+
+    @app.post('/api/paper-imports/{identifier}/confirm')
+    def paper_import_confirm(identifier: str, data: PaperIdentityInput):
+        try:
+            return intake.confirm(identifier, title=data.title, doi=data.doi, scope=data.scope)
+        except (OSError, runtime_denied):
+            raise TaskError('文献登记尚未完成。原导入保留，请继续同一记录。') from None
+
+    @app.post('/api/paper-imports/{identifier}/task')
+    def paper_import_task(identifier: str, data: Input):
+        try:
+            return intake.create_task(identifier)
+        except (OSError, runtime_denied):
+            raise TaskError('PDF 来源暂未通过核对，未创建新任务。请继续原导入。') from None
 
     @app.get('/api/resource-discoveries')
     def resource_discoveries():

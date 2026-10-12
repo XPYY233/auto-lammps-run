@@ -69,14 +69,17 @@ class PaperStore:
         return doc
 
     def add(self, title, doi, scope, note):
+        with self.tasks.transaction() as db:
+            doc = self._add(db, title, doi, scope, note)
+        return self.get(doc['id'])
+
+    def _add(self, db, title, doi, scope, note):
         doc=dict(id=uuid.uuid4().hex,revision=0,title=text(title,500),doi=doi_text(doi),
                  scope=text(scope,4000),note=text(note,4000),selection='candidate')
-        with self.tasks.transaction() as db:
-            if db.execute('SELECT 1 FROM papers WHERE doi=?',(doc['doi'],)).fetchone():
-                raise TaskError('该 DOI 已在清单中；不能重建文献来隐藏历史')
-            db.execute('INSERT INTO papers VALUES (?,?,0)',(doc['id'],doc['doi']))
-            self._write(db,doc,'candidate_added')
-        return self.get(doc['id'])
+        if db.execute('SELECT 1 FROM papers WHERE doi=?',(doc['doi'],)).fetchone():
+            raise TaskError('该 DOI 已在清单中；不能重建文献来隐藏历史')
+        db.execute('INSERT INTO papers VALUES (?,?,0)',(doc['id'],doc['doi']))
+        return self._write(db,doc,'candidate_added')
 
     def select(self, identifier, revision):
         with self.tasks.transaction() as db:
