@@ -1085,3 +1085,4 @@ main>section,.guided-layout>div,.resource-main,.help-grid>*{min-width:0;max-widt
 .intake-history-row {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;}
 .intake-history-row button {text-align:left;overflow-wrap:anywhere;}
 .intake-history-row small {flex-shrink:0;}
+.intake-summary {display:grid;gap:8px;margin:16px 0;padding:14px;background:#f4f7fd;border:1px solid var(--line,#d7e1ee);border-radius:8px;overflow-wrap:anywhere;}

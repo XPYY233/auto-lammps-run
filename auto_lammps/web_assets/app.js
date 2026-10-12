@@ -2494,6 +2494,8 @@ function paperIntakeError(message){const box=$('#paper-intake-error');box.textCo
 function renderPaperIntake(record){
  paperIntakeRecord=record;paperIntakeError('');
  const form=$('#paper-identity-form'),start=$('#paper-import-start');form.hidden=!record;start.hidden=true;
+ const summary=$('#paper-intake-summary');summary.replaceChildren();summary.hidden=!record?.title;
+ if(record?.title){summary.append(node('strong',record.title));const link=node('a','DOI '+record.doi);link.href='https://doi.org/'+encodeURI(record.doi);link.target='_blank';link.rel='noopener';summary.append(link);const detail=node('details');detail.append(node('summary','查看已保存的复现需求'),node('p',record.scope));summary.append(detail);}
  if(!record){$('#paper-intake-status').textContent='选择 PDF 后保存；关闭页面也会保留已保存的导入。';return;}
  const fixed=record.state!=='uploaded';
  $('#paper-import-title').value=record.title||record.suggested_title||'';
