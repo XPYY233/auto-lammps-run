@@ -56,6 +56,15 @@ test('without saved results the directory keeps history but hides empty plot and
   assert.equal(s.renders(),0);assert.deepEqual(s.scrolled,[]);
 });
 
+test('only explicitly accepted closeout changes the baseline result layout',()=>{
+ const s=setup();s.c.workspaceReport={closeout:{acceptance:{status:'accepted_by_user'}}};s.c.updateTaskContents();
+ assert.equal(s.$('#task-view').classList.values.has('accepted-results-first'),true);
+ s.c.workspaceReport={closeout:{acceptance:{status:'pending'}}};s.c.updateTaskContents();
+ assert.equal(s.$('#task-view').classList.values.has('accepted-results-first'),false);
+ s.c.workspaceReport=null;s.c.updateTaskContents();
+ assert.equal(s.$('#task-view').classList.values.has('accepted-results-first'),false);
+});
+
 test('a saved baseline comparison replaces stale preparation progress with a result entry',()=>{
   const s=setup();
   const c=vm.createContext({$:s.$,current:{id:'task',status:'conditions_frozen',mode:'reproduction'},
