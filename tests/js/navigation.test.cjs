@@ -288,6 +288,19 @@ test('task list offers record closure only after active work and uncertain submi
  assert.match(completed,/删除任务记录/);
 });
 
+test('task search and sorting use saved rows while management stays collapsed',()=>{
+ const {c,elements}=setupTaskList([{id:OLD,title:'Earlier W',status:'draft',updated_at:'2026-01-01'},
+  {id:NEXT,title:'Recent Ni',status:'draft',updated_at:'2026-02-01'}]);
+ c.api=()=>{throw Error('list filtering must not request or mutate a task');};
+ c.taskCards();let rows=elements.get('#task-cards').children[0].children[1].children;
+ assert.match(textContent(rows[0]),/Recent Ni/);
+ const management=rows[0].children[5].children.find(e=>e.tagName==='details');assert.ok(management);assert.notEqual(management.open,true);
+ elements.get('#tasks-query').value='W';c.taskCards();rows=elements.get('#task-cards').children[0].children[1].children;
+ assert.equal(rows.length,1);assert.match(textContent(rows[0]),/Earlier W/);
+ elements.get('#tasks-query').value='';elements.get('#tasks-sort').value='oldest';c.taskCards();rows=elements.get('#task-cards').children[0].children[1].children;
+ assert.match(textContent(rows[0]),/Earlier W/);
+});
+
 test('a saved job controls the next action instead of an older prepared plan',()=>{
  const elements=new Map(),$=selector=>{if(!elements.has(selector))elements.set(selector,element(selector));return elements.get(selector);};
  $('#scientific-review').hidden=true;

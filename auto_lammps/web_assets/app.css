@@ -939,3 +939,136 @@ details#ai-activity-panel[open]>summary{margin-bottom:12px}
  #task-view .result-workspace-heading{display:block}
  #task-view #result-priority-note{text-align:left;margin:4px 0 0}
 }
+
+/* Overview pages: clear actions, bounded content, and records opened on demand. */
+main>section,.guided-layout>div,.resource-main,.help-grid>*{min-width:0;max-width:100%}
+.app-header .search-box[hidden]+.model-button{margin-left:auto}
+.evidence-figure{min-width:0;max-width:100%;margin:0;padding:16px;border-radius:8px}
+.evidence-figure>a{min-width:0;max-width:100%}
+.evidence-figure img{display:block;width:100%;max-width:100%;height:auto;max-height:520px;object-fit:contain}
+.evidence-figure figcaption{font-size:13px;line-height:1.6;margin-top:10px;overflow-wrap:anywhere}
+.evidence-grid,.closeout-figures,.chart-area{min-width:0;max-width:100%}
+#task-view .task-contents{max-width:100%}
+#task-view.accepted-results-first .research-main>.task-hero{order:-4}
+#task-view.accepted-results-first .research-main>.result-workspace{order:-3}
+#task-view.accepted-results-first .research-main>.ai-current{order:-2}
+#task-view.accepted-results-first .research-main>#task-quick-links{order:-1}
+#task-view.accepted-results-first .task-top .actions{min-width:0;max-width:100%}
+#task-view.accepted-results-first #task-status{white-space:normal;max-width:100%;overflow-wrap:anywhere}
+#task-view.accepted-results-first .comparison-scroll{max-width:100%;min-width:0}
+.baseline-context{margin:4px 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:#f8fbff}
+.baseline-context>summary{cursor:pointer;font-size:13px;font-weight:600;color:#36577f}
+.baseline-context[open]>.evidence-legend{margin-top:14px}
+
+#tasks-view #task-stats{grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:20px 0}
+#tasks-view .stat{padding:12px;grid-template-columns:30px minmax(0,1fr);gap:8px}
+#tasks-view .stat-icon{width:30px;height:30px;border-radius:8px}
+#tasks-view .stat small{font-size:12px;white-space:nowrap}
+#tasks-view .stat strong{font-size:24px}
+.tasks-toolbar{display:flex;gap:16px;align-items:end;margin:18px 0 12px}
+.tasks-toolbar>label:first-child{flex:1}
+.tasks-toolbar>label:last-child{width:170px}
+.tasks-toolbar label{font-size:12px;color:var(--muted)}
+#tasks-view .research-table{table-layout:fixed;min-width:0}
+#tasks-view .research-table th:first-child{width:30%}
+#tasks-view .research-table th:nth-child(2){width:21%}
+#tasks-view .research-table th:nth-child(3){width:12%}
+#tasks-view .research-table th:nth-child(4){width:16%}
+#tasks-view .research-table th:nth-child(5){width:10%}
+#tasks-view .research-table td{overflow-wrap:anywhere;vertical-align:top}
+#tasks-view .badge{white-space:normal;max-width:100%}
+#tasks-view .task-next-link{white-space:normal;text-align:left}
+.task-manage{margin-top:8px;font-size:12px}
+.task-manage>summary{cursor:pointer;color:var(--muted)}
+.task-manage>button{display:block;margin-top:8px;text-align:left;font-size:12px}
+
+#paper-list,#candidate-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin:18px 0}
+#papers-view .paper-card{min-width:0;margin:0;padding:20px}
+#papers-view .paper-card-top{gap:12px}
+#papers-view .paper-card-top>a{min-width:0;font-size:16px;line-height:1.55;overflow-wrap:anywhere}
+#papers-view .paper-card-top>.badge{flex-shrink:0;max-width:100px;white-space:normal;text-align:center}
+#papers-view .paper-card>button{margin:4px 8px 8px 0}
+#papers-view .paper-card details{padding:10px 0;margin-top:4px;font-size:13px}
+#papers-view .paper-card details p{font-size:13px;line-height:1.65;overflow-wrap:anywhere}
+#papers-view .paper-card .paper-accepted-scope{padding:10px 12px;background:#edf6ff;border-radius:6px;font-size:13px}
+#papers-view .page-search{padding:16px}
+.page-explanation{padding:12px 0;color:var(--muted);font-size:13px}
+.page-explanation>summary{cursor:pointer;font-weight:600}
+.page-explanation p{margin:10px 0}
+
+.resource-provenance{margin:12px 0 20px;font-size:12px;color:var(--muted)}
+.resource-provenance>summary{cursor:pointer}
+.resource-provenance .resource-stats{margin:12px 0}
+.resource-provenance p{overflow-wrap:anywhere}
+.resource-layout{margin-top:16px}
+.resource-facets>.text-button{margin-bottom:12px}
+.resource-facet>summary{cursor:pointer;font-size:13px;font-weight:600;margin-bottom:8px}
+.resource-main .resource-search-label{margin-top:0;max-width:none}
+.resource-main .research-table{table-layout:fixed}
+.resource-main .research-table th:first-child{width:29%}
+.resource-main .research-table td{overflow-wrap:anywhere;vertical-align:top}
+.resource-main .badge{white-space:normal;max-width:100%;line-height:1.5}
+.resource-main .research-table code{white-space:normal;overflow-wrap:anywhere}
+.resource-pagination{display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px;background:#fff;border-top:1px solid var(--line);font-size:12px}
+.resource-pagination span{margin-right:auto;color:var(--muted)}
+.resource-main #resource-count{font-size:13px;margin:14px 0}
+
+#welcome .mode-card{display:grid;grid-template-columns:1fr;gap:3px;align-items:start;text-align:left;min-width:0}
+#welcome .mode-card small{display:block;font-size:12px;color:var(--muted)}
+#welcome .guided-rail .panel{background:#fff;border-color:var(--line)}
+#welcome .guided-layout{grid-template-columns:minmax(0,1.7fr) minmax(260px,1fr)}
+#welcome .guide-progress{max-width:840px}
+#welcome .prompt-label textarea{min-height:210px}
+#welcome .composer-bottom{flex-wrap:wrap;gap:18px}
+#welcome .composer-bottom>label{flex:1;min-width:180px}
+#welcome .composer-bottom .primary{white-space:nowrap}
+.help-banner{background:#edf5ff;padding:24px;margin-bottom:20px}
+.help-banner h1{font-size:28px}
+.help-shortcuts{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+.help-grid{align-items:start;gap:14px}
+.help-article,.help-article:nth-child(n){border-left:1px solid var(--line);padding:18px 20px}
+.help-article summary{font-size:16px;color:var(--ink)}
+.help-article p{max-width:70ch;margin:14px 0;font-size:14px;color:var(--muted)}
+.help-article .text-button{font-size:13px}
+
+@media(max-width:1100px){
+ #tasks-view #task-stats{grid-template-columns:repeat(3,minmax(0,1fr))}
+ #paper-list,#candidate-list{grid-template-columns:1fr}
+}
+@media(max-width:950px){#welcome .guided-layout{grid-template-columns:1fr}}
+@media(max-width:860px){
+ .resource-facets{order:0;display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;max-height:280px;overflow:auto}
+ .resource-facets>.text-button{grid-column:1/-1;justify-self:start;margin:0}
+}
+@media(max-width:760px){
+ #task-view.accepted-results-first .ai-current>.actions{flex:1 1 100%;min-width:0;width:100%;max-width:100%;margin-left:0}
+ #task-view.accepted-results-first .ai-current>.actions>button{min-width:0;max-width:100%;white-space:normal}
+ #task-view.accepted-results-first .ai-current #next-action-note{flex-basis:100%;min-width:0}
+ #tasks-view #task-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .tasks-toolbar{gap:12px;flex-wrap:wrap}
+ .tasks-toolbar>label:first-child{flex-basis:100%}
+ .tasks-toolbar>label:last-child{width:100%}
+ #tasks-view .research-table,#tasks-view .research-table tbody{display:block;width:100%}
+ #tasks-view .research-table thead{display:none}
+ #tasks-view .research-table tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);padding:16px;gap:12px;border-bottom:1px solid var(--line)}
+ #tasks-view .research-table td{display:block;border:0;padding:0;min-width:0;width:100%}
+ #tasks-view .research-table td:first-child{grid-column:1/-1}
+ #tasks-view .research-table td:not(:first-child)::before{content:attr(data-label);display:block;color:var(--muted);font-size:11px;margin-bottom:4px}
+ #tasks-view .research-table td:first-child strong{font-size:15px}
+ #tasks-view .research-table small{margin-top:5px}
+ #papers-view .paper-card-top{flex-direction:column-reverse;gap:8px}
+ #papers-view .paper-card-top>.badge{max-width:none}
+ #welcome .mode-choices{display:grid;grid-template-columns:1fr 1fr}
+ #welcome .mode-card{width:100%;padding:12px}
+ #welcome .guide-progress{gap:8px}
+ #welcome .guide-progress li{font-size:11px;min-width:0}
+ .resource-toolbar>button{width:100%}
+ .resource-main .research-table{min-width:720px}
+ .help-banner{padding:20px}
+ .help-grid{grid-template-columns:1fr}
+}
+@media(max-width:540px){
+ .top-nav{gap:2px;overflow:visible;justify-content:space-between}
+ .top-nav button{padding:8px 4px;font-size:12px;gap:0}
+ .top-nav .ui-icon{display:none}
+}
