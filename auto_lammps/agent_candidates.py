@@ -28,7 +28,7 @@ from .geometry_catalog import GeometryCatalogError, validate_entry
 from .plan_review import normalized_review_issues
 
 GENERATOR_VERSION = 22
-PLAN_REVIEW_VERSION = 3
+PLAN_REVIEW_VERSION = 4
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
     'Preserve the scientific scope, material identity, every specified value and method, and any immutable initial geometry. '
@@ -1050,7 +1050,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                     geometry_checks=canonical(geometry_checks).decode(),
                     analysis_plan=canonical(proposal['analysis'].get('plan')).decode())
                 review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal,
-                    'protocol_version':PLAN_REVIEW_VERSION, 'thinking':False,
+                    'protocol_version':PLAN_REVIEW_VERSION, 'thinking':True, 'reasoning_effort':'low',
                     'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
                 if on_stage: on_stage('checking_plan')
                 review_messages = [
@@ -1062,6 +1062,9 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      '"evidence":[{"source":supplied_evidence_source_name,"quote":literal_contiguous_excerpt}]}],'
                      '"summary":short_text}. Cover EVERY requirement_reference exactly once. '
                      'Evidence source names are rendered_script, resource_metadata, geometry_checks and analysis_plan. '
+                     'Each of those four supplied fields is an exact text string for quoting. Other request fields '
+                     'are context only, not citation sources. Copy a short contiguous string from one of those '
+                     'four fields without reordering lines, reserializing JSON, changing whitespace or expanding variables. '
                      'Quotes must occur verbatim in the named supplied source; do not paraphrase or invent a command. '
                      'An unimplemented requirement may have empty evidence only with explicit blocking issues. '
                      'At most 12 issues, containing ONLY concrete blocking errors. Do not put acceptable choices, '
@@ -1076,10 +1079,15 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'loop/label/next/jump and constant type-variable expansions are permitted trusted controls, '
                      'not raw model dispatch or extra retries. workflow_screen retains their declared counts. '
                      'sample_swap_types chooses i=floor(random(1,n+1)) and r=floor(random(1,n)); '
+                     'random(lo,hi,seed) samples lo <= value < hi; the upper bound is excluded. '
+                     'Thus floor(random(1,n+1)) is in 1..n, floor(random(1,n)) is in 1..n-1. '
                      'j=r+(r>=i), giving two distinct types in 1..n, never n+1. Audit the complete expression, '
                      'not an intermediate bound or variable name. The potential adapter copies verified source bytes '
                      'under canonical model filenames and binds pin/checksums/type mapping; a canonical filename '
                      'different from the source basename is not a fabricated potential or a provenance failure. '
+                     'For a selected immutable initial geometry, structure.data is the controller-provisioned '
+                     'verified selected data file; reset_structure/load_structure is lowered to clear/read_data '
+                     'and the bound potential commands. The literal pin need not appear in LAMMPS read_data. '
                      'run_schedule lowers only the supplied explicit timestep list into literal run lengths, preserving the declared '
                      'fix and sampler lifecycle. Planned MC attempts describe declared work, never observed accepted swaps. '
                      'Complete scan_sites includes ALL frozen states/sites/variants; every variant restores the SAME '
@@ -1091,6 +1099,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'extra analysis.files entry. Do not request fabricated potential_source files. '
                      'LAMMPS parser fact: variable E equal $(pe) stores the IMMEDIATE numeric energy at '
                      'that line (for example variable E equal -100), unlike variable E equal pe. '
+                     'Equal-style formula variables such as variable s equal step or variable e equal pe/count(all) '
+                     'are re-evaluated when referenced at print time; they are not frozen at definition. '
                      'Do NOT flag correct capture output as dynamic or request it be repaired. '
                      'Do not report these as missing from the partial workflow. Supplied resource_metadata is the '
                      'source of potential provenance; fabricated source claims in workflow must be removed. '
@@ -1114,14 +1124,15 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                         'guidance':guidance or [],
                         'proposal':{k:v for k,v in proposal.items() if k not in ('workflow', 'analysis')},
                         'analysis_description':{k:v for k,v in proposal['analysis'].items() if k != 'plan'},
-                        'rendered_script':reviewed_script,'resource_metadata':compatible,
-                        'analysis_plan':proposal['analysis'].get('plan'),
+                        'rendered_script':review_sources['rendered_script'],
+                        'resource_metadata':review_sources['resource_metadata'],
+                        'analysis_plan':review_sources['analysis_plan'],
                         'geometry_adapter':context['geometry_adapter'],
                         'workflow_adapter':context['workflow_adapter'],
                         'workflow_screen':screen,'analysis_adapter':{
                             'runtime':context['analysis_runtime'], 'structural_contract':STRUCTURAL_GUIDE,
                             'site_thermodynamics_contract':SITE_THERMODYNAMICS_GUIDE},
-                        'geometry_checks':geometry_checks,
+                        'geometry_checks':review_sources['geometry_checks'],
                         'atom_counts':structure_counts(proposal,max_atoms=max_atoms,initial_geometry=initial_geometry),
                         'geometry_order': ('original data-file particle IDs and order preserved; no replication or edits'
                             if initial_geometry is not None else 'x outer, y middle, z inner, basis innermost; '
@@ -1139,7 +1150,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                         raise ReviewContractError(str(error)) from None
                     # Only a completed but malformed review can be repaired.
                     # Unknown transport outcomes never reach this repair branch.
-                    review=client.complete_json(review_id, review_messages, thinking=False)
+                    review=client.complete_json(review_id, review_messages, thinking=True, reasoning_effort='low')
                     value=review['value']; receipt=review['receipt']
                     if receipt['state']!='completed' or receipt['output_sha256']!=sha256(canonical(value)):
                         raise ModelError('plan_review_not_completed')
@@ -1162,7 +1173,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                                 'or alter the calculation plan. This is the sole report-format repair.'}).decode()}]
                         review_id=sha256(canonical({'protocol_version':PLAN_REVIEW_VERSION,
                             'repair_of':review_id,'invalid_output_sha256':receipt['output_sha256'],
-                            'thinking':False,'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
+                            'thinking':True,'reasoning_effort':'low',
+                            'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
                 reviews.append({'proposal_sha256':sha256(canonical(proposal)),'receipt':receipt,**value})
                 if value['issues']:
                     raise CandidateError('Requirement-to-workflow review: '+'; '.join(value['issues']))
