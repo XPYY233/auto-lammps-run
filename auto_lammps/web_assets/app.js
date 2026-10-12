@@ -187,6 +187,9 @@ async function renderNew() {
   $('#task-view').hidden = true;
   $('#message').hidden = true;
   await listTasks();
+  if(typeof sessionStorage!=='undefined'){
+    try{if(sessionStorage.getItem('auto-lammps-new-mode')==='reproduction')setMode('reproduction');}catch{}
+  }
   ($('#create-form').hidden?$('#paper-pdf-file'):$('#create-form textarea')).focus();
   window.scrollTo({top:0});
 }
@@ -1652,6 +1655,7 @@ function selectNavigation(name){
   }
 }
 function setMode(mode){
+  if(typeof sessionStorage!=='undefined'){try{sessionStorage.setItem('auto-lammps-new-mode',mode);}catch{}}
   $('#create-form [name=mode]').value=mode;
   $('#mode-research').classList.toggle('selected',mode==='research');$('#mode-reproduction').classList.toggle('selected',mode==='reproduction');
   $('#mode-research').setAttribute('aria-pressed',String(mode==='research'));$('#mode-reproduction').setAttribute('aria-pressed',String(mode==='reproduction'));
@@ -2510,7 +2514,7 @@ async function refreshPaperIntake(){
  for(const saved of data.imports){const row=node('div',undefined,'intake-history-row'),button=node('button',saved.title||saved.suggested_title||'PDF · '+saved.pages+' 页','quiet');button.type='button';button.onclick=()=>{paperIntakeRead++;renderPaperIntake(saved);};row.append(button,node('small',{uploaded:'待核对',prepared:'待完成登记',bound:'已登记',task_created:'已有任务'}[saved.state]||'待核对'));history.append(row);}
  if(!data.imports.length)history.append(node('p','尚无已保存的导入。','subtle'));
  if(active&&paperIntakeRecord?.id===active){const saved=data.imports.find(r=>r.id===active);if(saved)renderPaperIntake(saved);}
- else if(!paperIntakeRecord&&!paperUpload)renderPaperIntake(null);
+ else if(!paperIntakeRecord&&!paperUpload)renderPaperIntake(data.imports[0]||null);
 }
 function paperIntakeWork(work){
  return action(async()=>{paperIntakeError('');for(const id of ['paper-import-upload','paper-import-confirm','paper-import-start','paper-pdf-file'])$('#'+id).disabled=true;
