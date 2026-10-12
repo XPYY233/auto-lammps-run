@@ -1151,7 +1151,12 @@ function renderPlanSummary(review){
   steps.append(list);box.append(steps);
   const files=plan.analysis?.files||[];
   const outputs=detailsFor('outputs',`查看预期科研产物（${files.length} 个文件）与数据字段`,'plan-output-list');
-  for(const table of plan.analysis?.plan?.tables||[])outputs.append(node('p',`${table.file}：${table.columns.map(c=>c.name+' ['+c.unit+']').join('、')}`));
+  for(const table of plan.analysis?.plan?.tables||[]){
+    const fields=Array.isArray(table.columns)?table.columns.map(c=>c.name+' ['+c.unit+']').join('、'):
+      table.format==='lammps_dump'?`LAMMPS 原子轨迹 · 长度单位 ${table.length_unit||'见分析定义'} · 元素 ${(table.elements||[]).join(' / ')}`:
+      `结构化数据 · 格式 ${table.format||'见分析定义'}`;
+    outputs.append(node('p',`${table.file}：${fields}`));
+  }
   outputs.append(node('p',files.join('、')));box.append(outputs);
   const check=plan.automatic_check||review.automatic_check;
   if(check){const details=detailsFor('checks','查看应用的需求与步骤核对结果','plan-checks');
@@ -1199,7 +1204,7 @@ async function refreshPlanReview(){
     block.dataset.file=file.name;block.open=opened.has(file.name);
     const labels={'in.lammps':'LAMMPS 计算脚本','analysis.json':'数据分析定义','structure.data':'初始原子结构'};
     block.append(node('summary',`${labels[file.name]||'其他尺寸初始结构'} · ${file.name} · ${(file.size/1024).toFixed(1)} KiB`));
-    if(file.content)block.append(node('pre',file.content.slice(0,20000),'plan-code'));
+    if(file.content)block.append(node('pre',file.content,'plan-code'));
     block.append(node('p','文件校验值：'+file.sha256,'form-note'));files.append(block);
   }
   let execution=executionState||{},executionReadable=true;
