@@ -1157,7 +1157,7 @@ function renderPlanSummary(review){
   const outputs=detailsFor('outputs',`查看预期科研产物（${files.length} 个文件）与数据字段`,'plan-output-list');
   for(const table of plan.analysis?.plan?.tables||[]){
     const fields=Array.isArray(table.columns)?table.columns.map(c=>c.name+' ['+c.unit+']').join('、'):
-      table.format==='lammps_dump'?`LAMMPS 原子轨迹 · 长度单位 ${table.length_unit||'见分析定义'} · 元素 ${(table.elements||[]).join(' / ')}`:
+      table.format==='lammps_dump'?`LAMMPS 原子轨迹 · 长度单位 ${table.length_unit||'见分析定义'} · 原子类型 ${Object.entries(table.elements||{}).sort(([a],[b])=>Number(a)-Number(b)).map(([type,element])=>`${type} → ${element}`).join(' / ')}`:
       `结构化数据 · 格式 ${table.format||'见分析定义'}`;
     outputs.append(node('p',`${table.file}：${fields}`));
   }

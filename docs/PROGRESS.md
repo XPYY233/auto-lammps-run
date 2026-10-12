@@ -948,3 +948,9 @@ UX 草稿 PR #161 已提交为依赖 P–A–B 共同基线 `cdc21e5` 的堆叠�
 Graph neural network framework for energy mapping of hybrid monte-carlo molecular dynamics
 simulations of Medium Entropy Alloys（DOI: 10.48550/arxiv.2411.13670）的B尚未提交，
 不据方案进展宣称科学复现通过。三篇完整PAB与任意用户可复现的安装流程仍未验收。
+
+## 2026-10-12：本轮前端收尾与 P 核心交接
+
+五个主页面、旧成功基准详情及用户PDF入口已整合进安装候选。独立安装通过原PDF上传、身份登记、重启恢复、普通按钮建任务；正式页面完成同一路径。真实应用AI的P提取保留6次调用后在initial_focus校验失败，已交核心负责方诊断，全文提取验收尚未通过，Issue #168保持开放。
+
+最终轨迹方案显示按实际elements类型字典编号展示，合法轨迹与数值表混合回归通过；完整脚本、原科学方案、轮次、批准到执行接口不变。211项JavaScript通过，安装与五主页面/旧基准最终回归后结束本轮前端；三篇科学PAB仍由核心对话推进。PR保持待审，不宣称main已合并。
