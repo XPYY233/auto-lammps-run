@@ -20,7 +20,8 @@ class WorkbenchAdapterTests(unittest.TestCase):
             'runtime_tasks': ['analysis', 'extraction'], 'model_stages': ['extract'],
             'operations': {k: 'test.'+k for k in
                 ('assemble', 'execute', 'project', 'plan_next', 'finalize')},
-            'modules': {'test.module': 'e'*64}}
+            'modules': {'test.module': 'e'*64},
+            'output_limits': {'extraction_records_per_response': 64}}
         call = {'call_id': 'native-1', 'task': 'extraction', 'messages': deepcopy(self.messages),
             'max_tokens': 4000, 'options': {'thinking': False, 'temperature': 0.45}}
         call['call_digest'] = native_digest(call)
@@ -53,6 +54,26 @@ class WorkbenchAdapterTests(unittest.TestCase):
         self.assertFalse(proof['scientific_validation'])
         self.assertEqual(self.adapter.validate(adapted, proof, self.messages, self.options), proof)
         self.assertNotIn('frozen_scientific_conditions', adapted[0]['content'])
+
+    def test_extraction_limit_is_taken_from_native_contract_and_counted_combined(self):
+        self.capability['model_stages'] = ['initial_focus']
+        self.capability['output_limits']['extraction_records_per_response'] = 40
+        self.stage['name'] = 'initial_focus'; self.rehash_stage()
+        adapter = self.build()
+        adapted, proof = adapter.prepare(self.messages, self.options)
+        self.assertIn('COMBINED must contain at most 40 records', adapted[0]['content'])
+        self.assertIn('Never truncate a value', adapted[0]['content'])
+        self.assertEqual(adapted[1:], self.messages[1:])
+        self.assertEqual(adapter.validate(adapted, proof, self.messages, self.options), proof)
+
+    def test_missing_invalid_or_changed_native_limit_prevents_send(self):
+        for value in ({}, {'extraction_records_per_response': True},
+                      {'extraction_records_per_response': 0}):
+            with self.subTest(value=value), self.assertRaises(WorkbenchAdapterError):
+                self.build(capability_reader=lambda: {**self.capability, 'output_limits': value})
+        self.capability['output_limits']['extraction_records_per_response'] = 65
+        with self.assertRaises(WorkbenchAdapterError):
+            self.adapter.prepare(self.messages, self.options)
 
     def test_missing_real_readers_are_rejected(self):
         for kwargs in ({'capability_reader': None}, {'stage_reader': None}):

@@ -27,7 +27,8 @@ def synthetic_capabilities():
         'runtime_tasks': ['analysis', 'extraction'], 'model_stages': ['initial_focus'],
         'operations': {key: 'synthetic_executor.' + key for key in
             ('assemble', 'execute', 'project', 'plan_next', 'finalize')},
-        'modules': {'synthetic_module': 'e'*64}}
+        'modules': {'synthetic_module': 'e'*64},
+        'output_limits': {'extraction_records_per_response': 64}}
 
 
 def synthetic_stage(messages, options):

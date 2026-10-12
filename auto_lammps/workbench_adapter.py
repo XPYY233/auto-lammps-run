@@ -12,7 +12,7 @@ import re
 from .manifest import canonical, sha256
 from .tasks import TaskError, task_id
 
-VERSION = 1
+VERSION = 2
 ROLE = 'paper_reference_human_only'
 MARKER = '\n\n[AUTO-LAMMPS WORKBENCH SCIENTIFIC ADAPTER]\n'
 INSTRUCTION = (
@@ -46,8 +46,13 @@ def _hash(value):
 
 def _capabilities(value):
     if (not isinstance(value, dict) or set(value) != {'planner', 'executor',
-            'runtime_tasks', 'model_stages', 'operations', 'modules'}):
+            'runtime_tasks', 'model_stages', 'operations', 'modules', 'output_limits'}):
         raise WorkbenchAdapterError('实装工作台能力合同缺失。')
+    limits = value['output_limits']
+    if (not isinstance(limits, dict) or set(limits) != {'extraction_records_per_response'}
+            or type(limits['extraction_records_per_response']) is not int
+            or not 1 <= limits['extraction_records_per_response'] <= 10000):
+        raise WorkbenchAdapterError('实装工作台返回条数合同缺失。')
     if (not isinstance(value['runtime_tasks'], (list, tuple))
             or len(value['runtime_tasks']) != 2
             or any(not isinstance(task, str) for task in value['runtime_tasks'])
@@ -139,6 +144,7 @@ class WorkbenchScientificAdapter:
                 'original_messages_sha256': sha256(canonical(messages)),
                 'request_options_sha256': sha256(canonical(options)),
                 'output_schema': 'unchanged_installed_native_stage_schema',
+                'output_limits': deepcopy(self.installed['output_limits']),
                 'scientific_validation': False, 'release_to_B': False}
         except WorkbenchAdapterError:
             raise
@@ -164,7 +170,14 @@ def _adapt_native_request(adapter, messages, options):
     """Independent expected contract, never derived from caller-supplied proof."""
     contract = adapter._contract(messages, options)
     output = deepcopy(messages)
-    output[0]['content'] += MARKER + INSTRUCTION + canonical({'scientific_adapter': contract}).decode()
+    limits = ''
+    if contract['stage'] in {'initial_focus', 'coverage_gap'}:
+        cap = contract['output_limits']['extraction_records_per_response']
+        limits = (f'Native response limit: data and findings COMBINED must contain at most {cap} records. '
+            'Count both arrays before returning the JSON. Preserve complete values and exact source locations; '
+            'use the native pending_tasks schema for uncovered dense sources. Never truncate a value, '
+            'fabricate a summary row, or change the native schema to evade this limit.\n')
+    output[0]['content'] += MARKER + INSTRUCTION + limits + canonical({'scientific_adapter': contract}).decode()
     proof = {'name': contract['name'], 'version': VERSION, 'stage': contract['stage'],
         'adapter_source_sha256': contract['source_sha256'],
         'identity': deepcopy(adapter.identity),

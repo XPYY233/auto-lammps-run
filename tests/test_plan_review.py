@@ -295,6 +295,19 @@ class CandidateReviewGroundingTests(unittest.TestCase):
         self.assertIn('analysis_adapter', actual)
         self.assertIn('scientific_adapter', actual)
 
+    def test_description_warning_is_retained_without_changing_the_scientific_proposal(self):
+        report = self.review()
+        report['summary'] = ('Non-blocking warning: the descriptive schedule formula is inaccurate; '
+            'the actual artifact implements the requested sampling.')
+        result, transport, saved = self.generate(report, 'description-warning')
+        self.assertEqual(result['generation']['plan_reviews'][0]['summary'], report['summary'])
+        self.assertEqual(result['generation']['proposal'], self.review_proposal)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual([kind for _, kind in self.proposal_requests], ['initial'])
+        messages = json.loads(transport.call_args.args[0])['messages']
+        self.assertIn('A description-only mistake does not execute', messages[0]['content'])
+        self.assertIn('Those remain blockers', messages[0]['content'])
+
     def test_all_four_canonical_source_texts_are_accepted_as_literal_evidence(self):
         from auto_lammps.manifest import canonical
         source_names = ('rendered_script', 'resource_metadata', 'geometry_checks', 'analysis_plan')

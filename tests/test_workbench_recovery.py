@@ -105,6 +105,33 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         return self.bridge.extract(self.task['id'], request_id or self.original_id,
             self.binding, self.client, connection_revision=1, credential_generation=1, **kwargs)
 
+    def test_native_record_limit_failure_keeps_outputs_and_does_not_retry_or_publish(self):
+        value = {'data': [{} for _ in range(64)], 'findings': [{}], 'pending_tasks': []}
+        def oversized(body, key, timeout):
+            self.outgoing.append(json.loads(body))
+            return 200, canonical({'choices': [{'finish_reason': 'stop', 'message': {
+                'role': 'assistant', 'content': json.dumps(value)}}],
+                'usage': {'prompt_tokens': 4, 'completion_tokens': 2, 'total_tokens': 6}})
+        self.client.transport = oversized
+        result = self.extract()
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['error_code'], 'workbench_response_record_limit')
+        self.assertIn('每次 64 条上限', result['error'])
+        self.assertTrue(result['validation_details'])
+        for detail in result['validation_details']:
+            self.assertEqual(detail['data_count'], 64)
+            self.assertEqual(detail['finding_count'], 1)
+            self.assertEqual(detail['limit'], 64)
+            receipt = self.calls.lookup(detail['request_id'])['receipt']
+            self.assertEqual(receipt['structured_output'], value)
+            self.assertEqual(receipt['state'], 'completed')
+        sent = len(self.outgoing)
+        self.assertEqual(self.extract(), result)
+        self.assertEqual(len(self.outgoing), sent)
+        self.assertEqual(self.bridge.runtime.data_items(self.bridge.runtime.database,
+            self.binding.workbench_paper_id), [])
+        self.assertFalse(result['execution_authorized'])
+
     def fail_after_coverage(self, *, legacy=False):
         from auto_research.evidence.literature_extraction_job import LiteratureExtractionJobError
         export = self.bridge.runtime.jobs.export_private_state

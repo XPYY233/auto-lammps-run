@@ -27,8 +27,8 @@ from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
 from .plan_review import normalized_review_issues
 
-GENERATOR_VERSION = 22
-PLAN_REVIEW_VERSION = 4
+GENERATOR_VERSION = 23
+PLAN_REVIEW_VERSION = 5
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
     'Preserve the scientific scope, material identity, every specified value and method, and any immutable initial geometry. '
@@ -44,7 +44,8 @@ MODEL_PLANNING_GUIDE = (
     'by the user or extracted from a source. Explicit_reference numerical values still require permitted provenance; '
     'without it ask for clarification, never invent a reference value. In summary identify model-proposed parameters '
     'and assumptions, their actual artifact values, rationale, permitted basis and limitations. Keep them consistent '
-    'with structure, workflow and analysis. For a sampling goal that defines count, range and rule, generate the '
+    'with structure, workflow and analysis. Keep summary within 4000 characters; the full executable details '
+    'belong in structure, workflow and analysis, not repeated in summary. For a sampling goal that defines count, range and rule, generate the '
     'complete explicit integer timestep list yourself, describe its count/range/rule in summary and put the full '
     'list in workflow; do not ask the user to hand-list timesteps or replace requested sampling by a reduced study. '
     'The complete proposal remains subject to user review and real artifact checks; planning is not scientific verification. '
@@ -1069,6 +1070,12 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                      'An unimplemented requirement may have empty evidence only with explicit blocking issues. '
                      'At most 12 issues, containing ONLY concrete blocking errors. Do not put acceptable choices, '
                      'non-blocking caveats, provenance already retained by the controller, or warnings in issues. '
+                     'A description-only mistake does not execute. If the complete actual script and analysis '
+                     'implement the frozen requirement, record an inaccurate descriptive formula or wording in '
+                     'the review summary as a non-blocking warning with the actual artifact interpretation; '
+                     'do not demand a new scientific proposal solely for that prose. Never downgrade a wrong '
+                     'executed formula, wrong sampling/count/endpoint, missing output, unauthorized resource, '
+                     'provenance/identity failure or unresolved physical assumption. Those remain blockers. '
                      'Combine repeated descriptions of the same blocking error without omitting any real error. '
                      'Audit rendered_script, the COMPLETE adapter-expanded LAMMPS input, '
                      'not the partial proposal.workflow. The adapter already supplies units, atom_style, boundary, '

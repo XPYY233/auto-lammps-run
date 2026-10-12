@@ -134,6 +134,8 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
         visuals = load('evidence.visual_evidence')
         workflow = load('evidence.literature_extraction_checkpoint_workflow')
         stages = load('evidence.literature_extraction_stages')
+        stage_budget = load('evidence.literature_extraction_budget')
+        extraction = load('evidence.deepseek_extraction')
         execution = load('evidence.literature_checkpoint_runtime')
         context = load('evidence.context_chat')
         snapshots = job.LiteraturePDFSnapshotAuthority(blob_store=snapshot_blobs)
@@ -158,9 +160,12 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'executor': {'id': workflow._EXECUTOR_ID, 'version': workflow._EXECUTOR_VERSION},
                 'runtime_tasks': sorted(workflow.LITERATURE_POLICY_TASKS),
                 'model_stages': sorted(job.MODEL_STAGES),
+                'output_limits': {'extraction_records_per_response':
+                    stage_budget.MAX_EXTRACTED_RECORDS_PER_RESPONSE},
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
-                    for module in (job, business, workflow, stages, persistence, finalizer, context)}}
+                    for module in (job, business, workflow, stages, stage_budget,
+                                   extraction, persistence, finalizer, context)}}
         def native_stage(token):
             state = persistence.decode_job_private_state(jobs.export_private_state(token, session_id=session_id))
             return {'paper_id': state.paper_id, 'paper': dict(state.paper),
@@ -746,6 +751,35 @@ class WorkbenchExtractionBridge:
                 error=_MODEL_ERRORS.get(code, '文献工作台未完成提取；原请求记录保留，未自动重试。'))
             if isinstance(exc, WorkbenchAdapterError):
                 result['error'] = str(exc)
+            if code == 'literature_stage_invalid':
+                # Explain a native shape/budget failure from our own saved
+                # receipts. Do not rewrite the response, skip validation,
+                # publish a partial P, or issue another model request.
+                limit = adapter.adapter.installed['output_limits']['extraction_records_per_response']
+                details = []
+                for call_id in adapter.requests:
+                    saved = client.calls.lookup(call_id) or {}
+                    receipt = saved.get('receipt') or {}
+                    proof = receipt.get('scientific_adapter') or {}
+                    payload = receipt.get('structured_output')
+                    if (receipt.get('state') != 'completed'
+                            or proof.get('stage') not in {'initial_focus', 'coverage_gap'}
+                            or not isinstance(payload, dict)
+                            or receipt.get('output_sha256') != sha256(canonical(payload))
+                            or proof.get('identity') != adapter.adapter.identity):
+                        continue
+                    data, findings = payload.get('data'), payload.get('findings')
+                    if (isinstance(data, list) and isinstance(findings, list)
+                            and len(data) + len(findings) > limit):
+                        details.append({'request_id': call_id, 'stage': proof['stage'],
+                            'data_count': len(data), 'finding_count': len(findings),
+                            'limit': limit})
+                if details:
+                    result['error_code'] = 'workbench_response_record_limit'
+                    result['validation_details'] = details
+                    totals = '、'.join(str(d['data_count'] + d['finding_count']) for d in details)
+                    result['error'] = (f'AI 的单次返回有 {totals} 条数据与结论，超过文献工作台每次 {limit} 条上限。'
+                        '原输出与费用已保留；尚未发布 P，未自动重试。')
         result['model_request_ids'] = list(adapter.requests)
         if recovery:
             result['new_model_calls'] = len(adapter.requests)
