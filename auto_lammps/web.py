@@ -274,6 +274,13 @@ class WorkbenchExtractionInput(Input):
     resume_of: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
+class PaperRecommendationInput(Input):
+    scope_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    question: str = Field(min_length=1, max_length=1000)
+    exclude_dois: list[str] = Field(default_factory=list, max_length=256)
+
+
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
                reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
@@ -298,7 +305,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     if reference_evidence_views is None and reference_views is not None:
         reference_evidence_views = ReferenceEvidenceViews(reference_views.directory, papers)
     preferences = ModelPreferences(store)
-    connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled)
+    connections = model_connections or ModelConnections(store, assistant_enabled=result_assistant_enabled,
+        calls=model_client.calls if model_client is not None else None)
     from .result_charts import ResultCharts
     from .reference_chart_sources import ReferenceChartSources
     reference_charts = (ResultCharts(store, connections, None,
@@ -318,6 +326,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
     from .discovery_library import DiscoveryLibrary
     discoveries = discovery_library or DiscoveryLibrary()
+    from .paper_recommendations import PaperRecommendations
+    recommendations = PaperRecommendations(store, connections, discoveries)
     intake = PaperIntake(papers, workbench_bridge, workbench_bindings)
     def workbench_binding(identifier):
         store.get(identifier)
@@ -330,15 +340,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def workbench_status(identifier):
         binding = workbench_binding(identifier)
         life = store.lifecycle(identifier)
-        enabled = bool(workbench_bridge and binding and model_client and connections.assistant_enabled
+        enabled = bool(workbench_jobs and binding and model_client and connections.assistant_enabled
             and connections.status()['connections']['deepseek-official']['configured']
             and not life['deleted'] and not life['user_finished'])
         reason = '' if enabled else ('请先配置本项目模型连接。' if workbench_bridge and binding
             else '这篇论文的既有文献工作台全文绑定尚未配置；已有 P 图表仍可查看。')
+        if workbench_bridge and binding and workbench_jobs is None:
+            reason = '论文已接入，但后台全文提取服务尚未配置；未启用模型请求。'
         if life['deleted'] or life['user_finished']:
             reason = '任务已结束；提取历史仍可查看。'
         evidence = None
-        if workbench_bridge and binding:
+        if workbench_bridge and binding and callable(getattr(workbench_bridge, 'evidence', None)):
             try:
                 evidence = workbench_bridge.evidence(identifier, binding)
             except (TaskError, ValueError, OSError):
@@ -357,9 +369,26 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 recoveries = []
         return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
             source_sha256=binding.pdf_sha256 if binding else None,
-            messages=workbench_bridge.history(identifier) if workbench_bridge and binding else [],
+            messages=workbench_bridge.history(identifier) if workbench_jobs and binding else [],
+            jobs=workbench_jobs.history(identifier) if workbench_jobs and binding else [],
             evidence=evidence, recoveries=recoveries,
             execution_authorized=False)
+    def workbench_context(identifier):
+        binding = workbench_binding(identifier)
+        if not binding or not model_client or not workbench_bridge:
+            raise TaskError('论文全文或本项目模型连接尚未配置。')
+        client = connections.client('deepseek-official', calls=model_client.calls)
+        with store.transaction() as db:
+            revision = db.execute('SELECT COUNT(*) FROM connection_events WHERE provider=?',
+                ('deepseek-official',)).fetchone()[0]
+        return dict(binding=binding, client=client,
+            enabled=connections.available('deepseek-official') and connections.assistant_enabled,
+            connection_revision=max(1, revision), credential_generation=max(1, revision))
+    from .workbench_jobs import WorkbenchExtractionJobs
+    workbench_jobs = (WorkbenchExtractionJobs(workbench_bridge, workbench_context)
+        if callable(getattr(workbench_bridge, 'extract', None)) else None)
+    if workbench_jobs is not None and workbench_jobs.tasks.path != store.path:
+        raise ValueError('Workbench extraction must share the task store')
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
         source_discovery=source_discovery, reference_views=reference_evidence_views,
@@ -393,6 +422,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     workflow = ResearchWorkflow(candidate_service, execution_jobs) if candidate_service and execution_jobs else None
     @asynccontextmanager
     async def lifespan(app):
+        if workbench_jobs:workbench_jobs.start()
         if candidate_service:
             candidate_service.start()
         if execution_jobs:execution_jobs.start()
@@ -400,6 +430,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:
             yield
         finally:
+            if workbench_jobs:workbench_jobs.close(wait=False)
             if workflow:workflow.close()
             if execution_jobs:execution_jobs.close()
             if candidate_service:
@@ -1149,7 +1180,7 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def get_workbench(identifier: str):
         return workbench_status(identifier)
 
-    @app.post('/api/tasks/{identifier}/workbench/extract')
+    @app.post('/api/tasks/{identifier}/workbench/extract', status_code=202)
     def extract_workbench(identifier: str, data: WorkbenchExtractionInput):
         status = workbench_status(identifier)
         if not status['enabled']:
@@ -1157,16 +1188,33 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         binding = workbench_binding(identifier)
         if data.source_sha256 != binding.pdf_sha256:
             raise StaleTask('论文全文已更新，请刷新后再提取；未发送模型请求。')
-        client = connections.client('deepseek-official', calls=model_client.calls)
-        # Connection events are append-only; a changed model or credential has
-        # a new revision, and cannot replay an older extraction identity.
-        with store.transaction() as db:
-            revision = db.execute('SELECT COUNT(*) FROM connection_events WHERE provider=?',
-                ('deepseek-official',)).fetchone()[0]
-        return workbench_bridge.extract(identifier, data.request_id, binding, client,
+        return workbench_jobs.enqueue(identifier, data.request_id,
+            source_sha256=data.source_sha256,
             force_rescan=data.force_rescan, repair_visuals=data.repair_visuals,
-            resume_of=data.resume_of,
-            connection_revision=max(1, revision), credential_generation=max(1, revision))
+            resume_of=data.resume_of)
+
+    @app.get('/api/tasks/{identifier}/workbench/jobs/{request_id}')
+    def workbench_job_status(identifier: str, request_id: str):
+        store.get(identifier)
+        if workbench_jobs is None:
+            raise TaskError('文献后台服务尚未配置。')
+        result = workbench_jobs.get(identifier, request_id)
+        if result is None:
+            raise TaskError('没有这条文献提取记录。')
+        return result
+
+    @app.get('/api/paper-recommendations')
+    def paper_recommendation_menu():
+        return recommendations.menu()
+
+    @app.get('/api/paper-recommendations/{scope_id}')
+    def paper_recommendation_history(scope_id: str):
+        return {'scope_id': scope_id, 'history': recommendations.history(scope_id)}
+
+    @app.post('/api/paper-recommendations')
+    def paper_recommendation_create(data: PaperRecommendationInput):
+        return recommendations.create(data.scope_id, data.request_id, 'deepseek-official',
+            data.question, exclude_dois=data.exclude_dois)
 
     @app.get('/api/tasks/{identifier}/workbench/images/{entity_uid}')
     def workbench_image(identifier: str, entity_uid: str, source_sha256: str):

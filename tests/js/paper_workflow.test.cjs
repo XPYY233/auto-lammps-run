@@ -22,18 +22,19 @@ const workflow=(task=TASK)=>({schema_version:1,task_id:task,applicable:true,stat
  {id:'view_A',label:'查看作者 A',enabled:true,method:'GET',endpoint:`/api/tasks/${task}/reference-result`}],b_draft:{disabled_reason:'草稿仅供人类检查'}});
 const report=(task=TASK)=>({task_id:task,role:'reference',title:'Synthetic author calculation',scope:'Declared scope',source_sha256:SHA,manifest_sha256:MANIFEST,output_status:'partial',output_valid:false,scientific_status:'not_evaluated',request_id:'request-1',job_id:'123456',summary:'One actual state was recovered.',limitations:['Second state is missing.'],coverage:[{label:'States',available:1,required:2,unit:'states'}],files:[{name:'states.tsv',label:'Actual states',size:12}],figures:[{name:'first.svg',label:'First state',caption:'Actual curve'},{name:'second.svg',label:'Second view',caption:'Same evidence'}],views:[{id:'first',title:'First actual view',figures:[{name:'first.svg',role:'reference'}],tables:[]},{id:'second',title:'Second actual view',figures:[{name:'second.svg',role:'reference'}],tables:[{name:'states.tsv',role:'reference',label:'Actual states',columns:[{label:'Energy',unit:'eV'}],rows:[[-1]],total_rows:1,truncated:false}]}]});
 function setup(){
- const main=element('main'),taskView=element('section'),target=element('section'),ai=element('section'),calls=[],pending=[];
+ const main=element('main'),taskView=element('section'),target=element('section'),ai=element('section'),calls=[],pending=[],timers=[];
  target.id='target-planning';main.append(ai,target);const constants=new Map([['#target-planning',target],['#task-view',taskView],['.ai-current',ai],['#research-results',element('section')]]);
  const c=vm.createContext({Date,Promise,crypto:{randomUUID:()=> 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'},current:{id:TASK,revision:1,mode:'reproduction'},
   $:selector=>constants.get(selector)||descendants(main).find(node=>node.id===selector.slice(1))||null,node:element,
   researchContent:(value,className)=>element('div',value,className),evidenceSourceHeading:role=>element('span',role),
   action:fn=>fn(),notice(){},afterChange:async()=>{},renderWorkspaceResults(){},resultTab:'overview',
   api:(path,data)=>{calls.push({path,data});return new Promise((resolve,reject)=>pending.push({path,data,resolve,reject}));},
+  setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout(){},
   document:{createElement:tag=>element(tag)}});
  vm.runInContext(source.slice(source.indexOf('function paperWorkflowState(){'),source.indexOf('let targetPreviewGeneration=0;')),c);
  vm.runInContext(source.slice(source.indexOf("function evidenceDataTable(table,fileRoute='closeout'){"),source.indexOf('function renderEvidenceGallery(')),c);
  c.clearPaperWorkflowView(TASK);c.renderPaperWorkflow();
- return {c,main,taskView,calls,pending,box:()=>c.$('#paper-workflow'),reference:()=>c.$('#author-reference')};
+ return {c,main,taskView,calls,pending,timers,box:()=>c.$('#paper-workflow'),reference:()=>c.$('#author-reference')};
 }
 function publish(s,w=workflow(),r=report(),history={task_id:TASK,source_sha256:SHA,enabled:true,messages:[]}){
  const state=s.c.paperWorkflowState();state.workflow=w;state.report=r;state.identity=s.c.authorEvidenceIdentity(r);state.discussion=history;s.c.renderPaperWorkflow();return state;
@@ -64,6 +65,17 @@ const workbenchRecord=(options={})=>({task_id:TASK,enabled:true,source_sha256:SH
 async function readWorkbench(s,record=workbenchRecord()){
  const entry=s.c.$('#workbench-entry'),before=s.pending.length,read=entry.loadWorkbench();s.pending[before].resolve(record);await read;return entry;
 }
+test('accepted background extraction releases user action and polls the original job without replay',async()=>{
+ const s=setup();publish(s);const entry=await readWorkbench(s);
+ const run=find(entry,n=>n.textContent==='让应用 AI 提取并核验论文'),request=run.onclick();await flush();
+ s.pending[1].resolve({state:'queued',request_id:'e'.repeat(32)});await flush();
+ s.pending[2].resolve(workbenchRecord({jobs:[{state:'dispatching',label:'文献工作台正在提取',request_id:'e'.repeat(32)}]}));await request;
+ assert.match(text(entry),/可以离开本页或关闭浏览器/);assert.equal(find(entry,n=>n.textContent==='让应用 AI 提取并核验论文'),undefined);
+ assert.equal(s.timers.length,1);assert.equal(s.timers[0].ms,6000);
+ s.timers[0].fn();await flush();assert.equal(s.calls[3].path,`/api/tasks/${TASK}/workbench`);assert.equal(s.calls[3].data,undefined);
+ s.pending[3].resolve(workbenchRecord({messages:[{state:'completed',request_id:'e'.repeat(32)}],jobs:[{state:'completed',label:'文献提取已保存',request_id:'e'.repeat(32)}]}));await flush();
+ assert.equal(s.calls.filter(call=>call.data).length,1);assert.match(text(entry),/文献提取已保存/);
+});
 test('same-task refresh preserves a loaded workbench and its pending source read',async()=>{
  const s=setup();publish(s);const entry=s.c.$('#workbench-entry');entry.open=true;
  const read=entry.loadWorkbench();s.c.refreshPaperWorkflow.generation++;s.c.renderPaperWorkflow();

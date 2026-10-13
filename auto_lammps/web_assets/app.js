@@ -1520,6 +1520,48 @@ async function showPapers() {
   current=null; recordRoute('#papers');
   $('#welcome').hidden=true; $('#task-view').hidden=true; $('#papers-view').hidden=false;
   await refreshPapers(); window.scrollTo({top:0});
+  await appendPaperRecommendations();
+}
+
+let paperRecommendationScope=null;
+function recommendationScope(){
+ if(paperRecommendationScope)return paperRecommendationScope;
+ try{const saved=localStorage.getItem('auto-lammps-paper-recommendation-scope');if(/^[a-f0-9]{32}$/.test(saved||''))paperRecommendationScope=saved;}catch{}
+ if(!paperRecommendationScope){paperRecommendationScope=crypto.randomUUID().replaceAll('-','');try{localStorage.setItem('auto-lammps-paper-recommendation-scope',paperRecommendationScope);}catch{}}
+ return paperRecommendationScope;
+}
+async function appendPaperRecommendations(){
+ const view=$('#papers-view');if(!view||view.hidden)return;
+ let panel=$('#paper-recommendations');
+ if(!panel){panel=node('details');panel.id='paper-recommendations';panel.append(node('summary','让应用 AI 从成套资源中推荐论文 · 查看来源、势函数与缺项'));view.append(panel);}
+ const scope=recommendationScope(),body=node('div');panel.replaceChildren(node('summary','让应用 AI 从成套资源中推荐论文 · 查看来源、势函数与缺项'),body);
+ const alive=()=>!view.hidden&&panel.isConnected&&recommendationScope()===scope;
+ body.append(node('p','优先读取资源库中的作者工作流与势函数配对。推荐仅说明目录证据；选定后仍需核验全文、提取 P 并确定计算目标，不会提交 HPC。','form-note'));
+ let records=[];
+ try{records=(await api('/api/paper-recommendations/'+scope)).history||[];}catch(error){if(alive())body.append(node('p','推荐记录暂不可读取；先刷新记录，未发送新请求。','form-note'));return;}
+ if(!alive())return;
+ const labels={completed:'应用 AI 已推荐候选',unavailable:'现有目录没有符合条件的成套候选',not_sent:'模型请求未发送',invalid_output:'模型推荐未通过来源核验',source_unavailable:'推荐来源版本已变化',connection_changed:'模型连接已变化',failed_or_unknown:'模型请求状态待核对',unknown:'模型请求状态待核对'};
+ for(const record of records){
+  const item=node('article');item.append(node('h3',labels[record.state]||record.state),node('p',record.question||''));
+  const result=record.document||{};if(result.message)item.append(node('p',result.message));
+  const candidate=result.candidate;
+  if(candidate&&record.state==='completed'){
+   item.append(node('h4',candidate.paper_title),node('p',result.reason||''));
+   const doi=node('a','DOI '+candidate.doi);doi.href='https://doi.org/'+candidate.doi;doi.target='_blank';doi.rel='noopener noreferrer';item.append(doi);
+   for(const [kind,label] of [['author_source','作者 LAMMPS 工作流'],['potential','配套势函数']]){const resource=candidate[kind]||{};item.append(node('p',label+'：'+resource.repository+' @ '+String(resource.commit||'').slice(0,12)),node('p',(resource.elements||[]).join(' · ')+' · '+(resource.pair_styles||[]).join(' / ')+' · 许可 '+(resource.license||'待核验')));}
+   item.append(node('p','这是资源目录推荐，尚未核验为可运行或科学复现成功。请通过“导入我的论文”继续全文与 P 提取。','form-note'));
+  }
+  if(record.usage?.total_tokens)item.append(node('p','已记录模型用量：'+record.usage.total_tokens+' tokens','form-note'));
+  body.append(item);
+ }
+ const unresolved=records.some(record=>['unknown','failed_or_unknown'].includes(record.state));
+ const field=node('textarea');field.id='paper-recommendation-question';field.maxLength=1000;field.setAttribute('aria-label','论文推荐要求');field.value=records.at(-1)?.question||'请推荐下一篇用于完整 P–A–B 验证的论文。优先作者 LAMMPS 工作流、势函数、元素映射和许可已配对、原文条件与源码无已知冲突的候选；明确仍待核验的正文及资源缺项。';
+ const excluded=(paperOverviewCatalog?.result?.papers||[]).filter(p=>p.selection==='selected').map(p=>p.doi).filter(Boolean);
+ body.append(node('label','论文推荐要求'),field,node('p','本次默认排除已选论文：'+(excluded.join('、')||'无')+'。每组推荐最多三次；未知请求不自动重发。','form-note'));
+ const run=node('button','让应用 AI 推荐下一篇','primary');run.disabled=unresolved||records.length>=3;body.append(run);
+ if(unresolved)body.append(node('p','请先核对已有模型回执，不能换编号重复发送。','form-note'));
+ run.onclick=()=>action(async()=>{if(!alive()||run.disabled)return;run.disabled=true;await api('/api/paper-recommendations',{scope_id:scope,request_id:crypto.randomUUID().replaceAll('-',''),question:field.value,exclude_dois:excluded});if(alive())await appendPaperRecommendations();});
+ const refresh=node('button','刷新推荐与来源记录','quiet');refresh.onclick=()=>action(appendPaperRecommendations);body.append(refresh);
 }
 async function refreshPapers() {
   const result=await api('/api/papers');
@@ -2909,10 +2951,15 @@ function appendWorkbenchEntry(box){
    if(message.error)content.append(node('p',message.error,'workspace-freshness error'));
    const counts=message.counts;if(counts)content.append(node('p','新增数据 '+counts.published_item_count+' · 已有数据 '+counts.existing_item_count+' · 图 '+counts.figure_candidate_count+' · 表 '+counts.table_candidate_count));
   }
+  for(const job of record.jobs||[]){
+   if(job.legacy)continue;
+   content.append(node('p',(job.label||job.state)+' · 请求 '+job.request_id,'form-note'));
+  }
   if(record.disabled_reason)content.append(node('p',record.disabled_reason,'form-note'));
   const terminal=['completed','completed_with_limitations','no_evidence_published','failed'];
   if(!pending&&pendingRequest&&(record.messages||[]).some(message=>message.request_id===pendingRequest.request_id&&terminal.includes(message.state)))pendingRequest=null;
-  const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state));
+  const activeJobs=(record.jobs||[]).filter(job=>['queued','dispatching'].includes(job.state));
+  const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state))||(record.jobs||[]).some(job=>['queued','dispatching','interrupted','unknown','failed_or_unknown'].includes(job.state));
   const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state)||message.model_request_ids?.length>0);
   const runButton=(label,options={},style='quiet')=>{
    const run=node('button',label,style);run.disabled=pending;content.append(run);
@@ -2920,7 +2967,7 @@ function appendWorkbenchEntry(box){
     if(!active()||pending||pendingRequest||latestRecord!==record)return;
     const request={request_id:crypto.randomUUID().replaceAll('-',''),source_sha256:record.source_sha256};
     pending=true;run.disabled=true;pendingRequest={...request,...options};draw(record);
-    try{const reply=await api(`/api/tasks/${id}/workbench/extract`,pendingRequest);if(terminal.includes(reply.state))pendingRequest=null;}
+    try{const reply=await api(`/api/tasks/${id}/workbench/extract`,pendingRequest);if(terminal.includes(reply.state)||['queued','dispatching'].includes(reply.state))pendingRequest=null;}
     finally{pending=false;if(active())await entry.loadWorkbench();}
    });
   };
@@ -2941,7 +2988,8 @@ function appendWorkbenchEntry(box){
    }
   }
   if(pending){const progress=node('p',pendingRequest?.resume_of?'应用 AI 正从保存阶段继续核验，成功答复不会重新收费。可以关闭浏览器后再查看记录；不会提交 HPC。':'应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
-  if(uncertain)content.append(node('p','已有请求尚未得到终态；先核对原回执，不能换编号自动重提。','form-note'));
+  if(activeJobs.length)content.append(node('p','文献工作台正在后台提取；可以离开本页或关闭浏览器，稍后查看已有请求的进度。','form-note'));
+  else if(uncertain)content.append(node('p','已有请求尚未得到终态；先核对原回执，不能换编号自动重提。','form-note'));
   const refresh=node('button','查看提取进度与已保存数据','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
   const evidence=record.evidence;if(!evidence)return;
   content.append(node('h3',evidence.title),node('p','DOI '+evidence.doi+' · 论文原文结果 P'));
@@ -2962,7 +3010,7 @@ function appendWorkbenchEntry(box){
    const download=node('a','下载原文提取数据');download.href=`/api/tasks/${id}/workbench/export/${visual.asset_type}/${visual.entity_uid}?source_sha256=${record.source_sha256}`;figure.append(download);figures.append(figure);
   }content.append(figures);
  };
- entry.loadWorkbench=async()=>{if(!active())return;const generation=++loadGeneration,record=await api(`/api/tasks/${id}/workbench`);if(active()&&generation===loadGeneration&&record.task_id===id)draw(record);};
+ entry.loadWorkbench=async()=>{if(!active())return;const generation=++loadGeneration,record=await api(`/api/tasks/${id}/workbench`);if(active()&&generation===loadGeneration&&record.task_id===id){draw(record);if(entry.poll)clearTimeout(entry.poll);if((record.jobs||[]).some(job=>['queued','dispatching'].includes(job.state)))entry.poll=setTimeout(()=>{if(active()&&!pending)entry.loadWorkbench().catch(()=>{if(active())content.append(node('p','进度暂未刷新；后台提取和已有记录保留，请稍后刷新。','form-note'));});},6000);}};
  const load=node('button','打开文献提取与已有证据','quiet');load.onclick=()=>action(entry.loadWorkbench);content.append(load);
 }
 function paperWorkflowAction(item,status){

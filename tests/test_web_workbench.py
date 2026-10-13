@@ -1,5 +1,8 @@
 """Actual user routes must reuse the upstream port and isolate P from B."""
 import unittest
+import time
+import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import test_workbench_bridge as fixture
@@ -11,6 +14,8 @@ class WebWorkbenchTests(unittest.TestCase):
     def setUp(self):
         fixture.WorkbenchBridgeTests.setUp(self)
         self.provider_client = self.client
+        self.runtime = replace(self.runtime, native_source_reader=lambda _:self.source['pdf_sha256'])
+        self.bridge.runtime = self.runtime
         self.connections = ModelConnections(self.tasks, calls=self.calls, assistant_enabled=True)
         self.connections.save('deepseek-official', 'synthetic-model', 'synthetic-project-key')
         self.connections.client = lambda *args, **kwargs: self.provider_client
@@ -25,14 +30,24 @@ class WebWorkbenchTests(unittest.TestCase):
         self.base='/api/tasks/'+self.task['id']+'/workbench'
         self.headers={'Origin':'http://127.0.0.1:8765', 'X-Task-Review':'1'}
 
+    def wait_job(self, request_id):
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            reply=self.client.get(self.base+'/jobs/'+request_id)
+            self.assertEqual(reply.status_code,200,reply.text)
+            if reply.json()['state'] not in {'queued','dispatching'}:
+                return reply.json()
+            time.sleep(.01)
+        self.fail('Synthetic background extraction did not finish')
+
     def test_user_can_extract_view_and_download_without_mutating_B(self):
         before=self.tasks.get(self.task['id'])
         status=self.client.get(self.base).json()
         self.assertTrue(status['enabled']); self.assertEqual(self.outgoing, [])
         request=dict(request_id='c'*32, source_sha256=self.binding.pdf_sha256)
         response=self.client.post(self.base+'/extract',json=request,headers=self.headers)
-        self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(response.json()['state'],'completed')
+        self.assertEqual(response.status_code,202,response.text)
+        self.assertEqual(self.wait_job(request['request_id'])['state'],'completed')
         result=self.client.get(self.base).json()
         self.assertEqual(len(result['messages']),1)
         self.assertEqual(result['evidence']['role'],'paper_reference_human_only')
@@ -103,17 +118,52 @@ class WebWorkbenchTests(unittest.TestCase):
         original='d'*32
         self.bridge.recovery_options=lambda *args,**kwargs:[dict(
             resume_of=original,enabled=True,reused_model_calls=24,reason='Saved stage')]
+        self.bridge._recovery_context=lambda identifier,origin,*args,**kwargs: (
+            {} if identifier==self.task['id'] and origin==original else self.fail('Wrong recovery identity'))
         before=self.tasks.get(self.task['id'])
         self.assertEqual(self.client.get(self.base).json()['recoveries'][0]['resume_of'],original)
         received=[]
         self.bridge.extract=lambda *args,**kwargs:received.append((args,kwargs)) or dict(state='failed')
         request=dict(request_id='c'*32,source_sha256=self.binding.pdf_sha256,resume_of=original)
         response=self.client.post(self.base+'/extract',json=request,headers=self.headers)
-        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.status_code,202,response.text)
+        self.wait_job(request['request_id'])
         self.assertEqual(received[0][1]['resume_of'],original)
         self.assertFalse(received[0][1]['force_rescan'])
         self.assertEqual(self.tasks.get(self.task['id']),before)
         self.assertEqual(self.outgoing,[])
+
+    def test_displayed_recovery_claim_without_native_evidence_cannot_dispatch(self):
+        self.bridge.recovery_options=lambda *args,**kwargs:[dict(
+            resume_of='d'*32,enabled=True,reused_model_calls=24,reason='Unverified synthetic display claim')]
+        request=dict(request_id='f'*32,source_sha256=self.binding.pdf_sha256,resume_of='d'*32)
+        response=self.client.post(self.base+'/extract',json=request,headers=self.headers)
+        self.assertEqual(response.status_code,422,response.text)
+        self.assertEqual(self.outgoing,[])
+
+    def test_queue_returns_before_model_and_user_can_read_other_tasks(self):
+        entered,release=threading.Event(),threading.Event()
+        execute=self.runtime.ports.executor.execute
+        def blocked(**kwargs):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('Synthetic gate timed out')
+            return execute(**kwargs)
+        self.runtime.ports.executor.execute=blocked
+        self.addCleanup(release.set)
+        request=dict(request_id='e'*32,source_sha256=self.binding.pdf_sha256)
+        response=self.client.post(self.base+'/extract',json=request,headers=self.headers)
+        self.assertEqual(response.status_code,202,response.text)
+        self.assertTrue(entered.wait(2))
+        self.assertEqual(self.outgoing,[])
+        self.assertEqual(self.client.get('/api/tasks').status_code,200)
+        status=self.client.get(self.base).json()
+        self.assertEqual(status['jobs'][0]['request_id'],request['request_id'])
+        self.assertEqual(status['jobs'][0]['state'],'dispatching')
+        self.client.post(self.base+'/extract',json=request,headers=self.headers)
+        self.assertEqual(self.outgoing,[])
+        release.set()
+        self.assertEqual(self.wait_job(request['request_id'])['state'],'completed')
+        self.assertEqual(len(self.outgoing),1)
 
 
 if __name__=='__main__':
