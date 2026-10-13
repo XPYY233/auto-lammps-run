@@ -33,6 +33,14 @@ def workspace(service, identifier):
                 if generation['input'].get('condition_record_sha256') != job['condition_sha256']:
                     raise ValueError('Plan belongs to different conditions')
                 proposal = generation['proposal']
+                review_recovery=generation['input'].get('review_recovery')
+                if review_recovery:
+                    original_round=next((e['payload'].get('round') for e in job['events']
+                        if e['state']=='proposal_request' and e['payload'].get('request_id')==
+                        review_recovery['proposal_request_id']),None)
+                    version.update(same_plan_review=True,proposal_sha256=review_recovery['proposal_sha256'],
+                                   proposal_request_id=review_recovery['proposal_request_id'])
+                    if original_round is not None: version['number']=original_round
                 files = []
                 for item in manifest['files']:
                     name = item['path']
@@ -58,6 +66,7 @@ def workspace(service, identifier):
                            reason=notes[-1] if notes else '根据已确认的研究条件准备方案。')
             receipt = generation.get('potential_receipt') or {}
             latest = {'version': version['number'], 'snapshot_sha256': digest, 'files': files,
+                      'same_plan_review':bool(review_recovery),
                       'structure': proposal.get('structure') or {},
                       'additional_structures': proposal.get('additional_structures') or [],
                       'analysis': proposal.get('analysis') or {}, 'summary': proposal.get('summary') or '',
@@ -77,4 +86,6 @@ def workspace(service, identifier):
     if latest:
         latest['historical'] = job['state'] != 'prepared' or latest['snapshot_sha256'] != job['result'].get('snapshot_sha256')
     return {'versions': versions, 'current': latest, 'updated_at': job['updated_at'],
+            'same_plan_review':service.review_availability(identifier),
+            'review_rounds':job['review_rounds'],
             'repair_count': sum(e['state'] in {'repairing_plan', 'repairing_format'} for e in job['events'])}

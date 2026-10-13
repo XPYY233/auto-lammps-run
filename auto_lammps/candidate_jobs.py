@@ -18,14 +18,21 @@ from .potentials import PotentialError
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
-BOOKKEEPING = {'config_rebased', 'clarification_answered', 'model_proposal', 'proposal_request', 'development_recovery_authorized'}
+MAX_REVIEW_REQUESTS = 3
+BOOKKEEPING = {'candidate_review_request', 'candidate_model_review', 'review_recovery_requested',
+               'review_request', 'model_review', 'config_rebased', 'clarification_answered',
+               'model_proposal', 'proposal_request', 'development_recovery_authorized'}
 ACTIVE = {'diagnosing_failure','reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
 LABELS = {'proposal_request':'方案生成轮次已登记', 'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
+          'review_recovery_requested':'同一原稿重审已登记', 'review_request':'AI 原稿审核请求已记账',
+          'model_review':'AI 原稿审核结果已保存', 'candidate_review_request':'方案审核请求已登记',
+          'candidate_model_review':'方案审核结果已保存',
           'diagnosing_failure':'AI 正在读取失败日志并诊断原因',
           'checking_plan':'核对需求与方案', 'repairing_plan':'自动修正方案', 'preparing_files': '准备结构与输入文件', 'prepared': '方案已准备 · 待核验',
           'clarification': '需要补充条件', 'failed': '准备未完成', 'interrupted': '准备中断 · 待核对',
           'configuration_changed': '配置已变化 · 待核对', 'clarification_answered': '已收到补充答复', 'config_rebased': '已按当前配置重新基线'}
 ERRORS = {'model_budget_exhausted': '模型额度已用完，没有自动重试。',
+          'review_iteration_limit': '已达到同稿重审三次上限，保留原稿、审核和费用。',
           'plan_iteration_limit': '已达到首版在内三轮方案上限，不能继续追加。已有方案和失败历史保留。',
           'model_key_missing_or_invalid': '模型密钥尚未配置，请联系管理员。',
           'request_already_reserved': '已有模型请求记录，需要核对，未重复调用。',
@@ -53,6 +60,14 @@ def proposal_rounds(events):
                           'used':max(0,len(ids)-MAX_PROPOSAL_ROUNDS)},
                       within_original_limit=False)
     return result
+
+
+def review_rounds(events):
+    """Every recovery review call, including report repair, spends a persistent slot."""
+    ids={e['payload']['request_id'] for e in events
+         if e['state']=='review_request' and e['payload'].get('request_id')}
+    return {'limit':MAX_REVIEW_REQUESTS,'used':len(ids),
+            'remaining':max(0,MAX_REVIEW_REQUESTS-len(ids))}
 
 
 class CandidateHistory:
@@ -91,7 +106,7 @@ class CandidateHistory:
         significant = [e for e in events if e['state'] not in BOOKKEEPING] or events
         return {**job, 'state': significant[-1]['state'], 'label': significant[-1]['label'],
                 'updated_at': significant[-1]['at'], 'result': significant[-1]['payload'], 'events': events,
-                'proposal_rounds':proposal_rounds(events),
+                'proposal_rounds':proposal_rounds(events), 'review_rounds':review_rounds(events),
                 'execution_authorized': False}
 
     def reserve_proposal(self, identifier, request_id, kind):
@@ -112,6 +127,29 @@ class CandidateHistory:
             self._event(db,row['id'],'proposal_request',
                         {'request_id':request_id,'kind':kind,'round':budget['used']+1,'limit':budget['limit'],
                          **({'development_recovery':True} if budget.get('development_recovery') else {})})
+            return {**budget,'used':budget['used']+1,'remaining':budget['remaining']-1}
+
+    def reserve_review(self, identifier, request_id, intent):
+        """Reserve the unchanged-proposal review independently of generation rounds."""
+        with self.tasks.transaction() as db:
+            row=db.execute('SELECT id FROM candidate_jobs WHERE task_id=?',(identifier,)).fetchone()
+            if row is None: raise CandidateError('Review requires an existing preparation identity')
+            events=[{'state':r['state'],'payload':json.loads(r['payload'])} for r in
+                    db.execute('SELECT state,payload FROM candidate_events WHERE job_id=? ORDER BY sequence',(row['id'],))]
+            linked=[e['payload'] for e in events if e['state']=='review_recovery_requested'
+                    and e['payload'].get('request_id')==intent['request_id']]
+            if linked!=[intent]: raise CandidateError('Review intent changed or was not saved')
+            prior=[e['payload'] for e in events if e['state']=='review_request'
+                   and e['payload'].get('request_id')==request_id]
+            if prior:
+                if prior[0]['intent_id']!=intent['request_id']:
+                    raise CandidateError('Review request belongs to another intent')
+                return review_rounds(events)
+            budget=review_rounds(events)
+            if budget['remaining']<=0: raise ModelError('review_iteration_limit')
+            self._event(db,row['id'],'review_request',
+                {'request_id':request_id,'intent_id':intent['request_id'],
+                 'proposal_sha256':intent['proposal_sha256'],'round':budget['used']+1})
             return {**budget,'used':budget['used']+1,'remaining':budget['remaining']-1}
 
     def authorize_development_recovery(self, grant):
@@ -270,6 +308,95 @@ class CandidateService:
         self.pool.submit(self.run, identifier)
         return self.history.get(identifier)
 
+    def _review_unresolved(self, job):
+        for event in job['events']:
+            if event['state'] not in {'review_request','candidate_review_request','proposal_request'}: continue
+            prior=self.client.calls.lookup(event['payload']['request_id'])
+            if prior and (not prior.get('receipt') or prior['receipt'].get('state')=='unknown'):
+                return True
+        return False
+
+    def review_availability(self, identifier):
+        """Read-only capability for the ordinary plan page, with raw proposal identity."""
+        job=self.history.get(identifier)
+        result={'can_recheck':False,'reason':'尚无可重审的模型方案。','proposal_sha256':None,
+                'proposal_request_id':None,'review_rounds':review_rounds([])}
+        if not job: return result
+        result['state']=job['state']
+        result['review_rounds']=job['review_rounds']
+        try:
+            proposal=self.previous_proposal(identifier)
+            if proposal is None: return result
+            result.update(proposal_sha256=proposal['receipt']['output_sha256'],
+                          proposal_request_id=proposal['request_id'])
+            link=next((e['payload'] for e in reversed(job['events']) if e['state']=='model_proposal'
+                       and e['payload'].get('request_id')==proposal['request_id']),{})
+            if not self.review_plan:
+                result['reason']='当前服务未启用 AI 方案审查。'
+            elif link.get('resources_sha256') not in (None,sha256(canonical(asdict(self.resources)))):
+                result['reason']='原稿绑定的计算资源已变化，不能按同稿重审。'
+            elif job['state'] in ACTIVE or job['state']=='queued':
+                result['reason']='同一任务正在准备或审查，请等待现有记录。'
+            elif job['state']=='prepared':
+                result['reason']='当前方案已准备，请查看并批准。'
+            elif self._review_unresolved(job):
+                result['reason']='已有审核请求状态未知，须先对账，不能发起新审核。'
+            elif job['review_rounds']['remaining']<=0:
+                result['reason']=ERRORS['review_iteration_limit']
+            else:
+                result.update(can_recheck=True,reason='只重新审查原稿；不会生成新方案或提交计算。')
+        except (CandidateError,ModelError,ManifestError,KeyError,TypeError) as error:
+            result['reason']='原稿或关联回执未通过核验：'+str(error)[:300]
+        return result
+
+    def enqueue_review(self, identifier, revision, *, request_id):
+        """Explicit user action: recheck the exact retained draft, never regenerate it."""
+        request_id=task_id(request_id)
+        job=self.history.reconcile(identifier)
+        if job is None: raise CandidateError('No saved proposal to review')
+        with self.history.lease(job['id']) as acquired:
+            if not acquired: return self.history.get(identifier)
+            job=self.history.get(identifier)
+            intents=[e['payload'] for e in job['events'] if e['state']=='review_recovery_requested'
+                     and e['payload'].get('request_id')==request_id]
+            if intents:
+                intent=intents[0]
+                if intent['revision']!=revision: raise CandidateError('Review request identity cannot change revision')
+                # A crash after a completed receipt can finish the exact same review without sending again.
+                if job['state']!='interrupted': return job
+                if self._review_unresolved(job): raise CandidateError('Unknown review request needs reconciliation before recovery')
+                if intent['config_sha256']!=self.config_sha256:
+                    raise CandidateError('Saved review configuration changed; retain the original review intent')
+            else:
+                capability=self.review_availability(identifier)
+                if not capability['can_recheck']: raise CandidateError(capability['reason'])
+                inputs=research_inputs(self.tasks,identifier,revision)
+                if inputs['condition_record_sha256']!=job['condition_sha256']:
+                    raise CandidateError('Review must retain the original frozen conditions')
+                if self._review_unresolved(job): raise CandidateError('Unknown review request needs reconciliation first')
+                available=self.availability()
+                if not available['enabled']: raise CandidateError(available['reason'])
+                guidance=[item['note'] for item in self.tasks.guidance(identifier)]
+                intent={'request_id':request_id,'revision':revision,
+                        'proposal_request_id':capability['proposal_request_id'],
+                        'proposal_sha256':capability['proposal_sha256'],
+                        'condition_sha256':job['condition_sha256'],'config_sha256':self.config_sha256,
+                        'resources_sha256':sha256(canonical(asdict(self.resources))),
+                        'model_config_sha256':sha256(canonical(asdict(self.client.calls.config))),
+                        'requested_model':getattr(self.client,'model',self.client.calls.config.model),
+                        'thinking':getattr(self.client,'thinking',False),
+                        'guidance_sha256':sha256(canonical(guidance))}
+            baseline=self.effective_config_sha256(identifier)
+            with self.tasks.transaction() as db:
+                if not intents:
+                    self.history._event(db,job['id'],'review_recovery_requested',intent)
+                # This explicit review action binds the upgraded review contract/configuration.
+                self.history._event(db,job['id'],'config_rebased',
+                    {'from':baseline,'to':self.config_sha256})
+                self.history._event(db,job['id'],'queued',{'review_recovery':intent})
+        self.pool.submit(self.run,identifier)
+        return self.history.get(identifier)
+
     def ensure_proposal_round(self, identifier):
         job=self.history.get(identifier)
         if job and job['proposal_rounds']['remaining']<=0:
@@ -358,7 +485,9 @@ class CandidateService:
             if not acquired:
                 return
             with self.tasks.transaction() as db:
-                state = db.execute('SELECT state FROM candidate_events WHERE job_id=? ORDER BY sequence DESC LIMIT 1', (job['id'],)).fetchone()[0]
+                queued = db.execute('SELECT state,payload FROM candidate_events WHERE job_id=? ORDER BY sequence DESC LIMIT 1', (job['id'],)).fetchone()
+                state = queued['state']
+                review_intent=json.loads(queued['payload']).get('review_recovery')
                 if state != 'queued':
                     return
                 baseline = job['config_sha256']
@@ -378,7 +507,9 @@ class CandidateService:
             def proposal_saved(link):
                 with self.tasks.transaction() as db:
                     self.history._event(db, job['id'], 'model_proposal',
-                        {**link, 'condition_sha256':job['condition_sha256']})
+                        {**link, 'condition_sha256':job['condition_sha256'],
+                         'config_sha256':self.config_sha256,
+                         'resources_sha256':sha256(canonical(asdict(self.resources)))})
             answers = None
             with self.tasks.transaction() as db:
                 row = db.execute("SELECT payload FROM candidate_events WHERE job_id=? AND state='clarification_answered' "
@@ -391,14 +522,39 @@ class CandidateService:
                 inputs=research_inputs(self.tasks,identifier,revision)
                 if inputs['condition_record_sha256']!=job['condition_sha256']:
                     raise CandidateError('Frozen research conditions changed; preserve the original preparation identity')
-                failure=(self.failure_context_provider(identifier) if self.failure_context_provider else None)
+                previous=self.previous_proposal(identifier)
+                if review_intent:
+                    if (previous is None or previous['request_id']!=review_intent['proposal_request_id']
+                            or previous['receipt']['output_sha256']!=review_intent['proposal_sha256']
+                            or inputs['condition_record_sha256']!=review_intent['condition_sha256']
+                            or self.config_sha256!=review_intent['config_sha256']
+                            or sha256(canonical(asdict(self.resources)))!=review_intent['resources_sha256']
+                            or sha256(canonical(asdict(self.client.calls.config)))!=review_intent['model_config_sha256']
+                            or getattr(self.client,'model',self.client.calls.config.model)!=review_intent['requested_model']
+                            or getattr(self.client,'thinking',False)!=review_intent['thinking']
+                            or revision!=review_intent['revision']
+                            or sha256(canonical(guidance))!=review_intent['guidance_sha256']):
+                        raise CandidateError('Same-plan review inputs or configuration changed; no request sent')
+                failure=(self.failure_context_provider(identifier) if self.failure_context_provider and not review_intent else None)
+                def review_requested(key):
+                    if review_intent:
+                        self.history.reserve_review(identifier,key,review_intent)
+                    else:
+                        with self.tasks.transaction() as db:
+                            self.history._event(db,job['id'],'candidate_review_request',{'request_id':key})
+                def review_saved(check):
+                    with self.tasks.transaction() as db:
+                        self.history._event(db,job['id'],'model_review' if review_intent else 'candidate_model_review',
+                            {**check,**({'intent_id':review_intent['request_id']} if review_intent else {})})
                 result = generate_research_candidate(self.client, self.tasks, identifier, revision, self.adapter,
                             resources=self.resources, store=self.snapshots, max_atoms=self.max_atoms, on_stage=stage,
                             output_layout=self.output_layout, answers=answers, guidance=guidance, review_plan=self.review_plan,
-                            previous_proposal=self.previous_proposal(identifier), on_proposal=proposal_saved,
+                            previous_proposal=previous, on_proposal=None if review_intent else proposal_saved,
                             before_proposal_request=lambda key,kind:self.history.reserve_proposal(identifier,key,kind),
                             proposal_round_budget=self.history.get(identifier)['proposal_rounds'],
-                            failure_context=failure)
+                            failure_context=failure, review_recovery=review_intent,
+                            before_review_request=review_requested,
+                            on_review=review_saved)
                 if self.tasks.get(identifier)['revision']!=revision:
                     raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
                 if result['status'] == 'clarification_required':
@@ -436,7 +592,11 @@ class CandidateService:
                   'summary': result.get('summary'), 'geometry': result.get('geometry'),
                   'analysis': result.get('analysis'), 'questions': result.get('questions') or [],
                   'detail': result.get('detail'), 'snapshot_sha256': result.get('snapshot_sha256'),
-                  'proposal_rounds':job['proposal_rounds'],
+                  'proposal_rounds':job['proposal_rounds'], 'review_rounds':job['review_rounds'],
+                  'same_plan_review':self.review_availability(identifier),
+                  'review_history':[e for e in job['events'] if e['state'] in
+                                    {'candidate_review_request','candidate_model_review',
+                                     'review_recovery_requested','review_request','model_review'}],
                   'execution_authorized': result.get('execution_authorized', False), 'files': []}
         if job['state'] != 'prepared' or not result.get('snapshot_sha256'):
             return review
