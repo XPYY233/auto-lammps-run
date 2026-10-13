@@ -11,7 +11,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from .deepseek import DeepSeekClient, ModelError, https_transport
+from .deepseek import MAX_RESPONSE_BYTES, DeepSeekClient, ModelError, https_transport
 from .manifest import canonical, private_directory, sha256
 from .runtime_launcher import read_regular
 from .tls_context import ssl_context
@@ -34,31 +34,91 @@ ERROR_CLASSES = {
 MODEL_ID = re.compile(r'[A-Za-z0-9._:/-]{1,100}')
 
 
+class OfficialRequestError(TaskError):
+    """Safe transport evidence, never upstream text, headers or credentials."""
+    _CLASSIFICATIONS = {
+        'provider_request_invalid': ('not_sent', 'not_sent', '模型请求配置无效，未发送。'),
+        'model_tls_trust_unavailable': ('not_sent', 'not_sent',
+            '本机缺少可用的证书包，无法建立 HTTPS 连接；请设置 SSL_CERT_FILE。'),
+        'provider_connection_failed': ('not_sent', 'not_sent', '模型连接未建立，请求未发送。'),
+        'provider_request_failed': ('rejected', 'provider_rejected', '模型供应商拒绝了请求。'),
+        'provider_transport_unknown': ('failed_or_unknown', 'unknown', '模型请求已尝试，但没有有效答复；请先核对账户记录。'),
+        'provider_response_invalid': ('invalid_output', 'response_invalid', '模型已返回响应，但响应格式或大小无效。'),
+    }
+
+    def __init__(self, error_code, *, transport_attempts=0, http_status=None):
+        if (error_code not in self._CLASSIFICATIONS or type(transport_attempts) is not int
+                or transport_attempts not in (0, 1) or (http_status is not None
+                and (type(http_status) is not int or not 100 <= http_status <= 599))):
+            raise ValueError('invalid official request classification')
+        self.error_code = error_code
+        self.state, self.request_outcome, message = self._CLASSIFICATIONS[error_code]
+        self.transport_attempts, self.http_status = transport_attempts, http_status
+        if http_status is not None:
+            message += f' HTTP {http_status}。'
+        super().__init__(message + ' 记录保留，不会自动重试。')
+
+    @property
+    def diagnostics(self):
+        return {'error_code': self.error_code, 'request_outcome': self.request_outcome,
+                'http_status': self.http_status, 'transport_attempts': self.transport_attempts}
+
+
 def official_request(provider, key, method, path, payload=None):
     """Fixed hosts and paths; no redirects, proxy discovery or retries."""
-    headers = {'Content-Type': 'application/json'}
-    if provider == 'anthropic':
-        headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
-    else:
-        headers['Authorization'] = 'Bearer ' + key
+    try:
+        host = PROVIDERS[provider][1]
+        body = canonical(payload) if payload is not None else None
+        headers = {'Content-Type': 'application/json'}
+        if provider == 'anthropic':
+            headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
+        else:
+            headers['Authorization'] = 'Bearer ' + key
+    except Exception:
+        raise OfficialRequestError('provider_request_invalid') from None
     try:
         context = ssl_context()
-    except OSError:
-        raise TaskError('本机缺少可用的证书包，无法建立 HTTPS 连接；请设置 SSL_CERT_FILE。') from None
-    connection = http.client.HTTPSConnection(PROVIDERS[provider][1], timeout=60, context=context)
+    except Exception:
+        raise OfficialRequestError('model_tls_trust_unavailable') from None
     try:
-        connection.request(method, path, body=canonical(payload) if payload is not None else None, headers=headers)
+        connection = http.client.HTTPSConnection(host, timeout=60, context=context)
+    except Exception:
+        raise OfficialRequestError('provider_connection_failed') from None
+    attempts, status = 0, None
+    try:
+        # Only a completed TLS connection proves that a subsequent failure
+        # could have transmitted HTTP bytes. Never retry after this boundary.
+        connection.connect()
+        attempts = 1
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
-        raw = response.read(2 * 1024 * 1024 + 1)
-        if response.status != 200 or len(raw) > 2 * 1024 * 1024:
-            raise TaskError('模型服务未完成请求，请检查密钥、模型 ID 和账户状态。不会自动重试。')
-        return json.loads(raw)
-    except TaskError:
+        if type(response.status) is not int or not 100 <= response.status <= 599:
+            raise OfficialRequestError('provider_transport_unknown', transport_attempts=attempts)
+        status = response.status
+        if status != 200:
+            # The status proves rejection even if its body is unreadable,
+            # oversized, or contains a key. Do not read an error body at all.
+            raise OfficialRequestError('provider_request_failed', transport_attempts=attempts, http_status=status)
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
+        try:
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ValueError('oversized response')
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise ValueError('invalid response envelope')
+            return value
+        except Exception:
+            raise OfficialRequestError('provider_response_invalid', transport_attempts=attempts, http_status=status) from None
+    except OfficialRequestError:
         raise
     except Exception:
-        raise TaskError('模型连接中断或返回格式异常，记录已保留，不会自动重试。') from None
+        code = 'provider_transport_unknown' if attempts else 'provider_connection_failed'
+        raise OfficialRequestError(code, transport_attempts=attempts, http_status=status) from None
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except Exception:
+            pass  # Cleanup must not hide a received rejection or imply a retry.
 
 
 class ModelConnections:
@@ -72,8 +132,9 @@ class ModelConnections:
             db.execute('CREATE TABLE IF NOT EXISTS result_answers (id TEXT PRIMARY KEY REFERENCES result_questions(id), state TEXT, answer TEXT, usage TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS reference_result_questions (id TEXT PRIMARY KEY, task_id TEXT, provider TEXT, model TEXT, question TEXT, context_sha256 TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS reference_result_answers (id TEXT PRIMARY KEY REFERENCES reference_result_questions(id), state TEXT, answer TEXT, usage TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS result_request_outcomes (id TEXT PRIMARY KEY, document TEXT NOT NULL)')
             for table in ('connection_events', 'result_questions', 'result_answers',
-                          'reference_result_questions', 'reference_result_answers'):
+                          'reference_result_questions', 'reference_result_answers', 'result_request_outcomes'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT, 'immutable model history'); END")
 
@@ -198,9 +259,13 @@ class ModelConnections:
     def history(self, identifier, *, channel='research', evidence_sha256=None):
         namespace, questions, answers = self._discussion_storage(identifier, channel, evidence_sha256)
         with self.tasks.transaction() as db:
-            rows = db.execute(f'SELECT q.*, a.state, a.answer, a.usage FROM {questions} q LEFT JOIN {answers} a ON q.id=a.id WHERE q.task_id=? ORDER BY q.at,q.id', (namespace,)).fetchall()
-        return [dict(row) | {'task_id':identifier, 'state': row['state'] or 'unknown',
-                            'usage': json.loads(row['usage']) if row['usage'] else None} for row in rows]
+            rows = db.execute(f'SELECT q.*, a.state, a.answer, a.usage, o.document AS outcome '
+                f'FROM {questions} q LEFT JOIN {answers} a ON q.id=a.id '
+                'LEFT JOIN result_request_outcomes o ON q.id=o.id WHERE q.task_id=? ORDER BY q.at,q.id', (namespace,)).fetchall()
+        return [{key: value for key, value in dict(row).items() if key != 'outcome'} |
+                {'task_id':identifier, 'state': row['state'] or 'unknown',
+                 'usage': json.loads(row['usage']) if row['usage'] else None,
+                 'diagnostics': json.loads(row['outcome']) if row['outcome'] else {}} for row in rows]
 
     def discuss(self, identifier, request_id, provider, question, context, *,
                 channel='research', evidence_sha256=None):
@@ -285,6 +350,7 @@ class ModelConnections:
             payload['max_completion_tokens' if provider == 'openai' else 'max_tokens'] = 4096
             if provider in {'deepseek-official', 'glm'}: payload['thinking'] = {'type': 'disabled'}
         reserved=False;sent=False
+        diagnostics = {'transport_attempts': 0, 'http_status': None, 'request_outcome': 'not_sent'}
         try:
             if len(canonical(payload)) > 262144: raise TaskError('结果上下文过大，尚未发送。请下载后分析。')
             if self.calls is not None and provider=='deepseek-official':
@@ -300,13 +366,19 @@ class ModelConnections:
             usage = {key: val for key, val in response.get('usage', {}).items()
                      if key in {'input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'} and type(val) is int and val >= 0}
             state = 'completed'
+            diagnostics.update(transport_attempts=1, request_outcome='completed')
+        except OfficialRequestError as error:
+            state, answer, usage = error.state, str(error), {}
+            diagnostics = error.diagnostics
         except Exception:
             state, answer, usage = ('failed_or_unknown' if sent else 'not_sent'), ('请求未完成，未自动重试。请核对模型连接与账户记录。' if sent else '请求未发送；请核对已批准的模型调用额度及请求记录。'), {}
+            diagnostics.update(transport_attempts=int(sent), request_outcome='unknown' if sent else 'not_sent')
         if reserved:
             self.calls.record(request_id,dict(provider=provider,requested_model=value['model'],state=state,
                 request_sha256=sha256(canonical(payload)),usage=usage,
-                purpose='author_reference_discussion' if channel=='author_reference' else 'result_discussion',transport_attempts=1,
+                purpose='author_reference_discussion' if channel=='author_reference' else 'result_discussion', **diagnostics,
                 scientific_adapter={**adapter_proof,'output_check':'text_shape_only_prose_claims_not_verified'}))
         with self.tasks.transaction() as db:
             db.execute(f'INSERT INTO {answers} VALUES (?,?,?,?)', (request_id, state, answer, json.dumps(usage)))
+            db.execute('INSERT INTO result_request_outcomes VALUES (?,?)', (request_id, canonical(diagnostics).decode()))
         return next(item for item in history() if item['id'] == request_id)

@@ -1,7 +1,9 @@
 """Ordinary reference-menu HTTP actions, using an accounted synthetic model."""
 import unittest
+from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 import test_paper_recommendations as fixture
+from auto_lammps.model_connections import official_request
 from auto_lammps.web import create_app
 
 
@@ -49,3 +51,30 @@ class WebPaperRecommendationTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['state'],'unavailable')
         self.f.transport.assert_not_called()
+
+    def test_http_official_rejection_retains_receipt_and_history_reads_no_credential(self):
+        self.f.preparer.stop()
+        self.f.connections.transport = official_request
+        response = Mock(status=402)
+        response.read.side_effect = AssertionError('synthetic-connection-key raw supplier body')
+        connection = Mock()
+        connection.getresponse.return_value = response
+        with patch('auto_lammps.model_connections.ssl_context', return_value=object()), \
+             patch('auto_lammps.model_connections.http.client.HTTPSConnection', return_value=connection):
+            reply = self.client.post('/api/paper-recommendations', json=self.request, headers=self.headers)
+            self.assertEqual(reply.status_code, 200, reply.text)
+            result = reply.json()
+            self.assertEqual(result['state'], 'rejected')
+            self.assertEqual(result['diagnostics']['http_status'], 402)
+            self.assertEqual(result['diagnostics']['transport_attempts'], 1)
+            self.assertEqual(result['document']['error_code'], 'provider_request_failed')
+            self.f.connections.save('deepseek-official', '', remove=True)
+            with patch.object(self.f.connections, '_read', side_effect=AssertionError('History must not read key')):
+                history = self.client.get('/api/paper-recommendations/'+'1'*32).json()['history']
+                self.assertEqual(history, [result])
+                duplicate = self.client.post('/api/paper-recommendations', json=self.request, headers=self.headers)
+                self.assertEqual(duplicate.json(), result)
+        response.read.assert_not_called()
+        connection.request.assert_called_once()
+        self.assertEqual(self.f.calls.status()['used_requests'], 1)
+        self.assertNotIn('synthetic-connection-key', reply.text + str(history) + str(self.f.calls.history()))

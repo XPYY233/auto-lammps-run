@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from auto_lammps.deepseek import DeepSeekConfig, ModelCalls
 from auto_lammps.discovery_library import DiscoveryLibrary
 from auto_lammps.manifest import canonical, sha256
-from auto_lammps.model_connections import ModelConnections
+from auto_lammps.model_connections import ModelConnections, official_request
 from auto_lammps.paper_recommendations import (
     PaperRecommendations, SCOPE_PREFIX, recommendation_selection_context,
 )
@@ -423,6 +423,173 @@ class PaperRecommendationTests(unittest.TestCase):
         self.assertEqual(result['document']['error_code'], 'request_already_reserved')
         self.transport.assert_not_called()
         self.assertEqual(self.calls.lookup(self.request)['receipt']['purpose'], 'synthetic-other-purpose')
+
+    def test_real_active_adapter_and_official_transport_preserve_402_401_429_rejections(self):
+        self.preparer.stop()
+        self.connections.transport = official_request
+        response = Mock()
+        response.read.side_effect = AssertionError('Never read private supplier error body')
+        connection = Mock()
+        connection.getresponse.return_value = response
+        with patch('auto_lammps.model_connections.ssl_context', return_value=object()), \
+             patch('auto_lammps.model_connections.http.client.HTTPSConnection', return_value=connection):
+            for i, status in enumerate((402, 401, 429)):
+                with self.subTest(status=status):
+                    response.status = status
+                    rid = f'{i+2:032x}'
+                    result = self.create(request=rid)
+                    self.assertEqual(result['state'], 'rejected', result)
+                    self.assertEqual(result['document']['error_code'], 'provider_request_failed')
+                    self.assertEqual(result['diagnostics']['http_status'], status)
+                    self.assertEqual(result['diagnostics']['transport_attempts'], 1)
+                    self.assertEqual(result['diagnostics']['request_outcome'], 'provider_rejected')
+                    self.assertEqual(result['usage'], {})  # No supplier usage was received.
+                    receipt = self.calls.lookup(rid)['receipt']
+                    self.assertEqual(receipt['state'], 'rejected')
+                    self.assertEqual(receipt['http_status'], status)
+                    self.assertEqual(receipt['transport_attempts'], 1)
+                    self.assertEqual(receipt['scientific_adapter']['stage'], 'paper_recommendation')
+                    payload = json.loads(connection.request.call_args.kwargs['body'])
+                    supplied = json.loads(payload['messages'][-1]['content'])
+                    self.assertEqual(supplied['scientific_adapter']['stage'], 'paper_recommendation')
+                    self.assertIn('registered_paper_candidate_menu', supplied)
+                    count = connection.request.call_count
+                    self.assertEqual(self.create(request=rid), result)
+                    self.assertEqual(connection.request.call_count, count)
+        response.read.assert_not_called()
+        self.assertEqual(connection.request.call_count, 3)
+        self.assertEqual(self.calls.status()['used_requests'], 3)
+        self.service = PaperRecommendations(self.tasks, self.connections, self.library, max_requests_per_scope=12)
+        with self.assertRaises(TaskError):
+            self.create(request='f'*32)
+        self.assertEqual(self.tasks.list(), [])
+        self.assertNotIn('synthetic-connection-key', str(self.calls.history()) + str(self.service.history(self.scope)))
+
+    def test_real_transport_preconnection_failure_is_not_sent_but_reservation_is_retained(self):
+        self.preparer.stop()
+        self.connections.transport = official_request
+        connection = Mock()
+        connection.connect.side_effect = OSError('synthetic-connection-key private path')
+        with patch('auto_lammps.model_connections.ssl_context', return_value=object()), \
+             patch('auto_lammps.model_connections.http.client.HTTPSConnection', return_value=connection):
+            result = self.create()
+            self.assertEqual(result['state'], 'not_sent')
+            self.assertEqual(result['document']['error_code'], 'provider_connection_failed')
+            self.assertEqual(result['diagnostics']['transport_attempts'], 0)
+            self.assertEqual(self.create(), result)
+        connection.connect.assert_called_once()
+        connection.request.assert_not_called()
+        receipt = self.calls.lookup(self.request)['receipt']
+        self.assertEqual(receipt['transport_attempts'], 0)
+        self.assertEqual(receipt['state'], 'not_sent')
+        self.assertEqual(self.calls.status()['used_requests'], 1)
+
+    def test_transport_value_errors_cannot_be_claimed_unsent_or_selection_invalid(self):
+        for i, error in enumerate((ValueError('selection_invalid'), TaskError('synthetic-connection-key'))):
+            with self.subTest(error_type=type(error)):
+                self.transport.side_effect = error
+                rid = f'{i+2:032x}'
+                result = self.create(request=rid)
+                self.assertEqual(result['state'], 'failed_or_unknown')
+                self.assertEqual(result['document']['error_code'], 'request_failed_or_unknown')
+                self.assertEqual(result['diagnostics']['transport_attempts'], 1)
+                self.assertIsNone(result['diagnostics']['http_status'])
+                self.assertEqual(self.calls.lookup(rid)['receipt']['transport_attempts'], 1)
+                self.assertEqual(self.create(request=rid), result)
+        self.assertEqual(self.transport.call_count, 2)
+        self.assertNotIn('synthetic-connection-key', str(self.service.history(self.scope)))
+
+    def test_real_transport_unknown_and_received_protocol_invalid_keep_distinct_receipts(self):
+        self.preparer.stop()
+        self.connections.transport = official_request
+        response = Mock(status=200)
+        connection = Mock()
+        connection.getresponse.return_value = response
+        with patch('auto_lammps.model_connections.ssl_context', return_value=object()), \
+             patch('auto_lammps.model_connections.http.client.HTTPSConnection', return_value=connection):
+            response.read.side_effect = TimeoutError('synthetic-connection-key')
+            result = self.create()
+            self.assertEqual(result['state'], 'failed_or_unknown')
+            self.assertEqual(result['diagnostics']['http_status'], 200)
+            self.assertEqual(result['diagnostics']['request_outcome'], 'unknown')
+            response.read.side_effect = None
+            response.read.return_value = b'synthetic-connection-key malformed JSON'
+            invalid = self.create(request='3'*32)
+            self.assertEqual(invalid['state'], 'invalid_output')
+            self.assertEqual(invalid['diagnostics']['request_outcome'], 'response_invalid')
+            self.assertEqual(invalid['diagnostics']['http_status'], 200)
+            self.assertEqual(invalid['document']['error_code'], 'provider_response_invalid')
+            self.connections.save('deepseek-official', '', remove=True)
+            self.service = PaperRecommendations(self.tasks, self.connections, self.library)
+            with patch.object(self.connections, '_read', side_effect=AssertionError('No key for history')):
+                self.assertEqual(self.create(), result)
+                self.assertEqual(self.create(request='3'*32), invalid)
+        self.assertEqual(connection.request.call_count, 2)
+        self.assertEqual(self.calls.status()['used_requests'], 2)
+        self.assertNotIn('synthetic-connection-key', str(self.service.history(self.scope)) + str(self.calls.history()))
+
+    def test_received_missing_completion_envelope_is_invalid_output_with_known_usage_retained(self):
+        self.transport.side_effect = None
+        self.transport.return_value = {'usage': {'total_tokens': 11}}
+        result = self.create()
+        self.assertEqual(result['state'], 'invalid_output')
+        self.assertEqual(result['document']['error_code'], 'response_shape_invalid')
+        self.assertEqual(result['usage'], {'total_tokens': 11})
+        self.assertEqual(self.calls.lookup(self.request)['receipt']['usage'], {'total_tokens': 11})
+        self.assertEqual(result['diagnostics']['transport_attempts'], 1)
+        self.assertEqual(self.create(), result)
+        self.transport.assert_called_once()
+
+    def legacy_intent(self, *, matching_payload=True, attempted=1, purpose='paper_recommendation'):
+        context = {**self.service.menu(), 'scope_id': SCOPE_PREFIX+self.scope,
+                   'question': '请推荐下一篇成套候选'}
+        payload = canonical({'model': 'synthetic-model', 'synthetic_old_request': True})
+        self.calls.reserve(self.request, payload if matching_payload else b'unrelated request')
+        self.calls.record(self.request, {'purpose': purpose, 'requested_model': 'synthetic-model',
+            'state': 'not_sent', 'transport_attempts': attempted, 'error_code': 'selection_invalid',
+            'response_sha256': None, 'structured_output': None, 'usage': {}})
+        with self.tasks.transaction() as db:
+            db.execute('INSERT INTO paper_recommendation_scopes VALUES (?,?,?,?)',
+                       (SCOPE_PREFIX+self.scope, 'reference_only', 3, 'synthetic'))
+            db.execute('INSERT INTO paper_recommendation_intents VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (self.request, SCOPE_PREFIX+self.scope, 'deepseek-official', 'synthetic-model',
+                 '请推荐下一篇成套候选', sha256(canonical(context)), canonical(context).decode(),
+                 None, payload.decode(), 'synthetic'))
+            db.execute('INSERT INTO paper_recommendation_receipts VALUES (?,?,?,?,?,?)',
+                (self.request, 'not_sent', canonical({'error_code': 'selection_invalid',
+                 'message': '旧未发送标记'}).decode(), '{}', None, '{}'))
+
+    def test_legacy_misclassification_is_readonly_reconciled_without_inventing_http_status(self):
+        self.legacy_intent()
+        with self.tasks.transaction() as db:
+            before = tuple(db.execute('SELECT * FROM paper_recommendation_receipts').fetchone())
+        model_before = self.calls.history()
+        with patch.object(self.connections, '_read', side_effect=AssertionError('No key for history')):
+            result = self.service.history(self.scope)[0]
+            self.assertEqual(result['state'], 'failed_or_unknown')
+            self.assertEqual(result['original_state'], 'not_sent')
+            self.assertEqual(result['original_document']['error_code'], 'selection_invalid')
+            self.assertEqual(result['document']['error_code'], 'legacy_request_attempted')
+            self.assertEqual(result['diagnostics']['transport_attempts'], 1)
+            self.assertIsNone(result['diagnostics']['http_status'])
+            self.assertNotIn('402', str(result))
+            self.assertEqual(self.create(), result)
+        self.transport.assert_not_called()
+        self.assertEqual(self.calls.history(), model_before)
+        with self.tasks.transaction() as db:
+            after = tuple(db.execute('SELECT * FROM paper_recommendation_receipts').fetchone())
+        self.assertEqual(before, after)
+        self.assertEqual(self.calls.status()['used_requests'], 1)
+
+    def test_unrelated_model_receipt_does_not_prove_legacy_transmission(self):
+        self.legacy_intent(matching_payload=False)
+        self.assertEqual(self.service.history(self.scope)[0]['state'], 'not_sent')
+        self.transport.assert_not_called()
+
+    def test_legacy_unattempted_receipt_is_preserved(self):
+        self.legacy_intent(attempted=0)
+        self.assertEqual(self.service.history(self.scope)[0]['state'], 'not_sent')
+        self.transport.assert_not_called()
 
 
 if __name__ == '__main__':

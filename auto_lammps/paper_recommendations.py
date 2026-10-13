@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 
 from .deepseek import MAX_RESPONSE_BYTES, response_diagnostics, strict_json
 from .manifest import canonical, sha256
-from .model_connections import MODEL_ID
+from .model_connections import MODEL_ID, OfficialRequestError
 from .papers import doi_text
 from .scientific_adapters import ScientificAdapterError, prepare_stage_messages
 from .tasks import TaskError, task_id, text
@@ -230,20 +230,50 @@ class PaperRecommendations:
             original = row['state'] or 'unknown'
             state = original
             document = json.loads(row['document']) if row['document'] else None
+            diagnostics = json.loads(row['diagnostics']) if row['diagnostics'] else {}
+            original_document = None
+            if original == 'not_sent' and self._legacy_request_attempted(row):
+                # Correct only the read projection. Old immutable reports and
+                # charges remain intact; a neighbouring HTTP error is no proof
+                # of this request's lost status or usage.
+                state, original_document = 'failed_or_unknown', document
+                document = {'error_code': 'legacy_request_attempted',
+                    'message': '原账本证明已尝试请求，但没有有效答复；旧记录未保留 HTTP 状态，请先核对，未重发。'}
+                diagnostics = {**diagnostics, 'transport_attempts': 1, 'http_status': None,
+                    'request_outcome': 'unknown', 'evidence_source': 'model_ledger_matched_request'}
             if original == 'completed':
                 try:
                     if not self._fresh(json.loads(row['context'])):
                         raise ValueError('changed catalog identity')
                 except (TaskError, ValueError, TypeError, KeyError):
                     state = 'source_unavailable'
-            items.append({'id': row['id'], 'scope_id': scope_id, 'scope': 'reference_only',
+            item = {'id': row['id'], 'scope_id': scope_id, 'scope': 'reference_only',
                           'provider': row['provider'], 'model': row['model'], 'question': row['question'],
                           'at': row['at'], 'state': state, 'original_state': original,
                           'document': document, 'context_sha256': row['context_sha256'],
                           'usage': json.loads(row['usage']) if row['usage'] else None,
-                          'diagnostics': json.loads(row['diagnostics']) if row['diagnostics'] else {},
-                          'execution_ready': False, 'scientific_status': 'not_evaluated'})
+                          'diagnostics': diagnostics,
+                          'execution_ready': False, 'scientific_status': 'not_evaluated'}
+            if original_document is not None:
+                item['original_document'] = original_document
+            items.append(item)
         return items
+
+    def _legacy_request_attempted(self, row):
+        """Credential-free reconciliation of the former ValueError fallback."""
+        try:
+            if not row['request_document'] or self.connections.calls is None:
+                return False
+            record = self.connections.calls.lookup(row['id'])
+            receipt = record.get('receipt') if record else None
+            return bool(record and record['request_sha256'] == sha256(row['request_document'].encode())
+                and isinstance(receipt, dict) and receipt.get('purpose') == 'paper_recommendation'
+                and receipt.get('requested_model') == row['model']
+                and type(receipt.get('transport_attempts')) is int and receipt['transport_attempts'] == 1
+                and receipt.get('response_sha256') is None and receipt.get('structured_output') is None)
+        except Exception:
+            # An unavailable or unrelated ledger never proves transmission.
+            return False
 
     def _item(self, scope_id, request_id):
         return next(item for item in self.history(scope_id) if item['id'] == request_id)
@@ -360,7 +390,8 @@ class PaperRecommendations:
                 response_hash = sha256(raw)
                 if len(raw) > MAX_RESPONSE_BYTES:
                     raise ValueError('response_too_large')
-                diagnostics = response_diagnostics(raw)
+                diagnostics = {**response_diagnostics(raw), 'transport_attempts': 1,
+                               'http_status': None, 'request_outcome': 'response_received'}
                 raw_usage = response.get('usage', {})
                 usage = {key: number for key, number in (raw_usage.items() if isinstance(raw_usage, dict) else ())
                          if key in {'prompt_tokens', 'completion_tokens', 'total_tokens'} and type(number) is int and number >= 0}
@@ -385,16 +416,33 @@ class PaperRecommendations:
                 else:
                     document = self._selection(selection, candidates, value['key'])
                     state = 'completed'
+        except OfficialRequestError as error:
+            state, diagnostics = error.state, error.diagnostics
+            document = {'error_code': error.error_code, 'message': str(error)}
         except ValueError as error:
-            code = str(error) if str(error) in {'source_changed', 'connection_changed', 'response_too_large',
+            # Transport implementations can themselves raise ValueError (as
+            # the old TaskError did). Without a response this is not a JSON or
+            # selection failure, and does not prove the request was unsent.
+            if sent and not received:
+                state = 'failed_or_unknown'
+                document = {'error_code': 'request_failed_or_unknown',
+                    'message': '已尝试推荐请求，但没有有效答复；请先核对模型记录，没有自动重发。'}
+            else:
+                code = str(error) if str(error) in {'source_changed', 'connection_changed', 'response_too_large',
                      'response_shape_invalid', 'incomplete_generation', 'output_invalid', 'selection_invalid',
                      'citation_invalid', 'invalid_json', 'request_already_reserved', 'model_budget_exhausted'} else 'selection_invalid'
-            state = ('source_unavailable' if code == 'source_changed' else 'connection_changed'
+                state = ('source_unavailable' if code == 'source_changed' else 'connection_changed'
                      if code == 'connection_changed' else 'invalid_output' if received else 'not_sent')
-            document = {'error_code': code, 'message': '推荐未通过来源、身份或输出核验；原请求保留，没有自动重发。'}
+                document = {'error_code': code, 'message': '推荐未通过来源、身份或输出核验；原请求保留，没有自动重发。'}
         except Exception:
-            state = 'failed_or_unknown' if sent else 'not_sent'
-            document = {'error_code': 'request_failed_or_unknown', 'message': '推荐请求未完成；请核对模型记录，没有自动重发。'}
+            state = 'invalid_output' if received else 'failed_or_unknown' if sent else 'not_sent'
+            document = {'error_code': 'response_shape_invalid' if received else 'request_failed_or_unknown',
+                        'message': '模型响应未通过格式核验；原请求与用量保留，没有自动重发。' if received
+                        else '推荐请求未完成；请核对模型记录，没有自动重发。'}
+        diagnostics.setdefault('transport_attempts', int(sent))
+        diagnostics.setdefault('http_status', None)
+        diagnostics.setdefault('request_outcome', 'unknown' if sent and not received
+                               else 'response_received' if received else 'not_sent')
         if reserved:
             sanitized = json.loads(canonical(selection).decode().replace(value['key'], '[已隐藏密钥]')) if selection is not None else None
             try:
@@ -402,7 +450,7 @@ class PaperRecommendations:
                     'provider': provider, 'requested_model': value['model'], 'state': state,
                     'request_sha256': sha256(canonical(payload)), 'response_sha256': response_hash,
                     'usage': usage, 'structured_output': sanitized, 'output': output,
-                    'error_code': document.get('error_code'), 'transport_attempts': int(sent), **diagnostics,
+                    'error_code': document.get('error_code'), **diagnostics,
                     'scientific_adapter': {**proof, 'output_check': 'fixed_candidate_and_both_resource_citations' if state == 'completed' else state}})
             except Exception:
                 state = 'receipt_unavailable'
