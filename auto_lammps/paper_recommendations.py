@@ -29,6 +29,14 @@ _COMMON = ('repository', 'commit', 'source_type', 'paper_title', 'doi', 'doi_sta
 _RESOURCE_BINDINGS = ('pair_styles', 'elements', 'type_order', 'potential_library_elements')
 _IDENTITY = re.compile('[a-f0-9]{64}')
 _PRIVATE_LOCATION = re.compile(r'/(?:Users|home|private|tmp|var|etc|usr|root|Applications|Library|System)/|file:|sqlite:|(?<![A-Za-z0-9])[A-Za-z]:[\\/]', re.I)
+_UNDECLARED_LICENSES = {'', 'noassertion', 'none', '未声明', '未知', 'unknown',
+    'undeclared', 'unlicensed', 'not declared', 'not specified', 'unspecified'}
+
+
+def _license_declared(value):
+    # Retain the literal catalogue declaration for provenance; normalize only
+    # its eligibility check, never invent a licence or permission to execute.
+    return isinstance(value, str) and value.strip().casefold() not in _UNDECLARED_LICENSES
 
 
 def _scope(identifier):
@@ -103,7 +111,7 @@ def _catalog(library, exclude_dois=()):
                 gaps.append('论文题名与 DOI 关联尚未核定')
             if not entry['paper_title'] or entry['paper_title'] == '题名待核验':
                 gaps.append('缺少原论文完整题名')
-            if entry['license'] in {None, '', 'NOASSERTION', 'NONE', '未声明'}:
+            if not _license_declared(entry['license']):
                 gaps.append('来源许可证尚未声明')
             if entry['doi'] and doi_text(entry['doi']) in exclude_dois:
                 gaps.append('用户已排除此论文 DOI')

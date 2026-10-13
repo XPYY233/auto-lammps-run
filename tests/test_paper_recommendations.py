@@ -170,6 +170,19 @@ class PaperRecommendationTests(unittest.TestCase):
         self.assertIn('Synthetic conflicting resource evidence', str(result['document']))
         self.transport.assert_not_called()
 
+    def test_unknown_license_spellings_do_not_become_eligible_pairs(self):
+        for name in ('undeclared', ' UNDECLARED ', 'unknown', 'NOASSERTION',
+                     'none', 'unlicensed', '未声明', 'not specified'):
+            with self.subTest(name=name):
+                self.doc['tier_a'] = [dict(self.row, license=name)]
+                self.save()
+                menu = self.service.menu()
+                self.assertEqual(menu['verified_candidates'], [])
+                self.assertEqual(len(menu['excluded_candidates']), 1)
+                self.assertIn('来源许可证尚未声明', menu['excluded_candidates'][0]['missing_evidence'])
+        self.transport.assert_not_called()
+        self.assertEqual(self.calls.status()['used_requests'], 0)
+
     def test_conflicting_paired_resource_mapping_cannot_be_selected(self):
         self.doc['tier_a'] = [dict(self.row, kind='author_source'),
                               dict(self.row, kind='potential', type_order=['Ni', 'Co'])]
