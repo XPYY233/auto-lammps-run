@@ -102,6 +102,40 @@ class PaperRecommendationTests(unittest.TestCase):
         self.assertEqual(receipt['transport_attempts'], 1)
         self.assertEqual(receipt['usage']['total_tokens'], 19)
 
+    def test_complete_service_dispatch_uses_real_active_adapter_and_explicit_menu_contract(self):
+        self.preparer.stop()
+        result=self.create()
+        self.assertEqual(result['state'],'completed',result)
+        payload=self.transport.call_args.args[-1]
+        supplied=json.loads(payload['messages'][-1]['content'])
+        self.assertIn('registered_paper_candidate_menu',supplied)
+        self.assertEqual(supplied['scientific_adapter']['stage'],'paper_recommendation')
+        self.assertEqual(supplied['registered_paper_candidate_menu']['scope'],'reference_only')
+        self.assertFalse(supplied['registered_paper_candidate_menu']['B_input'])
+
+    def test_large_ineligible_catalog_retains_full_evidence_but_does_not_duplicate_model_file_lists(self):
+        self.preparer.stop()
+        extras=[]
+        for i in range(15):
+            extras.append({**self.row,'repo':f'synthetic/missing-{i}',
+                'doi':f'10.1234/missing-{i}','license':'NOASSERTION',
+                'evidence':'Synthetic unresolved declaration '+str(i),
+                'inputs':[f'workflow/long-{j}-'+('x'*100)+'.lmp' for j in range(150)]})
+        self.doc['tier_a']+=extras
+        self.save()
+        menu=self.service.menu()
+        self.assertGreater(len(canonical(menu)),self.calls.config.max_input_bytes)
+        result=self.create()
+        self.assertEqual(result['state'],'completed',result)
+        payload=self.transport.call_args.args[-1]
+        supplied=json.loads(payload['messages'][-1]['content'])
+        self.assertLess(len(canonical(payload)),self.calls.config.max_input_bytes)
+        self.assertEqual(len(supplied['verified_candidates']),len(menu['verified_candidates']))
+        self.assertEqual(len(supplied['excluded_candidates']),len(menu['excluded_candidates']))
+        with self.tasks.transaction() as db:
+            retained=json.loads(db.execute('SELECT context FROM paper_recommendation_intents WHERE id=?',(self.request,)).fetchone()[0])
+        self.assertEqual(retained['excluded_candidates'],menu['excluded_candidates'])
+
     def test_no_catalog_candidates_preserves_request_without_key_read_or_model_call(self):
         self.doc['tier_a'] = []
         self.save()
