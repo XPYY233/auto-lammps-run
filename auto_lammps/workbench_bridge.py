@@ -109,6 +109,44 @@ class WorkbenchRuntime:
     native_recovery_reader: object = None
     native_source_reader: object = None
     pdf_intake_root: object = None
+    native_paper_sources_reader: object = None
+    native_known_failure_planner: object = None
+    native_known_failure_creator: object = None
+
+
+def _reference_paper_sources(pages):
+    """Retain all complete PDF pages within the existing source-text capacity.
+
+    Small papers keep individual page locators. Long papers use contiguous
+    whole-page blocks; neither a page nor the final block is truncated.
+    Outer whitespace follows the existing per-source canonicalization;
+    characters inside every page remain unchanged.
+    """
+    from .condition_generation import source_bundle
+    if not isinstance(pages, (list, tuple)) or not pages:
+        raise TaskError('缺少文献工作台的完整原文页。')
+    rows, blocks, texts, start, end = [], [], [], None, None
+    for number, page in enumerate(pages, 1):
+        if not isinstance(page, str):
+            raise TaskError('文献原文页格式不完整。')
+        if not page.strip():
+            continue
+        if len(page) > 24000:
+            raise TaskError('单页完整原文超过目标分析来源容量；未截断原文。')
+        page = page.strip()
+        if len(pages) <= 32:
+            rows.append(dict(id='paper-page-' + str(number), origin='paper',
+                locator='PDF page ' + str(number), text=page))
+            continue
+        if texts and len('\n\n'.join([*texts, page])) > 24000:
+            blocks.append((start, end, '\n\n'.join(texts)));texts=[];start=None
+        if start is None:start=number
+        end=number;texts.append(page)
+    if texts:blocks.append((start, end, '\n\n'.join(texts)))
+    for start,end,content in blocks:
+        rows.append(dict(id=f'paper-pages-{start}-{end}',origin='paper',
+            locator=f'PDF pages {start}-{end}',text=content))
+    return source_bundle(rows)
 
 
 def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
@@ -141,6 +179,15 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
         extraction = load('evidence.deepseek_extraction')
         execution = load('evidence.literature_checkpoint_runtime')
         context = load('evidence.context_chat')
+        try:
+            known_length = load('evidence.literature_known_length_recovery')
+        except ImportError:
+            known_length = None
+        recovery_modules = (() if known_length is None else (execution, known_length,
+            load('evidence.literature_task_checkpoint'),
+            load('evidence.literature_task_checkpoint_codec'),
+            load('evidence.literature_task_checkpoint_store'),
+            load('evidence.literature_task_checkpoint_service')))
         snapshots = job.LiteraturePDFSnapshotAuthority(blob_store=snapshot_blobs)
         if snapshots.persistent is not True:
             raise ValueError('persistent snapshots required')
@@ -186,7 +233,8 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
                     for module in (job, business, workflow, stages, stage_budget,
-                                   extraction, persistence, finalizer, context)}}
+                                   extraction, persistence, finalizer, context,
+                                   *recovery_modules)}}
         def native_stage(token):
             state = persistence.decode_job_private_state(jobs.export_private_state(token, session_id=session_id))
             return {'paper_id': state.paper_id, 'paper': dict(state.paper),
@@ -200,15 +248,68 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
             state = execution.decode_execution_state(checkpoint.private_payload)
             return {'checkpoint': checkpoint, 'execution': state,
                 'job': persistence.decode_job_private_state(state.job_state)}
+        def known_plan(token, *, continuation_token, continuation_request_id,
+                       proof_kwargs, verify_proof, now):
+            if known_length is None:
+                raise TaskError('原生工作台尚未提供受信截断恢复接口。')
+            proof = known_length.KnownLengthProof(**proof_kwargs)
+            plan = known_length.plan_known_length_continuation(
+                native_recovery(token)['checkpoint'], continuation_token=continuation_token,
+                continuation_request_id=continuation_request_id, proof=proof,
+                verify_proof=lambda value: verify_proof(asdict(value)), now=now)
+            state = execution.decode_execution_state(plan.checkpoint.private_payload)
+            return {'checkpoint': plan.checkpoint, 'execution': state,
+                'job': persistence.decode_job_private_state(state.job_state),
+                'replacement_index': plan.replacement_index, 'replacement_call': plan.replacement_call}
+        def known_create(token, *, continuation_token, continuation_request_id,
+                         proof_kwargs, verify_proof, now):
+            # The native store admits one child atomically; the public caller
+            # cannot rewrite or revive an already executing/unknown child.
+            plan = known_plan(token, continuation_token=continuation_token,
+                continuation_request_id=continuation_request_id, proof_kwargs=proof_kwargs,
+                verify_proof=verify_proof, now=now)
+            checkpoint = checkpoint_runtime.create_known_length_continuation(
+                workflow._checkpoint_task_id(token), continuation_token=continuation_token,
+                continuation_request_id=continuation_request_id,
+                proof=known_length.KnownLengthProof(**proof_kwargs),
+                verify_proof=lambda value: verify_proof(asdict(value)), now=now,
+                snapshot_blobs=snapshot_blobs)
+            state = execution.decode_execution_state(checkpoint.private_payload)
+            decoded = persistence.decode_job_private_state(state.job_state)
+            ready = (checkpoint.state in {'authorized', 'paused'} and checkpoint.stage == 'initial_focus'
+                and checkpoint.lease_owner_digest is None
+                and state.completed_results == plan['execution'].completed_results
+                and checkpoint.receipts == plan['checkpoint'].receipts)
+            if ready:
+                try:
+                    jobs.peek_stage(continuation_token, session_id=session_id)
+                except job.LiteratureExtractionJobError as exc:
+                    if exc.code == 'literature_job_expired':
+                        jobs.restore_private_state(state.job_state, session_id=session_id,
+                            allow_authenticated_session_rebind=True)
+                    elif exc.code != 'literature_stage_busy':
+                        raise
+            return {'checkpoint': checkpoint, 'execution': state, 'job': decoded,
+                'replacement_index': plan['replacement_index'], 'replacement_call': plan['replacement_call']}
         def native_source(paper_id):
             source = database.get_paper(paper_id)
             return context._read_stable_pdf_snapshot(str(source['pdf_path'])).sha256
+        def native_paper_sources(paper_id):
+            # Reuse the workbench's stable snapshot and PDF text reader. This
+            # is the entire reference-side paper, not a selected answer or an
+            # author-code excerpt assembled by a developer.
+            source = database.get_paper(paper_id)
+            snapshot = context._read_stable_pdf_snapshot(str(source['pdf_path']))
+            pages = context._pdf_pages_from_snapshot(snapshot)
+            return {'pdf_sha256': snapshot.sha256, 'sources': _reference_paper_sources(pages)}
         return WorkbenchRuntime(database, jobs, ports, session_id,
             prepared.PreparedOutbound, budget.LiteratureDerivedBudgetBusinessAIClient,
             persistence.decode_job_private_state, exports,
             six.list_current_data, visuals.list_visual_assets,
             visuals.visual_asset_image_path, native_capabilities, native_stage,
-            native_recovery, native_source)
+            native_recovery, native_source, native_paper_sources_reader=native_paper_sources,
+            native_known_failure_planner=known_plan if known_length is not None else None,
+            native_known_failure_creator=known_create if known_length is not None else None)
     except (ImportError, AttributeError, TypeError, ValueError):
         raise TaskError('本机文献工作台依赖或持久服务尚未接好，未开始提取。') from None
 
@@ -401,6 +502,27 @@ class WorkbenchExtractionBridge:
 
     def _recovery_context(self, identifier, request_id, binding, client, *,
                           connection_revision, credential_generation):
+        try:
+            return self._standard_recovery_context(identifier, request_id, binding, client,
+                connection_revision=connection_revision, credential_generation=credential_generation)
+        except TaskError as original_error:
+            if (not callable(getattr(self.runtime, 'native_known_failure_planner', None))
+                    or not callable(getattr(self.runtime, 'native_known_failure_creator', None))):
+                raise
+            from .workbench_known_failure import known_failure_context
+            try:
+                context = known_failure_context(self, identifier, request_id, binding, client,
+                    connection_revision=connection_revision, credential_generation=credential_generation)
+                return context.recovery_metadata
+            except TaskError:
+                # A child may recover an unpaid local interruption under its
+                # existing identity, but can never create a second child.
+                return self._known_child_recovery_context(identifier, request_id, binding, client,
+                    connection_revision=connection_revision, credential_generation=credential_generation,
+                    original_error=original_error)
+
+    def _standard_recovery_context(self, identifier, request_id, binding, client, *,
+                          connection_revision, credential_generation):
         """Validate private history against the original sealed native state.
 
         No starter, preflight, lease acquisition or provider is invoked here.
@@ -577,6 +699,157 @@ class WorkbenchExtractionBridge:
             'receipt_sha256': sha256(canonical(failure)),
             'checkpoint_revision': checkpoint.revision}
 
+    @staticmethod
+    def _known_child_token(parent_token, request_id):
+        return sha256(canonical({'known_length_child': request_id,
+            'parent_token': parent_token, 'parent_native_task_id': 'literature_' + sha256(parent_token.encode())}))
+
+    def _known_child_recovery_context(self, identifier, request_id, binding, client, *,
+                                      connection_revision, credential_generation, original_error):
+        """Resume the same proven child after a local, fully known interruption."""
+        from .workbench_known_failure import known_failure_context
+        try:
+            paper = self._paper(identifier, binding)
+            model_binding = self._model_binding(client)
+            identity = dict(task_id=identifier, paper_id=paper['id'], title=paper['title'], doi=paper['doi'],
+                role=HUMAN_ROLE, source_sha256=binding.pdf_sha256, model=client.model,
+                connection_revision=connection_revision, credential_generation=credential_generation)
+            with self.papers.tasks.transaction() as db:
+                latest, failure = self._request(db, request_id)
+                if failure['state'] != 'failed' or any(latest.get(k) != v for k, v in identity.items()):
+                    raise ValueError('unknown child request')
+                if db.execute('SELECT 1 FROM workbench_extraction_recoveries WHERE source_request_id=?',
+                        (request_id,)).fetchone():
+                    raise ValueError('child request already recovered')
+                history, cursor, seen = [], request_id, set()
+                while True:
+                    if cursor in seen:
+                        raise ValueError('cycle')
+                    seen.add(cursor)
+                    intent, receipt = self._request(db, cursor)
+                    continuation = self._continuation(db, cursor)
+                    claim = db.execute('SELECT source_request_id,document FROM workbench_extraction_recoveries WHERE id=?',
+                        (cursor,)).fetchone()
+                    if (receipt.get('state') != 'failed' or continuation is None or claim is None
+                            or any(intent.get(k) != v for k, v in identity.items())
+                            or continuation.get('intent_sha256') != sha256(canonical(intent))
+                            or any(continuation.get(k) != v for k, v in model_binding.items())
+                            or continuation.get('session_sha256') != sha256(self.runtime.session_id.encode())
+                            or continuation.get('source_sha256') != binding.pdf_sha256
+                            or continuation.get('workbench_paper_id') != binding.workbench_paper_id
+                            or claim['source_request_id'] != intent.get('resume_of')):
+                        raise ValueError('child history')
+                    consent = json.loads(claim['document'])
+                    history.append((intent, receipt, continuation))
+                    if consent.get('kind') == 'known_length_continuation':
+                        origin, parent_request = cursor, intent['resume_of']
+                        break
+                    if consent.get('kind') != 'known_length_existing_child':
+                        raise ValueError('not a known child')
+                    cursor = intent['resume_of']
+            parent = known_failure_context(self, identifier, parent_request, binding, client,
+                connection_revision=connection_revision, credential_generation=credential_generation,
+                continuation_request_id=origin)
+            token = self._known_child_token(parent.parent_token, origin)
+            if any(saved['job_token'] != token for _, _, saved in history):
+                raise ValueError('foreign child')
+            native = self.runtime.native_recovery_reader(token)
+            checkpoint, execution, job = native['checkpoint'], native['execution'], native['job']
+            manifest, lineage = checkpoint.manifest, checkpoint.continuation_lineage
+            current_native = parent.recovery_metadata['native_capability_sha256']
+            if (lineage is None or lineage.parent_task_id != parent.proof_kwargs['native_task_id']
+                    or lineage.parent_revision != parent.proof_kwargs['native_revision']
+                    or lineage.continuation_request_id != origin
+                    or tuple(lineage.prefix_result_digests) != parent.prefix_digests
+                    or json.loads(lineage.proof_bytes) != {'schema_version': 'literature-known-length-proof-v1', **parent.proof_kwargs}
+                    or manifest.task_id != 'literature_' + sha256(token.encode())
+                    or manifest.session_digest != sha256(self.runtime.session_id.encode())
+                    or manifest.provider_id != 'deepseek' or manifest.runtime_revision != connection_revision
+                    or manifest.credential_generation != credential_generation
+                    or tuple(manifest.task_models) != (('analysis', client.model), ('extraction', client.model))
+                    or manifest.executor_id != 'literature_extraction_executor' or manifest.executor_version != 'v1'
+                    or manifest.pdf_snapshot_fingerprint != parent.proof_kwargs['source_fingerprint']
+                    or job.snapshot['pdf_sha256'] != binding.pdf_sha256 or job.token != token
+                    or job.paper_id != binding.workbench_paper_id
+                    or dict(job.paper) != {'title': paper['title'], 'doi': paper['doi']}
+                    or manifest.max_calls != parent.recovery_metadata['max_calls']
+                    or manifest.max_tokens != parent.recovery_metadata['max_tokens']
+                    or manifest.expires_at <= time.time()
+                    or checkpoint.state not in {'authorized','paused','validated','failed'}
+                    or checkpoint.lease_owner_digest is not None or checkpoint.lease_expires_at is not None
+                    or any(r.state not in {'succeeded','planned'} for r in checkpoint.receipts)):
+                raise ValueError('child identity')
+            original_native = self.runtime.native_recovery_reader(parent.parent_token)['checkpoint']
+            reused = len(parent.successful_prefix)
+            if checkpoint.receipts[:reused] != original_native.receipts[:-1]:
+                raise ValueError('inherited prefix changed')
+            ledger = []
+            for intent, receipt, saved in reversed(history):
+                if saved['native_capability_sha256'] != current_native:
+                    raise ValueError('child capability changed')
+                ids = receipt.get('model_request_ids')
+                if not isinstance(ids, list) or len(ids) != len(set(ids)):
+                    raise ValueError('child ledger')
+                base = {k: intent[k] for k in ('task_id','paper_id','role','source_sha256','request_id')}
+                adapter_identity = {**base, 'title': paper['title'],'doi': paper['doi'],
+                    'workbench_paper_id': binding.workbench_paper_id}
+                adapter = WorkbenchScientificAdapter(adapter_identity,
+                    capability_reader=self.runtime.native_capability_reader,stage_reader=lambda:None)
+                for ordinal, call_id in enumerate(ids,1):
+                    if call_id != sha256(canonical({**base,'ordinal':ordinal}))[:32]:
+                        raise ValueError('foreign paid call')
+                    row = client.calls.lookup(call_id) or {}; result = row.get('receipt') or {}
+                    proof = result.get('scientific_adapter') or {}
+                    usage = result.get('usage') or {}
+                    if (result.get('state') != 'completed' or result.get('http_status') != 200
+                            or result.get('finish_reason') != 'stop' or result.get('provider') != 'deepseek'
+                            or result.get('requested_model') != client.model or result.get('role') != HUMAN_ROLE
+                            or result.get('purpose') != 'literature_workbench_extraction'
+                            or result.get('transport_attempts') != 1
+                            or result.get('request_sha256') != row.get('request_sha256')
+                            or result.get('output_sha256') != sha256(canonical(result.get('structured_output')))
+                            or _HASH.fullmatch(str(result.get('response_sha256'))) is None
+                            or any(type(usage.get(k)) is not int or usage[k] < 0
+                                for k in ('prompt_tokens','completion_tokens','total_tokens'))
+                            or usage['total_tokens'] != usage['prompt_tokens'] + usage['completion_tokens']
+                            or proof.get('identity') != adapter_identity
+                            or proof.get('adapter_source_sha256') != adapter.adapter_sha256
+                            or proof.get('native_contract_sha256') != current_native
+                            or sha256(canonical(proof.get('native_capabilities'))) != current_native):
+                        raise ValueError('child response not verified')
+                    ledger.append(result)
+            active = [r for r in checkpoint.receipts[reused:] if r.state == 'succeeded']
+            if (len(ledger) != len(active) or checkpoint.spent_calls != reused + len(ledger) + 1
+                    or checkpoint.spent_tokens != sum(r.max_tokens for r in active)
+                        + sum(r.max_tokens for r in original_native.receipts)):
+                raise ValueError('inherited fee mismatch')
+            for receipt, native_receipt in zip(ledger, active):
+                proof = receipt['scientific_adapter']
+                if (proof.get('native_call_digest') != native_receipt.call_digest
+                        or proof.get('stage') != native_receipt.stage or receipt.get('task') != native_receipt.task
+                        or receipt.get('max_output_tokens') != native_receipt.max_tokens
+                        or native_digest(receipt['structured_output']) != native_receipt.result_digest):
+                    raise ValueError('child paid call mismatch')
+            prefix, offset, stage = execution.completed_results, execution.receipt_offset, job.stage
+            relevant = checkpoint.receipts[offset:]
+            if (not 0 <= offset <= len(checkpoint.receipts)
+                    or execution.stage_fingerprint != stage['stage_fingerprint'] or checkpoint.stage != stage['name']
+                    or len(relevant) > len(stage['calls'])
+                    or len(prefix) != sum(r.state == 'succeeded' for r in relevant)):
+                raise ValueError('child sealed prefix')
+            for i,result in enumerate(prefix):
+                if (relevant[i].state != 'succeeded' or native_digest(result) != relevant[i].result_digest
+                        or stage['calls'][i]['call_digest'] != relevant[i].call_digest):
+                    raise ValueError('child stage mismatch')
+            return {'kind':'known_length_existing_child','job_token':token,'reused_model_calls':reused+len(ledger),
+                'prefix_count':len(prefix),'inherited_failed_model_calls':1,'inherited_failed_tokens':16000,
+                'stage_fingerprint':execution.stage_fingerprint,'native_capability_sha256':current_native,
+                'prior_native_capability_sha256':current_native,'intent_sha256':sha256(canonical(latest)),
+                'receipt_sha256':sha256(canonical(failure)),'checkpoint_revision':checkpoint.revision,
+                'max_calls':manifest.max_calls,'max_tokens':manifest.max_tokens}
+        except Exception:
+            raise original_error from None
+
     def recovery_options(self, identifier, binding, client, *, connection_revision,
                          credential_generation):
         """Human status view; private tokens and source data never leave it."""
@@ -591,6 +864,10 @@ class WorkbenchExtractionBridge:
                     connection_revision=connection_revision, credential_generation=credential_generation)
                 option.update(enabled=True, reused_model_calls=context['reused_model_calls'],
                     reason='复用已成功调用；只对后续阶段新增记账，原失败记录保留。')
+                if context.get('kind') == 'known_length_continuation':
+                    option.update(replacement_max_tokens=32_000, extra_calls=1, extra_tokens=32_000,
+                        inherited_failed_model_calls=1,
+                        reason='复用已成功答复；已返回的截断调用保留，新增一次有界局部恢复及费用。')
             except TaskError as exc:
                 option['reason'] = str(exc)
             options.append(option)
@@ -705,7 +982,9 @@ class WorkbenchExtractionBridge:
                 # recoverable through this new failed action, never lock the
                 # source behind a consumed parent without a continuation.
                 continuation = self._continuation_document(request_id, intent, binding,
-                    client, recovery['job_token'], recovery['native_capability_sha256'])
+                    client, (self._known_child_token(recovery['job_token'], request_id)
+                        if recovery.get('kind') == 'known_length_continuation' else recovery['job_token']),
+                    recovery['native_capability_sha256'])
                 db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
                     (request_id, canonical(continuation).decode(), sha256(canonical(continuation))))
         adapter = WorkbenchModelClient(client, task=identifier, paper=paper['id'],
@@ -715,7 +994,15 @@ class WorkbenchExtractionBridge:
         if recovery:
             result.update(reused_model_calls=recovery['reused_model_calls'],
                 further_model_calls_accounted=True)
+            if recovery.get('inherited_failed_model_calls'):
+                result.update(inherited_failed_model_calls=1, inherited_failed_reserved_tokens=16_000,
+                    local_recovery_used=True)
         try:
+            if recovery and recovery.get('kind') == 'known_length_continuation':
+                from .workbench_known_failure import create_known_failure_child
+                recovery = create_known_failure_child(self, identifier, resume_of, binding, client,
+                    continuation_request_id=request_id, connection_revision=connection_revision,
+                    credential_generation=credential_generation)
             request = ({'job_token': recovery['job_token']} if recovery else
                 dict(paper_id=binding.workbench_paper_id, force_rescan=force_rescan))
             if repair_visuals:
@@ -747,6 +1034,25 @@ class WorkbenchExtractionBridge:
             fresh = getattr(jobs, 'assert_source_fresh', None)
             if callable(fresh):
                 fresh(token, session_id=self.runtime.session_id)
+            if recovery and recovery.get('kind') in {'known_length_continuation','known_length_existing_child'}:
+                model_binding = self._model_binding(client)
+                expected_native = recovery['native_capability_sha256']
+                def recovery_model_guard():
+                    if before_model_request is not None:
+                        before_model_request()
+                    self._paper(identifier, binding)
+                    if (self.runtime.native_source_reader(binding.workbench_paper_id) != binding.pdf_sha256
+                            or self._model_binding(client) != model_binding
+                            or sha256(canonical(self.runtime.native_capability_reader())) != expected_native):
+                        raise TaskError('恢复来源、模型策略或原生版本已变化。')
+                    with client.calls.transaction() as db:
+                        _sequence, policy = client.calls._latest_policy(db)
+                        if json.loads(policy).get('config') != asdict(client.calls.config):
+                            raise TaskError('恢复模型账本策略已变化。')
+                # Recheck after local preflight and before every paid call.
+                # This guard neither admits a task nor retries a response.
+                recovery_model_guard()
+                adapter.before_model_request = recovery_model_guard
             models = (('analysis', client.model), ('extraction', client.model))
             outbound = {'payload': dict(draft.outbound),
                 'call_plan': [call.canonical_dict() for call in draft.call_plan]}

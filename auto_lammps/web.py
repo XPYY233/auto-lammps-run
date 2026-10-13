@@ -281,6 +281,10 @@ class PaperRecommendationInput(Input):
     exclude_dois: list[str] = Field(default_factory=list, max_length=256)
 
 
+class ReferenceTargetAnalysisInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
                reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
@@ -389,6 +393,37 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if callable(getattr(workbench_bridge, 'extract', None)) else None)
     if workbench_jobs is not None and workbench_jobs.tasks.path != store.path:
         raise ValueError('Workbench extraction must share the task store')
+    from .reference_targets import ReferenceTargetAnalysis, model_ledger_identity
+    def reference_target_sources(identifier):
+        report = paper_evidence_views.get(identifier) if paper_evidence_views else None
+        if not report or not report.get('target_inventory'):
+            raise TaskError('本论文已提取 P 的完整目标清单尚未接入；未从仓库默认批次推定目标。')
+        binding = workbench_binding(identifier)
+        reader = getattr(getattr(workbench_bridge, 'runtime', None), 'native_paper_sources_reader', None)
+        if binding is None or not callable(reader):
+            raise TaskError('文献工作台的完整原文出处读取尚未接入；不以图表标签代替原文。')
+        if binding.paper_id != report['paper_id']:
+            raise TaskError('原文绑定与已提取 P 不属于同一篇论文。')
+        original = reader(binding.workbench_paper_id)
+        if original['pdf_sha256'] != binding.pdf_sha256:
+            raise TaskError('原论文 PDF 摘要已变化；未将新正文与旧 P 混用。')
+        return dict(task_id=identifier, paper_id=report['paper_id'],
+            paper={'title': report['title'], 'doi': report['doi']},
+            role='paper_reference_human_only', inventory=report['target_inventory'],
+            sources=original['sources'], source_binding={
+                'inventory_source_sha256': report['target_inventory']['source_sha256'],
+                'source_receipt_sha256': report['source_sha256'],
+                'pdf_sha256': binding.pdf_sha256, 'package_manifest_sha256': report['manifest_sha256']})
+    def reference_target_connection(identifier):
+        if model_client is None:
+            raise TaskError('本项目运行模型尚未配置。')
+        context = workbench_context(identifier)
+        return dict(enabled=context['enabled'], model=context['client'].model,
+            connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'],
+            model_ledger_sha256=model_ledger_identity(context['client']))
+    reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
+        connection_provider=reference_target_connection)
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
         source_discovery=source_discovery, reference_views=reference_evidence_views,
@@ -1215,6 +1250,20 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def paper_recommendation_create(data: PaperRecommendationInput):
         return recommendations.create(data.scope_id, data.request_id, 'deepseek-official',
             data.question, exclude_dois=data.exclude_dois)
+
+    @app.get('/api/tasks/{identifier}/reference-target-analysis')
+    def reference_target_history(identifier: str):
+        store.get(identifier)
+        return {'task_id': identifier, 'history': reference_targets.history(identifier),
+            'execution_authorized': False, 'B_input': False}
+
+    @app.post('/api/tasks/{identifier}/reference-target-analysis')
+    def reference_target_analyze(identifier: str, data: ReferenceTargetAnalysisInput):
+        require_open_task(identifier)
+        context = workbench_context(identifier)
+        return reference_targets.analyze(identifier, data.request_id, context['client'],
+            connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'])
 
     @app.get('/api/tasks/{identifier}/workbench/images/{entity_uid}')
     def workbench_image(identifier: str, entity_uid: str, source_sha256: str):

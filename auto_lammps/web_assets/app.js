@@ -3120,6 +3120,51 @@ function renderAuthorDiscussion(box,report,identity){
 }
 
 let targetPreviewGeneration=0;
+async function renderReferenceTargetAnalysis(panel,report,identity){
+ const section=node('section',undefined,'reference-target-analysis');panel.append(section);
+ const id=report.task_id,generation=renderPaperEvidence.generation,alive=()=>current?.id===id&&section.isConnected&&
+   renderPaperEvidence.generation===generation;
+ section.append(node('h3','应用 AI 核定论文目标与共享计算依赖'),node('p','根据完整原文和全部已提取 P 目标，区分 LAMMPS 计算、后处理、解析模型与引用数据，并列出可共用的计算。建议不会修改原任务、替你选目标或提交 HPC；不进入 B 的生成上下文。','form-note'));
+ const content=node('div');section.append(content);
+ async function refresh(){
+  content.replaceChildren(node('p','正在读取已有目标核定记录…','form-note'));
+  let result;
+  try{result=await api(`/api/tasks/${id}/reference-target-analysis`);}
+  catch(error){if(alive())content.replaceChildren(node('p','目标核定记录暂不可读取：'+error.message,'error'));return;}
+  if(!alive()||result.task_id!==id)return;
+  const records=result.history||[];content.replaceChildren();
+  const pending=records.some(r=>['prepared','dispatching','reserved','calling','unknown'].includes(r.state));
+  const latest=records.at(-1),answer=latest?.state==='completed'?latest.report:null;
+  if(answer){
+   const names={raw_lammps:'LAMMPS 原始计算',postprocessing:'计算数据后处理',analytical:'解析模型',cited:'引用资料',unclear:'方法待核定'};
+   const labels=new Map((answer.inventory?.targets||[]).map(row=>[row.id,row.label]));
+   content.append(node('p',`已核对全部 ${answer.targets.length} 项目标 · ${answer.dependencies.length} 组共享依赖；这是有出处的模型建议，仍需确认科学范围。`,'form-note'));
+   for(const row of [...answer.targets].sort((a,b)=>a.priority-b.priority)){
+    const item=node('details',undefined,'target-option');item.append(node('summary',`优先级 ${row.priority} · ${labels.get(row.target_id)||row.target_id} · ${names[row.data_class]}`),researchContent(row.reason));
+    item.append(node('p','共享依赖：'+(row.dependency_ids.join('、')||'无额外计算依赖')));
+    for(const gap of row.missing)item.append(node('p','待核验：'+gap,'form-note'));
+    for(const ref of row.citations)item.append(node('p',ref.source_locator),node('blockquote',ref.quote));content.append(item);
+   }
+   const groups=node('details');groups.append(node('summary','查看共享计算、上游依赖与原文依据'));
+   for(const group of answer.dependencies){const item=node('article');item.append(node('h4',group.id+' · '+group.label),researchContent(group.description),node('p','方法：'+names[group.data_class]+' · 上游：'+(group.requires.join('、')||'无')));
+    for(const gap of group.missing)item.append(node('p','待核验：'+gap,'form-note'));
+    for(const ref of group.citations)item.append(node('p',ref.source_locator),node('blockquote',ref.quote));groups.append(item);}content.append(groups);
+   for(const limitation of answer.limitations)content.append(node('p',limitation,'form-note'));
+  }
+  const history=node('details');history.append(node('summary',`查看 ${records.length} 次目标核定记录、失败原因与用量`));
+  for(const record of records){const item=node('article');const label=({completed:'完整建议已返回',source_unavailable:'原建议保留，来源已变化',invalid_output:'建议未通过检查',failed:'模型调用未完成',unavailable:'出处或契约尚未齐备',paused:'来源或配置变化，已暂停',prepared:'已登记请求，正在核定',dispatching:'应用 AI 正在核定',reserved:'已登记请求，正在核定',calling:'应用 AI 正在核定',unknown:'请求状态待核对'})[record.state]||'状态待核对';item.append(node('p',(record.at?new Date(record.at).toLocaleString('zh-CN')+' · ':'')+label),node('small','请求 '+record.request_id));
+   if(record.receipt?.message)item.append(node('p',record.receipt.message));
+   if(Number.isInteger(record.usage?.total_tokens))item.append(node('small','已记录模型用量 '+record.usage.total_tokens));history.append(item);}content.append(history);
+  const run=node('button','让应用 AI 核定全部 P 目标与共享计算依赖','primary');run.disabled=pending||records.length>=3;
+  const note=node('p',pending?'原请求仍待核对，不新发或重建。':records.length>=3?'本任务三次建议已用完，原产物与费用保留。':`已使用 ${records.length}/3 次目标建议；仅明确点击后调用已配置模型。`,'form-note');
+  const reload=node('button','刷新目标核定记录');reload.onclick=refresh;
+  run.onclick=async()=>{if(!alive()||run.disabled)return;run.disabled=true;note.textContent='应用 AI 正在核定完整 P；可以查看其他任务，回来刷新原请求。';
+   try{await api(`/api/tasks/${id}/reference-target-analysis`,{request_id:crypto.randomUUID().replaceAll('-','')});if(alive())await refresh();}
+   catch(error){if(alive()){note.textContent='核定请求需查看原记录：'+error.message;await refresh();}}
+  };content.append(run,reload,note);
+ }
+ await refresh();
+}
 function renderPaperEvidence(box,report){
  if(!report||report.task_id!==current?.id)return;
  const identity=typeof report.manifest_sha256==='string'&&/^[a-f0-9]{64}$/.test(report.manifest_sha256)?report.task_id+':'+report.manifest_sha256:null;
@@ -3154,6 +3199,7 @@ function renderPaperEvidence(box,report){
   for(const row of [...source.targets].sort((a,b)=>(report.priorities[a.id]||3)-(report.priorities[b.id]||3))){const item=node('article',undefined,'target-group');item.append(node('strong',`优先级 ${report.priorities[row.id]||3} · ${row.label} · ${names[row.availability]}`),node('p',row.conditions),node('small',row.locator+' · '+row.outputs),node('p',row.limitations));list.append(item);}panel.append(list);
  }
  panel.append(limitations(report));box.append(panel);
+ if(identity&&source)void renderReferenceTargetAnalysis(panel,report,identity);
 }
 function targetReadinessRequest(isCurrent, onState, onError) {
   let sequence=0;
