@@ -167,14 +167,21 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'finalize': finalizer.AtomicEvidenceDBFinalizer.finalize}
             if any(not callable(fn) for fn in operations.values()):
                 raise WorkbenchAdapterError('实装工作台提取接口不完整。')
+            partition = {'chunk_pages': starter.CHUNK_PAGES, 'max_pages': starter.MAX_PAGES,
+                         'policy': 'complete_single_page_blocks_v1'}
+            if callable(getattr(job, '_source_fragment_chunks', None)):
+                partition.update(policy='whole_line_source_fragments_v1',
+                    max_lines=extraction.MAX_SOURCE_FRAGMENT_LINES,
+                    max_chars=extraction.MAX_SOURCE_FRAGMENT_CHARS,
+                    max_fragments=min((job.MAX_STAGE_CALLS-8)//8,
+                                      (job.MAX_STAGE_TOKENS-52000)//72000))
             return {'planner': {'id': workflow._PLANNER_ID, 'version': workflow._PLANNER_VERSION},
                 'executor': {'id': workflow._EXECUTOR_ID, 'version': workflow._EXECUTOR_VERSION},
                 'runtime_tasks': sorted(workflow.LITERATURE_POLICY_TASKS),
                 'model_stages': sorted(job.MODEL_STAGES),
                 'output_limits': {'extraction_records_per_response':
                     stage_budget.MAX_EXTRACTED_RECORDS_PER_RESPONSE},
-                'source_partition': {'chunk_pages': starter.CHUNK_PAGES,
-                    'max_pages': starter.MAX_PAGES, 'policy': 'complete_single_page_blocks_v1'},
+                'source_partition': partition,
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
                     for module in (job, business, workflow, stages, stage_budget,

@@ -127,11 +127,11 @@ function clearTaskView(id) {
   for(const selector of ['#discussion-prompt','#guidance-note','#plan-revision-note']){
     const element=$(selector);if(element)element.value='';
   }
-  for(const selector of ['#plan-approve','#plan-revise','#open-current-plan','#plan-revision-note',
+  for(const selector of ['#plan-approve','#plan-revise','#plan-recheck','#open-current-plan','#plan-revision-note',
     '#discussion-form button[type=submit]','#guidance-note','#guidance-send','#task-pause']){
     const element=$(selector);if(element)element.disabled=true;
   }
-  for(const selector of ['#plan-approve','#plan-revise','#next-action']){
+  for(const selector of ['#plan-approve','#plan-revise','#plan-recheck','#next-action']){
     const element=$(selector);if(element)element.onclick=null;
   }
   const pause=$('#task-pause');if(pause){pause.textContent='暂停任务';pause.className='quiet';}
@@ -1194,13 +1194,18 @@ async function refreshPlanReview(){
   const generation=refreshPlanReview.generation=(refreshPlanReview.generation||0)+1;
   let review;
   try{review=await api(`/api/tasks/${id}/plan`);}
-  catch(error){if(current?.id!==id||$('#task-view').hidden||generation!==refreshPlanReview.generation)return;$('#plan-status').textContent='暂时无法读取方案，已展示的方案未更新。请刷新核对。';$('#plan-approve').disabled=true;$('#plan-revise').disabled=true;return;}
+  catch(error){if(current?.id!==id||$('#task-view').hidden||generation!==refreshPlanReview.generation)return;$('#plan-status').textContent='暂时无法读取方案，已展示的方案未更新。请刷新核对。';$('#plan-approve').disabled=true;$('#plan-revise').disabled=true;$('#plan-recheck').disabled=true;return;}
   if(current?.id!==id||$('#task-view').hidden||generation!==refreshPlanReview.generation)return;
   const plan=review.workspace?.current;
   const prepared=review.state==='prepared'&&(!review.workspace||(plan&&!plan.historical));
-  panel.hidden=!prepared&&!plan;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden){renderNextAction();return;}
+  const sameDraft=review.same_plan_review||review.workspace?.same_plan_review||{};
+  const recheck=$('#plan-recheck');recheck.hidden=!sameDraft.can_recheck;recheck.disabled=!sameDraft.can_recheck;
+  panel.hidden=!prepared&&!plan&&!sameDraft.proposal_request_id;$('#open-current-plan').disabled=panel.hidden;if(panel.hidden){renderNextAction();return;}
   $('#plan-version').textContent=(plan?`第 ${plan.version} 版${plan.historical?' · 上一份已准备方案':''}`:'已准备')+' · '+proposalRoundLabel(review);
-  $('#plan-status').textContent=prepared?(review.approved?'当前方案已批准。':'方案已准备，等待你确认。'):'应用正在处理下一版；下方保留最近一版方案供查看，暂不能批准。';
+  if(!prepared&&!plan)$('#plan-version').textContent='已保存原稿 · '+proposalRoundLabel(review);
+  $('#plan-status').textContent=prepared?(review.approved?'当前方案已批准。':'方案已准备，等待你确认。'):!plan?
+    `${sameDraft.reason||'原稿正在重新审核。'} 原方案和费用保留；重审不生成新稿、不提交计算。`:
+    '应用正在处理下一版；下方保留最近一版方案供查看，暂不能批准。';
   renderPlanSummary(review);renderPlanVersions(review);
   const files=$('#plan-files');const opened=new Set([...files.children].filter(x=>x.open).map(x=>x.dataset?.file));files.replaceChildren();
   for(const file of (plan?.files||review.files||[])){
@@ -1219,6 +1224,18 @@ async function refreshPlanReview(){
   const active=['queued','running','waiting','dispatching'].includes(job.state);
   const unresolved=['unknown','reconcile_required'].includes(job.scheduler_state);
   const blocked=!executionReadable||execution.configured===false;
+  recheck.disabled=!sameDraft.can_recheck||active||unresolved||blocked;
+  recheck.onclick=()=>action(async()=>{
+    if(recheck.disabled)return;
+    recheck.disabled=true;
+    const used=sameDraft.review_rounds?.used||0;
+    if(!recheck.request||recheck.request.task!==id||recheck.request.proposal!==sameDraft.proposal_sha256||recheck.request.used!==used)
+      recheck.request={id:crypto.randomUUID().replaceAll('-',''),task:id,proposal:sameDraft.proposal_sha256,used};
+    await api(`/api/tasks/${id}/plan/recheck`,{revision:current.revision,request_id:recheck.request.id});
+    if(current?.id!==id)return;
+    await afterChange('原稿已交给应用内 AI 重新审核；不会生成新稿或提交 HPC。');
+    await refreshPlanReview();await refreshCandidate();await refreshActivity();
+  });
   const retryAvailable=job.scheduler_state==='failed'&&job.accounted&&job.dispatch_count<job.max_attempts;
   const approve=$('#plan-approve');approve.disabled=!prepared||active||blocked||(dispatched&&!retryAvailable);
   approve.textContent=retryAvailable?`使用第 ${job.dispatch_count+1} 次机会提交 HPC`:dispatched?'已提交 · 作业 '+job.job_id:active?'正在提交，请等待回执':unresolved?'核对已有提交回执':review.approved?'提交已批准方案':'批准并提交 HPC';

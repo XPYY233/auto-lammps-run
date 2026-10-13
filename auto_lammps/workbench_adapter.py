@@ -12,7 +12,7 @@ import re
 from .manifest import canonical, sha256
 from .tasks import TaskError, task_id
 
-VERSION = 3
+VERSION = 4
 ROLE = 'paper_reference_human_only'
 MARKER = '\n\n[AUTO-LAMMPS WORKBENCH SCIENTIFIC ADAPTER]\n'
 INSTRUCTION = (
@@ -50,10 +50,16 @@ def _capabilities(value):
         raise WorkbenchAdapterError('实装工作台能力合同缺失。')
     limits = value['output_limits']
     partition = value['source_partition']
-    if (not isinstance(partition, dict) or set(partition) != {'chunk_pages', 'max_pages', 'policy'}
+    fragment = isinstance(partition, dict) and partition.get('policy') == 'whole_line_source_fragments_v1'
+    fields = {'chunk_pages', 'max_pages', 'policy'}
+    if fragment:
+        fields |= {'max_lines', 'max_chars', 'max_fragments'}
+    if (not isinstance(partition, dict) or set(partition) != fields
             or type(partition['chunk_pages']) is not int or partition['chunk_pages'] != 1
             or type(partition['max_pages']) is not int or not 1 <= partition['max_pages'] <= 64
-            or partition['policy'] != 'complete_single_page_blocks_v1'):
+            or partition['policy'] not in {'complete_single_page_blocks_v1', 'whole_line_source_fragments_v1'}
+            or (fragment and any(type(partition[key]) is not int or partition[key] != expected
+                for key, expected in (('max_lines',32),('max_chars',1500),('max_fragments',63))))):
         raise WorkbenchAdapterError('实装工作台来源分块合同缺失。')
     if (not isinstance(limits, dict) or set(limits) != {'extraction_records_per_response'}
             or type(limits['extraction_records_per_response']) is not int

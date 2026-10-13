@@ -77,6 +77,39 @@ class ResultChartTests(unittest.TestCase):
         self.assertIsNone(saved['chart'])
         self.assertEqual(self.client.get(self.url+'/'+request_id+'/download').status_code,409)
 
+    def test_index_selection_uses_exact_verified_source_and_columns(self):
+        self.transport.return_value={'choices':[{'finish_reason':'stop','message':{
+            'content':'{"table_index":0,"x_index":0,"y_index":1}'}}]}
+        result=self.send('8'*32).json()
+        self.assertEqual(result['state'],'completed')
+        self.assertEqual((result['chart']['file'],result['chart']['x'],result['chart']['y']),
+            (self.file,self.x,self.y))
+        payload=self.transport.call_args.args[4]
+        contract=json.loads(payload['messages'][-1]['content'])['scientific_adapter']
+        self.assertEqual(set(contract['capabilities']),{'chart_selection'})
+        self.assertNotIn('site_thermodynamics_contract',json.dumps(payload))
+        receipt=self.calls.history()[0]['receipt']
+        self.assertEqual(receipt['structured_output'],{'table_index':0,'x_index':0,'y_index':1})
+        self.assertEqual(receipt['finish_reason'],'stop')
+
+    def test_invalid_index_keeps_known_output_and_safe_diagnostic(self):
+        self.transport.return_value={'choices':[{'finish_reason':'stop','message':{
+            'content':'{"table_index":0,"x_index":0,"y_index":999}'}}]}
+        result=self.send('9'*32).json()
+        self.assertEqual(result['state'],'invalid_output')
+        self.assertEqual(result['chart']['error_code'],'chart_axes_not_declared')
+        self.assertEqual(self.calls.history()[0]['receipt']['structured_output']['y_index'],999)
+        self.assertEqual(self.send('9'*32).json(),result)
+        self.transport.assert_called_once()
+
+    def test_truncated_reply_is_not_accepted_even_with_parseable_selection(self):
+        self.transport.return_value={'choices':[{'finish_reason':'length','message':{
+            'content':'{"table_index":0,"x_index":0,"y_index":1}'}}]}
+        result=self.send('7'*32).json()
+        self.assertEqual(result['state'],'invalid_output')
+        self.assertEqual(result['chart']['error_code'],'chart_incomplete_generation')
+        self.assertEqual(self.calls.history()[0]['receipt']['finish_reason'],'length')
+
     def test_invalid_model_axis_never_creates_chart_or_retries(self):
         self.transport.return_value={'choices':[{'message':{'content':json.dumps(dict(
             analysis_id=self.analysis_id,file=self.file,x=self.x,y='invented'))}}]}
@@ -88,6 +121,19 @@ class ResultChartTests(unittest.TestCase):
         self.send(request_id)
         self.transport.assert_called_once()
         self.assertEqual(self.calls.status()['used_requests'],1)
+
+    def test_nonstandard_json_constants_keep_known_failure_and_actual_usage(self):
+        self.transport.return_value={'choices':[{'finish_reason':'stop','message':{
+            'content':'{"table_index":NaN,"x_index":0,"y_index":1}'}}],
+            'usage':{'prompt_tokens':10,'completion_tokens':7,'total_tokens':17}}
+        result=self.send('6'*32).json()
+        self.assertEqual(result['state'],'invalid_output')
+        receipt=self.calls.history()[0]['receipt']
+        self.assertEqual(receipt['error_code'],'chart_output_json_invalid')
+        self.assertEqual(receipt['usage']['total_tokens'],17)
+        self.assertIsNone(receipt['structured_output'])
+        self.assertEqual(self.send('6'*32).json(),result)
+        self.transport.assert_called_once()
 
     def test_unavailable_request_records_reason_without_fabricating_plot(self):
         self.transport.return_value={'choices':[{'message':{'content':'{"unavailable":"现有表没有所需物理量"}'}}]}

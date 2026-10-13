@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .manifest import canonical, sha256
 
-VERSION = 2
+VERSION = 3
 STAGES = {'condition_completion', 'failure_diagnosis', 'result_discussion', 'result_chart',
           'condition_extraction', 'reference_extraction', 'candidate_proposal', 'candidate_review'}
 MANDATORY_INSTRUCTION = (
@@ -178,6 +178,9 @@ def _stage_context(stage, evidence):
         capabilities['geometry'] = {**_geometry_context(None),
             'source_sha256': sha256(Path(structures.__file__).read_bytes())}
         capabilities['workflow'] = _workflow_context()
+    if stage == 'result_chart':
+        from .result_charts import chart_selection_context
+        capabilities = {'chart_selection': chart_selection_context(evidence['verified_tables'])}
     rules = {
         'application_supplied': True, 'model_may_disable_checks': False,
         'tools_executed_by_this_stage': False,

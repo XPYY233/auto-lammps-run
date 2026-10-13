@@ -6,8 +6,10 @@ code, a fitting window, a physical simulation or a scientific verdict.
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .analysis import MAX_TABLE_BYTES
+from .deepseek import response_diagnostics
 from .manifest import canonical, private_directory, sha256
 from .model_connections import MODEL_ID
 from .runtime_launcher import read_regular
@@ -17,6 +19,53 @@ from .tasks import TaskError, task_id
 
 class ChartSourceChanged(ValueError):
     pass
+
+
+class ChartSelectionInvalid(ValueError):
+    """Trusted diagnostic code, never upstream exception text."""
+
+
+def _non_json_constant(value):
+    raise ChartSelectionInvalid('chart_output_json_invalid')
+
+
+def chart_selection_context(options):
+    """Small stage-specific menu rebuilt from verified sources, not model IDs."""
+    menu = []
+    if not isinstance(options, list) or not 1 <= len(options) <= 32:
+        raise ScientificAdapterError('Verified chart source menu is missing')
+    for number, source in enumerate(options):
+        columns = source.get('columns') if isinstance(source, dict) else None
+        if (not isinstance(columns, list) or len(columns) < 2
+                or any(not isinstance(column, dict) or not isinstance(column.get('name'), str)
+                    or not column['name'] or not isinstance(column.get('unit'), str) for column in columns)):
+            raise ScientificAdapterError('Verified chart column contract is missing')
+        menu.append({'table_index': number, 'analysis_id': source['analysis_id'], 'file': source['file'],
+            'axes': [{'index': index, **column} for index, column in enumerate(columns)]})
+    return {'tool': 'verified_numeric_chart_selection', 'version': 1,
+        'source_sha256': sha256(Path(__file__).read_bytes()), 'menu': menu,
+        'output_schema': {'table_index': 'integer menu index', 'x_index': 'integer axis index',
+            'y_index': 'different integer axis index'},
+        'execution': 'trusted_source_revalidation_and_full_two_column_CSV',
+        'scientific_status': 'not_evaluated', 'new_physics_or_fit': False}
+
+
+def _selection(selection, options):
+    if isinstance(selection, dict) and set(selection) == {'table_index', 'x_index', 'y_index'}:
+        values = [selection[key] for key in ('table_index', 'x_index', 'y_index')]
+        if any(type(value) is not int for value in values):
+            raise ChartSelectionInvalid('chart_selection_index_invalid')
+        table, x, y = values
+        if not 0 <= table < len(options):
+            raise ChartSelectionInvalid('chart_source_not_declared')
+        source = options[table]
+        if x == y or any(not 0 <= axis < len(source['columns']) for axis in (x, y)):
+            raise ChartSelectionInvalid('chart_axes_not_declared')
+        return dict(analysis_id=source['analysis_id'], file=source['file'],
+            x=source['columns'][x]['name'], y=source['columns'][y]['name'])
+    if not isinstance(selection, dict) or set(selection) != {'analysis_id', 'file', 'x', 'y'}:
+        raise ChartSelectionInvalid('chart_output_shape_invalid')
+    return selection
 
 
 class ResultCharts:
@@ -136,7 +185,10 @@ class ResultCharts:
         evidence=dict(task_id=identifier,question=question,verified_tables=options)
         messages=[{'role':'system','content':(
             'You select ONE chart from verified numeric table metadata for a researcher. '
-            'Return only a JSON object with exactly analysis_id, file, x, y selected from the supplied options. '
+            'Return only JSON {"table_index":0,"x_index":0,"y_index":1}, using integer indices from the '
+            'scientific_adapter verified numeric chart menu. The two axis indices must be different. '
+            'This is an output SHAPE example, not a recommendation to choose table 0 or these axes. '
+            'Never copy or guess hashes, filenames or column names. '
             'For requests that cannot be answered by one existing two-axis chart, return exactly '
             '{"unavailable":"brief reason"}. Never invent data, fit, change a scientific report or claim success. JSON only.')},
             {'role':'user','content':canonical(evidence).decode()}]
@@ -158,6 +210,7 @@ class ResultCharts:
                             sha256(canonical(evidence)),datetime.now(timezone.utc).isoformat()))
         if concurrent:return next(item for item in self.history(identifier) if item['id']==request_id)
         reserved=sent=response_received=False;usage={};state='not_sent';document={'message':'请求尚未发送。'}
+        diagnostics={}; selection=None; response_sha256=None
         try:
             if self.connections.calls is not None:
                 self.connections.calls.reserve(request_id,canonical(payload));reserved=True
@@ -167,21 +220,26 @@ class ResultCharts:
             raw_usage = response.get('usage', {}) if isinstance(response, dict) else {}
             usage={key:number for key,number in (raw_usage.items() if isinstance(raw_usage,dict) else ())
                    if key in {'prompt_tokens','completion_tokens','total_tokens'} and type(number) is int and number>=0}
+            response_sha256=sha256(canonical(response))
+            diagnostics=response_diagnostics(canonical(response))
             content=response['choices'][0]['message']['content']
+            if diagnostics.get('finish_reason') not in (None, 'stop'):
+                raise ChartSelectionInvalid('chart_incomplete_generation')
             if not isinstance(content,str) or len(content)>5000:raise ValueError('Invalid chart selection')
-            selection=json.loads(content)
+            selection=json.loads(content,parse_constant=_non_json_constant)
             if isinstance(selection,dict) and set(selection)=={'unavailable'}:
                 reason=selection['unavailable']
                 if not isinstance(reason,str) or not 1<=len(reason)<=200:raise ValueError('Invalid reason')
                 state,document='unavailable',{'message':reason.replace(value['key'], '[已隐藏]')}
             else:
-                if not isinstance(selection,dict) or set(selection)!={'analysis_id','file','x','y'}:
-                    raise ValueError('Invalid chart selection shape')
-                matches=[option for option in options if all(selection[key]==option[key] for key in ('analysis_id','file'))]
-                if len(matches)!=1 or selection['x']==selection['y'] or not all(
-                    selection[key] in [column['name'] for column in matches[0]['columns']] for key in ('x','y')):
-                    raise ValueError('Chart source or axes not declared')
-                try:data=self._chart_data(identifier,selection['analysis_id'],selection['file'],selection['x'],selection['y'])
+                axes=_selection(selection,options)
+                matches=[option for option in options if all(axes[key]==option[key] for key in ('analysis_id','file'))]
+                if len(matches)!=1:
+                    raise ChartSelectionInvalid('chart_source_not_declared')
+                if axes['x']==axes['y'] or not all(
+                    axes[key] in [column['name'] for column in matches[0]['columns']] for key in ('x','y')):
+                    raise ChartSelectionInvalid('chart_axes_not_declared')
+                try:data=self._chart_data(identifier,axes['analysis_id'],axes['file'],axes['x'],axes['y'])
                 except (ValueError,KeyError,TypeError,OSError,RuntimeError) as error:
                     raise ChartSourceChanged('Verified chart source changed') from error
                 if data['source_sha256']!=matches[0]['source_sha256']:
@@ -197,6 +255,9 @@ class ResultCharts:
                 state,document='completed',data
         except ChartSourceChanged:
             state,document='source_unavailable',{'message':'来源数据在模型选图后已变化，未生成图。请求已保留。'}
+        except ChartSelectionInvalid as error:
+            state='invalid_output'
+            document={'error_code': str(error), 'message': '模型返回的表或坐标选择未通过核验，未生成图；原请求已保留。'}
         except (ValueError,KeyError,TypeError,IndexError):
             state='invalid_output' if response_received else ('failed_or_unknown' if sent else 'not_sent')
             document={'message':('AI 选择的表或坐标不在已核验数据中，未生成图。请求已保留。'
@@ -208,6 +269,9 @@ class ResultCharts:
         if reserved:
             self.connections.calls.record(request_id,dict(provider=provider,requested_model=value['model'],
                 state=state,request_sha256=sha256(canonical(payload)),usage=usage,purpose='result_chart',
+                response_sha256=response_sha256, **diagnostics,
+                structured_output=(json.loads(canonical(selection).decode().replace(value['key'], '[已隐藏]'))
+                    if selection is not None else None), error_code=document.get('error_code'),
                 transport_attempts=1 if sent else 0,scientific_adapter={**proof,
                     'output_check':'trusted_numeric_source_and_distinct_axes' if state=='completed' else state}))
         self._finish(request_id,state,document,usage)

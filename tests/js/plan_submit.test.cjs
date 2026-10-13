@@ -6,7 +6,7 @@ function setup(job,review={state:'prepared',approved:true,files:[]},rich=false){
  const elements=new Map(),calls=[];
  const el=(tag,text,cls)=>({tag,hidden:false,disabled:false,dataset:{},className:cls||'',classList:{add(){}},textContent:text||'',innerHTML:'',value:'',children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},focus(){}});
  const c=vm.createContext({current:{id:'task',revision:7},executionState:null,requestStates:{running:'运行中'},schema:{automatic_workflow:{configured:true}},node:el,
- window:{markdownit:MarkdownIt},document:{createElement:el},
+ window:{markdownit:MarkdownIt},document:{createElement:el},crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
  $:s=>{if(!elements.has(s))elements.set(s,el());return elements.get(s)},
  api:async(path,body)=>{calls.push({path,body});if(path.endsWith('/plan'))return review;if(path.endsWith('/execution')&&!body)return {job};if(path==='/api/tasks/task')return {id:'task',revision:7};return {};},
  notice:()=>{},action:fn=>fn(),afterChange:async()=>{},refreshCandidate:async()=>{},refreshActivity:async()=>{},renderNextAction:()=>{}});
@@ -119,4 +119,25 @@ test('mixed numeric and atomic trajectory outputs keep full plan visible and app
  assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),
   ['/api/tasks/task/plan/approve','/api/tasks/task/execution']);
  assert.equal(calls.some(x=>/candidate/.test(x.path)),false);
+});
+
+test('failed sixth draft has an explicit same-plan review action without regeneration or submission',async()=>{
+ const review={state:'failed',approved:false,files:[],proposal_rounds:{limit:6,used:6,remaining:0},
+  same_plan_review:{can_recheck:true,proposal_request_id:'proposal',proposal_sha256:'fixed',review_rounds:{used:0},reason:'只重审原稿'}};
+ const {c,elements,calls}=setup(null,review);await c.refreshPlanReview();
+ assert.equal(elements.get('#plan-review-panel').hidden,false);
+ assert.equal(elements.get('#plan-approve').disabled,true);
+ assert.equal(elements.get('#plan-revise').disabled,true);
+ assert.equal(elements.get('#plan-recheck').hidden,false);
+ await elements.get('#plan-recheck').onclick();
+ const writes=calls.filter(x=>x.body);
+ assert.deepEqual(writes.map(x=>x.path),['/api/tasks/task/plan/recheck']);
+ assert.equal(writes[0].body.revision,7);
+ assert.match(writes[0].body.request_id,/^[a-f0-9]{32}$/);
+});
+test('same-plan recheck remains locked with uncertain dispatch',async()=>{
+ const {c,elements,calls}=setup({state:'attention',scheduler_state:'unknown'},
+  {state:'failed',files:[],same_plan_review:{can_recheck:true,proposal_request_id:'proposal'}});
+ await c.refreshPlanReview();assert.equal(elements.get('#plan-recheck').disabled,true);
+ await elements.get('#plan-recheck').onclick();assert.equal(calls.some(x=>x.body),false);
 });

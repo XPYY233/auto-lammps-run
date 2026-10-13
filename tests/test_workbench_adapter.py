@@ -82,6 +82,18 @@ class WorkbenchAdapterTests(unittest.TestCase):
             with self.assertRaises(WorkbenchAdapterError):
                 self.build(**kwargs)
 
+    def test_lossless_fragment_policy_is_bound_and_cannot_expand_or_drift(self):
+        partition={'chunk_pages':1,'max_pages':64,'policy':'whole_line_source_fragments_v1',
+                   'max_lines':32,'max_chars':1500,'max_fragments':63}
+        self.capability['source_partition']=partition
+        adapter=self.build()
+        _,proof=adapter.prepare(self.messages,self.options)
+        self.assertEqual(proof['native_capabilities']['source_partition'],partition)
+        for field in ('max_lines','max_chars','max_fragments'):
+            with self.subTest(field=field),self.assertRaises(WorkbenchAdapterError):
+                self.build(capability_reader=lambda:{**self.capability,
+                    'source_partition':{**partition,field:partition[field]+1}})
+
     def test_partition_drift_or_incomplete_scope_is_rejected_before_send(self):
         for partition in ({}, {'chunk_pages': True, 'max_pages': 64,
                 'policy': 'complete_single_page_blocks_v1'},

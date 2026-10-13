@@ -186,6 +186,10 @@ class ReviseInput(Revision):
     note: str = Field(min_length=1, max_length=2000)
 
 
+class PlanRecheckInput(Revision):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$', min_length=32, max_length=32)
+
+
 class CandidateInput(Revision):
     answers: str | None = Field(default=None, max_length=4000)
 
@@ -1450,6 +1454,18 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         from .plan_workspace import workspace
         review['workspace'] = workspace(candidate_service, identifier)
         return review
+
+    @app.post('/api/tasks/{identifier}/plan/recheck', status_code=202)
+    @serialized_task_action
+    def plan_recheck(identifier: str, data: PlanRecheckInput):
+        """Explicit same-draft review; no regeneration, approval or dispatch."""
+        require_open_task(identifier)
+        if store.paused(identifier):
+            raise TaskError('任务已暂停，请先继续任务再重新审核原稿。')
+        if candidate_service is None:
+            return JSONResponse({'detail': '方案服务尚未配置。'}, status_code=422)
+        return {'candidate': candidate_service.enqueue_review(identifier, data.revision,
+                                                              request_id=data.request_id)}
 
     @app.post('/api/tasks/{identifier}/plan/approve')
     @serialized_task_action
