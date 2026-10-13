@@ -75,6 +75,16 @@ class ReferenceTargetTests(unittest.TestCase):
             client or self.client, connection_revision=kwargs.get('connection_revision', 1),
             credential_generation=kwargs.get('credential_generation', 1))
 
+    def test_preflight_task_error_does_not_publish_private_provider_text(self):
+        self.provider.side_effect = TaskError('SYNTHETIC_PRIVATE_PATH secret=SYNTHETIC_SECRET')
+        result = self.analyze()
+        self.assertEqual(result['state'], 'unavailable')
+        self.assertEqual(result['receipt']['error_code'], 'target_preflight_invalid')
+        self.assertNotIn('SYNTHETIC_PRIVATE_PATH', json.dumps(result))
+        self.assertNotIn('SYNTHETIC_SECRET', json.dumps(result))
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.calls.status()['used_requests'], 0)
+
     def interrupted_before_reserve(self):
         with patch.object(self.client, 'complete_json', side_effect=KeyboardInterrupt('Synthetic unsent exit')):
             with self.assertRaises(KeyboardInterrupt): self.analyze()

@@ -120,6 +120,23 @@ class WorkbenchBridgeTests(unittest.TestCase):
         return self.bridge.extract(self.task['id'], self.identifier, self.binding,
             self.client, connection_revision=1, credential_generation=1, **kwargs)
 
+    def test_history_projects_only_bound_provider_rejection_without_replay(self):
+        self.client.transport = lambda *args: (402, b'{"error":"SYNTHETIC_PRIVATE_SECRET"}')
+        result = self.extract()
+        self.assertIn(result['state'], {'failed', 'failed_or_unknown'})
+        before = self.bridge.history(self.task['id'])
+        used = self.calls.status()['used_requests']
+        projected = self.bridge.history_with_model_diagnostics(self.task['id'], self.calls)
+        self.assertEqual(projected[0]['provider_failure']['http_status'], 402)
+        self.assertIn('账户余额不足', projected[0]['error'])
+        self.assertEqual(projected[0]['state'], before[0]['state'])
+        self.assertEqual(self.bridge.history(self.task['id']), before)
+        self.assertEqual(self.calls.status()['used_requests'], used)
+        self.assertNotIn('SYNTHETIC_PRIVATE_SECRET', json.dumps(projected))
+        unrelated = ModelCalls(self.root/'unrelated-models.sqlite',
+            DeepSeekConfig('synthetic-model'), max_requests=10)
+        self.assertEqual(self.bridge.history_with_model_diagnostics(self.task['id'], unrelated), before)
+
     def direct_adapter(self, **options):
         return WorkbenchScientificAdapter({'task_id': self.task['id'], 'paper_id': self.paper['id'],
             'request_id': self.identifier, 'role': HUMAN_ROLE, 'source_sha256': self.binding.pdf_sha256,

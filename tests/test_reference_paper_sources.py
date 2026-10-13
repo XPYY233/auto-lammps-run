@@ -27,5 +27,12 @@ class ReferencePaperSourcesTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             _reference_paper_sources(['x'*23000 for _ in range(52)])
 
+    def test_undecodable_glyph_remains_unknown_and_source_declares_conversion(self):
+        rows=_reference_paper_sources(['First page unchanged','Energy E\x00 remains undecoded'])
+        self.assertEqual(rows[0]['text'],'First page unchanged')
+        self.assertEqual(rows[1]['text'],'Energy E\uFFFD remains undecoded')
+        self.assertIn('1 undecodable NUL glyph',rows[1]['locator'])
+        self.assertIn('original PDF retained',rows[1]['locator'])
+
 
 if __name__=='__main__':unittest.main()

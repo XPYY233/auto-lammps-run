@@ -371,9 +371,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                     connection_revision=max(1, revision), credential_generation=max(1, revision))
             except (TaskError, ValueError, OSError):
                 recoveries = []
+        history_reader = getattr(workbench_bridge, 'history_with_model_diagnostics', None)
+        messages = (history_reader(identifier, model_client.calls)
+                    if workbench_jobs and binding and model_client and callable(history_reader)
+                    else workbench_bridge.history(identifier) if workbench_jobs and binding else [])
         return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
             source_sha256=binding.pdf_sha256 if binding else None,
-            messages=workbench_bridge.history(identifier) if workbench_jobs and binding else [],
+            messages=messages,
             jobs=workbench_jobs.history(identifier) if workbench_jobs and binding else [],
             evidence=evidence, recoveries=recoveries,
             execution_authorized=False)

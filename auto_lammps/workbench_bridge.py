@@ -125,7 +125,7 @@ def _reference_paper_sources(pages):
     from .condition_generation import source_bundle
     if not isinstance(pages, (list, tuple)) or not pages:
         raise TaskError('缺少文献工作台的完整原文页。')
-    rows, blocks, texts, start, end = [], [], [], None, None
+    rows, blocks, texts, start, end, unknown_glyphs = [], [], [], None, None, {}
     for number, page in enumerate(pages, 1):
         if not isinstance(page, str):
             raise TaskError('文献原文页格式不完整。')
@@ -133,10 +133,15 @@ def _reference_paper_sources(pages):
             continue
         if len(page) > 24000:
             raise TaskError('单页完整原文超过目标分析来源容量；未截断原文。')
-        page = page.strip()
+        # A PDF can contain an undecodable glyph represented by NUL. Preserve
+        # its unknown status visibly rather than guessing or dropping a letter.
+        unknown_glyphs[number] = page.count('\x00')
+        page = page.replace('\x00', '\uFFFD').strip()
         if len(pages) <= 32:
+            note=(f' · {unknown_glyphs[number]} undecodable NUL glyph(s) marked U+FFFD; original PDF retained'
+                if unknown_glyphs[number] else '')
             rows.append(dict(id='paper-page-' + str(number), origin='paper',
-                locator='PDF page ' + str(number), text=page))
+                locator='PDF page ' + str(number)+note, text=page))
             continue
         if texts and len('\n\n'.join([*texts, page])) > 24000:
             blocks.append((start, end, '\n\n'.join(texts)));texts=[];start=None
@@ -144,8 +149,10 @@ def _reference_paper_sources(pages):
         end=number;texts.append(page)
     if texts:blocks.append((start, end, '\n\n'.join(texts)))
     for start,end,content in blocks:
+        count=sum(unknown_glyphs[n] for n in range(start,end+1) if n in unknown_glyphs)
+        note=(f' · {count} undecodable NUL glyph(s) marked U+FFFD; original PDF retained' if count else '')
         rows.append(dict(id=f'paper-pages-{start}-{end}',origin='paper',
-            locator=f'PDF pages {start}-{end}',text=content))
+            locator=f'PDF pages {start}-{end}'+note,text=content))
     return source_bundle(rows)
 
 
@@ -467,6 +474,50 @@ class WorkbenchExtractionBridge:
                 'ON r.id=i.id WHERE i.task_id=? ORDER BY i.rowid', (identifier,)).fetchall()
         return [json.loads(row['receipt']) if row['receipt'] else
             {**json.loads(row['intent']), 'state': 'unknown', 'automatic_retry': False} for row in rows]
+
+    @staticmethod
+    def _model_failure_details(record, calls):
+        """Read safe provider rejection evidence; never infer a retry permit."""
+        ids = record.get('model_request_ids')
+        if record.get('state') not in {'failed', 'failed_or_unknown'} or not isinstance(ids, list) or not ids:
+            return None
+        try:
+            base = {key: record[key] for key in
+                    ('task_id', 'paper_id', 'role', 'source_sha256', 'request_id')}
+            if base['role'] != HUMAN_ROLE or ids[-1] != sha256(canonical({**base, 'ordinal': len(ids)}))[:32]:
+                return None
+            saved = calls.lookup(ids[-1]) or {}
+            receipt = saved.get('receipt') or {}
+            identity = (receipt.get('scientific_adapter') or {}).get('identity') or {}
+            status = receipt.get('http_status')
+            if (receipt.get('state') != 'rejected' or type(status) is not int or not 400 <= status <= 599
+                    or receipt.get('transport_attempts') != 1 or receipt.get('provider') != 'deepseek'
+                    or receipt.get('purpose') != 'literature_workbench_extraction'
+                    or receipt.get('request_sha256') != saved.get('request_sha256')
+                    or any(identity.get(key) != value for key, value in base.items())):
+                return None
+            reasons = {401: '身份验证失败，请检查本项目 API 连接',
+                       402: '账户余额不足，请补足本项目 API 账户余额',
+                       403: '账户权限不足，请检查模型访问权限',
+                       429: '请求受到限流，请稍后核对再继续'}
+            reason = reasons.get(status, '供应商未接受本次请求，请核对服务状态')
+            return dict(http_status=status, state='rejected', transport_attempts=1,
+                error_code='provider_insufficient_balance' if status == 402 else 'provider_rejected',
+                message=f'DeepSeek 拒绝本次提取请求（HTTP {status}）：{reason}。'
+                    '已保存答复、断点及失败记录保留；未发布 P，没有自动重试。')
+        except (ValueError, KeyError, TypeError, OSError):
+            return None
+
+    def history_with_model_diagnostics(self, identifier, calls):
+        """Project bound ledger diagnostics without rewriting old receipts."""
+        records = self.history(identifier)
+        for record in records:
+            failure = self._model_failure_details(record, calls)
+            if failure:
+                record['provider_failure'] = failure
+                record['original_error'] = record.get('error')
+                record['error'] = failure['message']
+        return records
 
     @staticmethod
     def _request(db, request_id):

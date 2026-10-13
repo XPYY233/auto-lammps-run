@@ -37,6 +37,18 @@ test('unknown model request blocks new calls while history remains visible',asyn
  const run=f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇');assert.equal(run.disabled,true);await run.onclick();
  assert.equal(f.calls.filter(c=>c.data).length,0);
 });
+test('supplier rejection is visible and does not dispatch a retry on display',async()=>{
+ const f=setup([{state:'rejected',document:{message:'账户余额不足，请先处理 API 账户'}}]);await f.sandbox.appendPaperRecommendations();
+ assert.ok(f.all().some(e=>e.textContent==='模型服务拒绝请求'));
+ assert.ok(f.all().some(e=>e.textContent==='账户余额不足，请先处理 API 账户'));
+ assert.equal(f.calls.filter(c=>c.data).length,0);
+});
+test('historical attempted call is not displayed as unsent and prevents replay',async()=>{
+ const f=setup([{state:'attempted',original_state:'not_sent'}]);await f.sandbox.appendPaperRecommendations();
+ assert.ok(f.all().some(e=>e.textContent==='模型请求已尝试，未取得有效答复'));
+ const run=f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇');assert.equal(run.disabled,true);await run.onclick();
+ assert.equal(f.calls.filter(c=>c.data).length,0);
+});
 test('original three-request cap is not reset on page rerender',async()=>{
  const f=setup([{state:'invalid_output'},{state:'not_sent'},{state:'completed'}]);await f.sandbox.appendPaperRecommendations();await f.sandbox.appendPaperRecommendations();
  assert.equal(f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇').disabled,true);

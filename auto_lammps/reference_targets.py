@@ -473,6 +473,8 @@ class ReferenceTargetAnalysis:
                     unavailable = None
                 except ReferenceTargetUnavailable as error:
                     unavailable = (error.code, str(error))
+                except TaskError:
+                    unavailable = ('target_preflight_invalid', '目标核定发送前的文献来源或连接检查未通过；未发送或收费。')
                 except Exception:
                     unavailable = ('target_preflight_unavailable', 'P 来源、参考连接或主动 Adapter 尚未通过核验；未发送或收费。')
                 if unavailable:

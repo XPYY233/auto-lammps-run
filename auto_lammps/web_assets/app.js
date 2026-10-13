@@ -1540,7 +1540,7 @@ async function appendPaperRecommendations(){
  let records=[];
  try{records=(await api('/api/paper-recommendations/'+scope)).history||[];}catch(error){if(alive())body.append(node('p','推荐记录暂不可读取；先刷新记录，未发送新请求。','form-note'));return;}
  if(!alive())return;
- const labels={completed:'应用 AI 已推荐候选',unavailable:'现有目录没有符合条件的成套候选',not_sent:'模型请求未发送',invalid_output:'模型推荐未通过来源核验',source_unavailable:'推荐来源版本已变化',connection_changed:'模型连接已变化',failed_or_unknown:'模型请求状态待核对',unknown:'模型请求状态待核对'};
+ const labels={completed:'应用 AI 已推荐候选',unavailable:'现有目录没有符合条件的成套候选',not_sent:'模型请求未发送',rejected:'模型服务拒绝请求',attempted:'模型请求已尝试，未取得有效答复',invalid_output:'模型推荐未通过来源核验',source_unavailable:'推荐来源版本已变化',connection_changed:'模型连接已变化',failed_or_unknown:'模型请求状态待核对',unknown:'模型请求状态待核对'};
  for(const record of records){
   const item=node('article');item.append(node('h3',labels[record.state]||record.state),node('p',record.question||''));
   const result=record.document||{};if(result.message)item.append(node('p',result.message));
@@ -1554,7 +1554,7 @@ async function appendPaperRecommendations(){
   if(record.usage?.total_tokens)item.append(node('p','已记录模型用量：'+record.usage.total_tokens+' tokens','form-note'));
   body.append(item);
  }
- const unresolved=records.some(record=>['unknown','failed_or_unknown'].includes(record.state));
+ const unresolved=records.some(record=>['unknown','failed_or_unknown','attempted'].includes(record.state));
  const field=node('textarea');field.id='paper-recommendation-question';field.maxLength=1000;field.setAttribute('aria-label','论文推荐要求');field.value=records.at(-1)?.question||'请推荐下一篇用于完整 P–A–B 验证的论文。优先作者 LAMMPS 工作流、势函数、元素映射和许可已配对、原文条件与源码无已知冲突的候选；明确仍待核验的正文及资源缺项。';
  const excluded=(paperOverviewCatalog?.result?.papers||[]).filter(p=>p.selection==='selected').map(p=>p.doi).filter(Boolean);
  body.append(node('label','论文推荐要求'),field,node('p','本次默认排除已选论文：'+(excluded.join('、')||'无')+'。每组推荐最多三次；未知请求不自动重发。','form-note'));
