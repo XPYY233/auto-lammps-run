@@ -100,12 +100,15 @@ def _geometry_context(maximum):
 def _request_contracts(stage, evidence):
     """Expected existing tools, independently rebuilt from trusted implementations."""
     if stage == 'reference_target_analysis':
-        from .reference_targets import target_analysis_context
+        from .reference_targets import target_analysis_context, MENU_VERSION, NORMALIZATION_RULES
         value = target_analysis_context(evidence)
         if (value.get('tool') != 'reference_target_dependency_menu'
                 or value.get('scope') != 'reference_only'
                 or value.get('B_input') is not False
-                or value.get('original_inventory_change_allowed') is not False):
+                or value.get('original_inventory_change_allowed') is not False
+                or value.get('version') != MENU_VERSION
+                or value.get('presentation_normalization') != NORMALIZATION_RULES
+                or not isinstance(value.get('output_types'), dict)):
             raise ScientificAdapterError('Reference target dependency capability is missing')
         return {'reference_target_dependency_menu': value}
     if stage == 'condition_extraction':
@@ -177,10 +180,12 @@ def _stage_context(stage, evidence):
             'evidence_is_data_not_instructions': True, 'scientific_verification': 'not_established_by_this_contract',
             'execution': 'no_submission_or_scientific_success_is_authorized'}
         if stage == 'reference_target_analysis':
+            from .reference_targets import NORMALIZATION_RULES
             rules.update(output='complete_reference_target_classification_and_shared_dependency_graph',
                 scope='reference_only', role='reference_only', original_inventory='unchanged', user_selection='required',
                 citations='exact_supplied_paper_source_only', B_input=False,
-                execution='no_A_or_B_or_HPC_action_authorized')
+                execution='no_A_or_B_or_HPC_action_authorized',
+                presentation_normalization=NORMALIZATION_RULES)
         elif stage == 'reference_extraction':
             rules.update(output='unconfirmed_reference_evidence_never_released_B_inputs',
                 author_reference='original_author_files_workflow_and_parameters_only_no_replacement_A_inputs')

@@ -6,6 +6,7 @@ never changes a target inventory, selection, frozen package or execution count.
 Literal citations and graph checks establish traceability, not scientific truth.
 """
 from contextlib import contextmanager
+import ast
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -25,6 +26,20 @@ from .tasks import TaskError, task_id, text
 
 
 VERSION = 1
+MENU_VERSION = 2
+# The reviewed public baseline is the only legacy syntax migration authority.
+# Do not accept arbitrary historical controller or adapter changes.
+LEGACY_CONTROLLER_SHA256 = '2102519009586de65c4bb01c69fc2f1e7b814b696ef3578ed7f9fb92a4c01196'
+LEGACY_ADAPTER_SHA256 = 'e1e23ab9810f6975334b3edcc17ac3d32092f678ce004a8bb17a5f381368c12a'
+LEGACY_SEMANTICS_SHA256 = '3cabefd19c616d282f55c5d7873ae5fbba36f035c04e3fc93ada772d7ffad0f1'
+NORMALIZATION_RULES = dict(version=1, operation='nonempty_string_to_exact_singleton_string_list',
+    paths=['targets[].missing', 'dependencies[].missing', 'limitations'],
+    max_characters=2000, missing_max_items=64, limitations_max_items=128,
+    empty_string_allowed=False, original_model_output='immutable', semantic_changes_allowed=False)
+FORMAT_INSTRUCTION = (' Missing and limitations are string lists (missing: at most 64 items; limitations: '
+    'at most 128), with each nonempty string at most 2000 characters. A nonempty short string in only '
+    'these fields is accepted as an exact singleton list; no text, citation, number, target or graph '
+    'is repaired or inferred. Follow every field type and bound in reference_target_dependency_menu.output_types.')
 STAGE = 'reference_target_analysis'
 MAX_SUGGESTIONS = 3
 DATA_CLASSES = {'raw_lammps', 'postprocessing', 'analytical', 'cited', 'unclear'}
@@ -102,7 +117,23 @@ def reference_target_input(value):
 def target_analysis_context(evidence):
     """Fixed-ID capability used by the mandatory application stage adapter."""
     value = reference_target_input(evidence)
-    return dict(tool='reference_target_dependency_menu', version=VERSION,
+    string = lambda maximum: dict(type='string', minLength=1, maxLength=maximum)
+    citations = dict(type='array', maxItems=32, uniqueItems=True, items=dict(type='object',
+        additionalProperties=False, required=['source_id','quote'], properties=dict(
+            source_id=dict(type='string', enum=[row['id'] for row in value['sources']]), quote=string(6000))))
+    links = dict(type='array', maxItems=512, uniqueItems=True, items=string(80))
+    missing = dict(oneOf=[dict(type='array', maxItems=64, items=string(2000)), string(2000)])
+    target = dict(type='object', additionalProperties=False,
+        required=['target_id','data_class','priority','reason','citations','dependency_ids','missing'],
+        properties=dict(target_id=dict(type='string',enum=[r['id'] for r in value['inventory']['targets']]),
+            data_class=dict(type='string',enum=sorted(DATA_CLASSES)),priority=dict(type='integer',enum=[1,2,3]),
+            reason=string(2000),citations=citations,dependency_ids=links,missing=missing))
+    dependency = dict(type='object',additionalProperties=False,
+        required=['id','data_class','label','description','requires','citations','missing'],
+        properties=dict(id=dict(**string(80),pattern='^[a-zA-Z0-9][a-zA-Z0-9_.-]*$'),
+            data_class=dict(type='string',enum=sorted(DATA_CLASSES)),label=string(500),description=string(4000),
+            requires=links,citations=citations,missing=missing))
+    return dict(tool='reference_target_dependency_menu', version=MENU_VERSION,
         source_sha256=sha256(Path(__file__).read_bytes()), scope='reference_only', B_input=False,
         inventory_sha256=sha256(canonical(value['inventory'])),
         target_ids=[row['id'] for row in value['inventory']['targets']],
@@ -114,6 +145,12 @@ def target_analysis_context(evidence):
                                   'dependency_ids', 'missing'],
             'dependencies': ['id', 'data_class', 'label', 'description', 'requires', 'citations', 'missing'],
             'limitations': 'list_of_specific_limitations'},
+        output_types=dict(type='object',additionalProperties=False,required=['targets','dependencies','limitations'],
+            properties=dict(targets=dict(type='array',minItems=len(value['inventory']['targets']),
+                maxItems=len(value['inventory']['targets']),items=target),
+                dependencies=dict(type='array',maxItems=512,items=dependency),
+                limitations=dict(oneOf=[dict(type='array',maxItems=128,items=string(2000)),string(2000)]))),
+        presentation_normalization=deepcopy(NORMALIZATION_RULES),
         priority_values=[1, 2, 3], maximum_dependencies=512,
         unknown_method='unclear_with_specific_missing_evidence',
         scientific_verification='not_performed', user_selection_required=True,
@@ -121,9 +158,47 @@ def target_analysis_context(evidence):
 
 
 def _strings(value, limit=2000, count=64):
+    if isinstance(value, str):
+        text(value, limit)
+        return [value]
     if not isinstance(value, list) or len(value) > count:
         raise TaskError('建议中的缺项或限制列表无效。')
     return [text(item, limit) for item in value]
+
+
+def normalize_target_presentation(value):
+    """Record an exact container conversion; never modify the model receipt."""
+    normalized, changes = deepcopy(value), []
+    if isinstance(value, dict):
+        for section in ('targets', 'dependencies'):
+            rows = value.get(section)
+            if not isinstance(rows, list): continue
+            for index, row in enumerate(rows):
+                if isinstance(row, dict) and isinstance(row.get('missing'), str):
+                    converted = _strings(row['missing'])
+                    normalized[section][index]['missing'] = converted
+                    changes.append(dict(path=[section,index,'missing'], operation='string_to_singleton_list',
+                        original=row['missing'], normalized=converted))
+        if isinstance(value.get('limitations'), str):
+            converted = _strings(value['limitations'], count=128)
+            normalized['limitations'] = converted
+            changes.append(dict(path=['limitations'], operation='string_to_singleton_list',
+                original=value['limitations'], normalized=converted))
+    return normalized, dict(rules=deepcopy(NORMALIZATION_RULES), rules_sha256=sha256(canonical(NORMALIZATION_RULES)),
+        source_output_sha256=sha256(canonical(value)), normalized_output_sha256=sha256(canonical(normalized)),
+        changed_fields=changes, semantic_changes=False)
+
+
+def _review_semantics_sha256():
+    """Legacy semantic checks must be bytecode-independent and unchanged."""
+    names=('reference_target_input','_strings','_references','_classification','validate_target_analysis')
+    nodes={n.name:n for n in ast.parse(Path(__file__).read_text()).body
+        if isinstance(n,ast.FunctionDef) and n.name in names}
+    approved=ast.parse('if isinstance(value, str):\n    text(value, limit)\n    return [value]\n').body[0]
+    first=nodes['_strings'].body[0]
+    if ast.dump(first,include_attributes=False)==ast.dump(approved,include_attributes=False):
+        nodes['_strings'].body=nodes['_strings'].body[1:]
+    return sha256(canonical([ast.dump(nodes[name],include_attributes=False) for name in names]))
 
 
 def _references(value, allowed, owner):
@@ -248,7 +323,13 @@ class ReferenceTargetAnalysis:
                 'document TEXT NOT NULL, PRIMARY KEY(id,sequence))')
             db.execute('CREATE TABLE IF NOT EXISTS reference_target_receipts (id TEXT PRIMARY KEY REFERENCES '
                 'reference_target_intents(id), document TEXT NOT NULL, document_sha256 TEXT NOT NULL)')
-            for table in ('reference_target_scopes', 'reference_target_intents', 'reference_target_events', 'reference_target_receipts'):
+            db.execute('CREATE TABLE IF NOT EXISTS reference_target_reviews (id TEXT PRIMARY KEY, '
+                'task_id TEXT NOT NULL REFERENCES reference_target_scopes(task_id), '
+                'parent_request TEXT NOT NULL REFERENCES reference_target_intents(id), rules_sha256 TEXT NOT NULL, '
+                'document TEXT NOT NULL, document_sha256 TEXT NOT NULL, at TEXT NOT NULL, '
+                'UNIQUE(parent_request,rules_sha256))')
+            for table in ('reference_target_scopes', 'reference_target_intents', 'reference_target_events',
+                          'reference_target_receipts','reference_target_reviews'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} '
                         "BEGIN SELECT RAISE(ABORT, 'immutable reference target history'); END")
@@ -313,7 +394,31 @@ class ReferenceTargetAnalysis:
             scientific_adapter=context['scientific_adapter'],
             paper=(context['input'] or {}).get('paper'), events=events, receipt=receipt,
             report=receipt.get('report') if receipt else None, usage=receipt.get('usage') if receipt else None,
-            can_select=False, selection_note='建议仅供参考；本服务不选择、冻结或发布任何 A/B 输入。')
+            can_select=False, selection_note='建议仅供参考；本服务不选择、冻结或发布任何 A/B 输入。',
+            reviews=self.reviews(identifier, request_id))
+
+    def reviews(self, identifier, parent_request):
+        """Read appended reviews without consulting model credentials."""
+        with self.tasks.transaction() as db:
+            self._task(db,identifier)
+            rows=db.execute('SELECT * FROM reference_target_reviews WHERE task_id=? AND parent_request=? '
+                'ORDER BY at,id',(identifier,task_id(parent_request))).fetchall()
+        result=[]
+        for row in rows:
+            value=json.loads(row['document'])
+            if (sha256(canonical(value))!=row['document_sha256'] or value['task_id']!=identifier
+                    or value['parent_request']!=parent_request or value['review_id']!=row['id']
+                    or value['normalization_rules_sha256']!=row['rules_sha256']):
+                raise TaskError('保存答复的复核摘要或身份不一致。')
+            if value['state']=='completed':
+                try:
+                    source=self._input(identifier,active=False)
+                    if sha256(canonical(source))!=value['input_sha256']:
+                        value={**value,'original_state':'completed','state':'source_unavailable'}
+                except Exception:
+                    value={**value,'original_state':'completed','state':'source_unavailable'}
+            result.append(value)
+        return result
 
     def history(self, identifier):
         with self.tasks.transaction() as db:
@@ -373,6 +478,7 @@ class ReferenceTargetAnalysis:
             'authorize A/B. Reasons, missing and limitations should use concise Chinese.')),
             dict(role='user', content=canonical({**evidence,
                 'reference_target_dependency_menu': target_analysis_context(evidence)}).decode())]
+        messages[0]['content'] += FORMAT_INSTRUCTION
         messages, proof = prepare_stage_messages(STAGE, messages, evidence)
         validate_prepared_messages(STAGE, messages, evidence)
         body = request_body(client.calls.config, messages, model=client.model, thinking=client.thinking)
@@ -392,11 +498,12 @@ class ReferenceTargetAnalysis:
             else: yield True
         finally: os.close(fd)
 
-    def _finish(self, identifier, request_id, state, *, report=None, model_receipt=None, code=None, message=''):
+    def _finish(self, identifier, request_id, state, *, report=None, model_receipt=None, code=None, message='', normalization=None):
         model_receipt = {key: value for key, value in (model_receipt or {}).items() if key in _MODEL_RECEIPT_FIELDS}
         receipt = dict(**_FLAGS, request_id=request_id, task_id=identifier, state=state, report=report,
             model_receipt=model_receipt, usage=model_receipt.get('usage'), error_code=code, message=message,
             at=datetime.now(timezone.utc).isoformat())
+        if normalization is not None: receipt['normalization']=normalization
         with self.tasks.transaction() as db:
             if not db.execute('SELECT 1 FROM reference_target_receipts WHERE id=?', (request_id,)).fetchone():
                 db.execute('INSERT INTO reference_target_receipts VALUES (?,?,?)',
@@ -412,18 +519,124 @@ class ReferenceTargetAnalysis:
                 or receipt.get('output_sha256') != sha256(canonical(receipt.get('structured_output')))):
             return self._finish(identifier, request_id, 'unknown', model_receipt=receipt,
                 code='model_receipt_binding_invalid', message='原模型回执与固定请求不一致；未重新发送。')
+        normalization=None
         try:
+            _normalized, normalization=normalize_target_presentation(receipt['structured_output'])
             report = validate_target_analysis(context['input'], receipt['structured_output'])
         except ReferenceTargetUnavailable as error:
             return self._finish(identifier, request_id, 'unavailable', model_receipt=receipt,
-                code=error.code, message=str(error))
+                code=error.code, message=str(error), normalization=normalization)
         except TaskError as error:
             return self._finish(identifier, request_id, 'invalid_output', model_receipt=receipt,
-                code='target_output_invalid', message=str(error))
+                code='target_output_invalid', message=str(error), normalization=normalization)
         except (ValueError, KeyError, TypeError):
             return self._finish(identifier, request_id, 'invalid_output', model_receipt=receipt,
                 code='target_output_invalid', message='完整目标覆盖、方法依据或共享依赖未通过检查；原回复和费用保留。')
-        return self._finish(identifier, request_id, 'completed', report=report, model_receipt=receipt)
+        return self._finish(identifier, request_id, 'completed', report=report, model_receipt=receipt,
+            normalization=normalization)
+
+    @staticmethod
+    def _legacy_context(current, client):
+        """Reconstruct the exact pinned baseline contract, never a loose projection."""
+        value=deepcopy(current)
+        value['controller_sha256']=LEGACY_CONTROLLER_SHA256
+        if value['messages'][0]['content'].count(FORMAT_INSTRUCTION)!=1:
+            raise TaskError('原语法契约无法精确核对。')
+        value['messages'][0]['content']=value['messages'][0]['content'].replace(FORMAT_INSTRUCTION,'')
+        payload=json.loads(value['messages'][-1]['content'])
+        menu=payload['reference_target_dependency_menu']
+        menu['version']=VERSION;menu['source_sha256']=LEGACY_CONTROLLER_SHA256
+        menu.pop('output_types');menu.pop('presentation_normalization')
+        adapter=payload['scientific_adapter']
+        adapter['source_sha256']=LEGACY_ADAPTER_SHA256
+        adapter['rules'].pop('presentation_normalization')
+        adapter['capabilities']['reference_target_dependency_menu']={'contract_sha256':sha256(canonical(menu))}
+        value['messages'][-1]['content']=canonical(payload).decode()
+        value['scientific_adapter']={'name':adapter['name'],'version':adapter['version'],'stage':STAGE,
+            'contract_sha256':sha256(canonical(adapter)),'evidence_sha256':adapter['evidence_sha256'],
+            'input_check':'passed','scientific_status':'not_evaluated'}
+        value['request_sha256']=sha256(request_body(client.calls.config,value['messages'],
+            model=client.model,thinking=client.thinking))
+        return value
+
+    def review_existing(self, identifier, parent_request, client, *, connection_revision, credential_generation):
+        """One append-only, zero-model review of a known complete saved response."""
+        task_id(identifier);task_id(parent_request)
+        with self._lease(identifier) as acquired:
+            if not acquired: raise TaskError('同一任务正在核定或复核；未调用模型。')
+            saved=self._stored(identifier,parent_request)
+            if saved is None or saved[2] is None or saved[2]['state'] not in {'invalid_output','unavailable'}:
+                raise TaskError('只复核原已知失败的完整保存答复；未知请求不能恢复或重发。')
+            row,context,parent_receipt,_events=saved
+            with self.tasks.transaction() as db:
+                if db.execute('SELECT 1 FROM reference_target_intents i LEFT JOIN reference_target_receipts r '
+                        'ON r.id=i.id WHERE i.task_id=? AND (r.id IS NULL OR json_extract(r.document,"$.state")="unknown")',
+                        (identifier,)).fetchone():
+                    raise TaskError('本任务另有未知目标请求；请先核对，未调用模型。')
+            try:
+                current=self._context(identifier,client,connection_revision,credential_generation)
+                expected=(current if context.get('controller_sha256')==current['controller_sha256'] else
+                    self._legacy_context(current,client))
+                if (_review_semantics_sha256()!=LEGACY_SEMANTICS_SHA256 or context!=expected):
+                    raise ValueError('context mismatch')
+                call=client.calls.lookup(parent_request) or {}
+                receipt=call.get('receipt') or {}
+                usage=receipt.get('usage') or {}
+                if (call.get('request_sha256')!=context['request_sha256']
+                        or receipt.get('request_sha256')!=context['request_sha256']
+                        or receipt.get('state')!='completed' or receipt.get('http_status')!=200
+                        or receipt.get('finish_reason')!='stop' or receipt.get('provider')!='deepseek'
+                        or receipt.get('requested_model')!=context['model_binding']['model']
+                        or receipt.get('transport_attempts')!=1
+                        or _HASH.fullmatch(str(receipt.get('response_sha256'))) is None
+                        or receipt.get('output_sha256')!=sha256(canonical(receipt.get('structured_output')))
+                        or {k:v for k,v in receipt.items() if k in _MODEL_RECEIPT_FIELDS}!=parent_receipt['model_receipt']
+                        or any(type(usage.get(k)) is not int or usage[k]<0
+                            for k in ('prompt_tokens','completion_tokens','total_tokens'))
+                        or usage['total_tokens']!=usage['prompt_tokens']+usage['completion_tokens']):
+                    raise ValueError('receipt mismatch')
+            except Exception:
+                raise TaskError('原来源、模型、账本、语法契约或完整 HTTP 回执未精确核对；未调用模型。') from None
+            rules_sha=sha256(canonical(NORMALIZATION_RULES))
+            previous=[r for r in self.reviews(identifier,parent_request)
+                if r['normalization_rules_sha256']==rules_sha]
+            if previous:return previous[0]
+            report,normalization,state,code,message=None,None,'invalid_output','target_output_invalid',''
+            try:
+                _normalized,normalization=normalize_target_presentation(receipt['structured_output'])
+                report=validate_target_analysis(context['input'],receipt['structured_output'])
+                if not normalization['changed_fields']:
+                    state,code,message='unavailable','presentation_repair_unavailable','保存答复没有本规范允许的字符串呈现修复。'
+                    report=None
+                else:
+                    state,code='completed',None
+                    message='仅规范化保存答复的列表呈现，建议可供参考；未重新调用模型或进行科学验收。'
+            except ReferenceTargetUnavailable as error:
+                state,code,message='unavailable',error.code,str(error)
+            except TaskError as error:
+                message=str(error)
+            except (ValueError,KeyError,TypeError):
+                message='保存答复的完整目标、方法依据或共享依赖未通过检查；未修补科学内容。'
+            try:
+                if self._context(identifier,client,connection_revision,credential_generation)!=current:
+                    raise ValueError('context changed')
+            except Exception:
+                raise TaskError('复核期间来源或模型配置已变化；未追加成功建议。') from None
+            review=dict(**_FLAGS,review_id=sha256(canonical(dict(task=identifier,parent=parent_request,rules=rules_sha)))[:32],
+                task_id=identifier,parent_request=parent_request,state=state,report=report,normalization=normalization,
+                error_code=code,message=message,new_model_calls=0,new_model_cost=0,suggestion_count_refunded=False,
+                normalization_rules_sha256=rules_sha,parent_context_sha256=row['document_sha256'],
+                parent_receipt_sha256=row['receipt_sha256'],parent_model_receipt_sha256=sha256(canonical(receipt)),
+                source_output_sha256=receipt['output_sha256'],original_model_request_sha256=context['request_sha256'],
+                input_sha256=sha256(canonical(context['input'])),
+                current_context_sha256=sha256(canonical(current)),semantic_validator_sha256=LEGACY_SEMANTICS_SHA256,
+                at=datetime.now(timezone.utc).isoformat())
+            with self.tasks.transaction() as db:
+                self._task(db,identifier,active=True)
+                db.execute('INSERT INTO reference_target_reviews VALUES (?,?,?,?,?,?,?)',
+                    (review['review_id'],identifier,parent_request,rules_sha,canonical(review).decode(),
+                        sha256(canonical(review)),review['at']))
+            return self.reviews(identifier,parent_request)[-1]
 
     def analyze(self, identifier, request_id, client, *, connection_revision, credential_generation):
         task_id(identifier); task_id(request_id)
