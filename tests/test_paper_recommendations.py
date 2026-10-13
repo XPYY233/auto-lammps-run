@@ -566,7 +566,7 @@ class PaperRecommendationTests(unittest.TestCase):
         model_before = self.calls.history()
         with patch.object(self.connections, '_read', side_effect=AssertionError('No key for history')):
             result = self.service.history(self.scope)[0]
-            self.assertEqual(result['state'], 'failed_or_unknown')
+            self.assertEqual(result['state'], 'attempted')
             self.assertEqual(result['original_state'], 'not_sent')
             self.assertEqual(result['original_document']['error_code'], 'selection_invalid')
             self.assertEqual(result['document']['error_code'], 'legacy_request_attempted')

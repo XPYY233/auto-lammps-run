@@ -236,7 +236,7 @@ class PaperRecommendations:
                 # Correct only the read projection. Old immutable reports and
                 # charges remain intact; a neighbouring HTTP error is no proof
                 # of this request's lost status or usage.
-                state, original_document = 'failed_or_unknown', document
+                state, original_document = 'attempted', document
                 document = {'error_code': 'legacy_request_attempted',
                     'message': '原账本证明已尝试请求，但没有有效答复；旧记录未保留 HTTP 状态，请先核对，未重发。'}
                 diagnostics = {**diagnostics, 'transport_attempts': 1, 'http_status': None,
