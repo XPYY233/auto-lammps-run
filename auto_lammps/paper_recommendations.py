@@ -31,6 +31,9 @@ _IDENTITY = re.compile('[a-f0-9]{64}')
 _PRIVATE_LOCATION = re.compile(r'/(?:Users|home|private|tmp|var|etc|usr|root|Applications|Library|System)/|file:|sqlite:|(?<![A-Za-z0-9])[A-Za-z]:[\\/]', re.I)
 _UNDECLARED_LICENSES = {'', 'noassertion', 'none', '未声明', '未知', 'unknown',
     'undeclared', 'unlicensed', 'not declared', 'not specified', 'unspecified'}
+_RESOLVED_STATES = {'completed', 'unavailable', 'not_sent', 'invalid_output',
+                    'source_unavailable', 'connection_changed', 'rejected'}
+_RECORDED_TERMINAL_STATES = _RESOLVED_STATES | {'failed_or_unknown', 'attempted', 'receipt_unavailable'}
 
 
 def _license_declared(value):
@@ -202,7 +205,11 @@ class PaperRecommendations:
             db.execute('CREATE TABLE IF NOT EXISTS paper_recommendation_receipts '
                        '(id TEXT PRIMARY KEY REFERENCES paper_recommendation_intents(id), state TEXT NOT NULL, '
                        'document TEXT NOT NULL, usage TEXT NOT NULL, output TEXT, diagnostics TEXT NOT NULL)')
-            for table in ('paper_recommendation_scopes', 'paper_recommendation_intents', 'paper_recommendation_receipts'):
+            db.execute('CREATE TABLE IF NOT EXISTS paper_recommendation_recoveries '
+                       '(scope_id TEXT PRIMARY KEY REFERENCES paper_recommendation_scopes(id), '
+                       'document TEXT NOT NULL, at TEXT NOT NULL)')
+            for table in ('paper_recommendation_scopes', 'paper_recommendation_intents',
+                          'paper_recommendation_receipts', 'paper_recommendation_recoveries'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} '
                                "BEGIN SELECT RAISE(ABORT, 'immutable recommendation history'); END")
@@ -278,6 +285,112 @@ class PaperRecommendations:
     def _item(self, scope_id, request_id):
         return next(item for item in self.history(scope_id) if item['id'] == request_id)
 
+    @staticmethod
+    def _scope_rows(db, scope_id):
+        return db.execute('SELECT i.*,r.state,r.document,r.usage,r.diagnostics '
+            'FROM paper_recommendation_intents i LEFT JOIN paper_recommendation_receipts r '
+            'ON r.id=i.id WHERE i.scope_id=? ORDER BY i.at,i.id', (scope_id,)).fetchall()
+
+    def _request_state(self, row):
+        original = row['state'] or 'unknown'
+        return 'attempted' if original == 'not_sent' and self._legacy_request_attempted(row) else original
+
+    def _scope_status(self, db, scope_id):
+        scope = db.execute('SELECT * FROM paper_recommendation_scopes WHERE id=?', (scope_id,)).fetchone()
+        rows = self._scope_rows(db, scope_id)
+        saved = db.execute('SELECT document FROM paper_recommendation_recoveries WHERE scope_id=?',
+                           (scope_id,)).fetchone()
+        recovery = json.loads(saved['document']) if saved else None
+        base_limit = scope['max_requests'] if scope else self.max_requests_per_scope
+        limit = recovery['max_requests'] if recovery else base_limit
+        isolated = recovery['isolated_unresolved_request_ids'] if recovery else []
+        unresolved = [row['id'] for row in rows if row['id'] not in isolated
+                      and self._request_state(row) not in _RESOLVED_STATES]
+        used = len(rows)
+        return {'scope_id': scope_id, 'scope': 'reference_only', 'role': 'reference_only',
+                'max_requests': limit, 'original_max_requests': base_limit, 'used_requests': used,
+                'remaining_requests': max(0, limit-used), 'recovery_authorized': bool(recovery),
+                'recovery': recovery, 'isolated_unresolved_request_ids': isolated,
+                'blocked_by_unresolved': bool(unresolved), 'unresolved_request_ids': unresolved,
+                'can_request': used < limit and not unresolved,
+                'execution_authorized': False, 'B_input': False}
+
+    def scope_status(self, scope_id):
+        """Read policy and request evidence without granting, credentials or AI."""
+        scope_id = _scope(scope_id)
+        with self.tasks.transaction() as db:
+            return self._scope_status(db, scope_id)
+
+    @staticmethod
+    def _bound_ids(values, *, required=None):
+        if (not isinstance(values, (tuple, list)) or len(values) > 3
+                or (required is not None and len(values) != required)):
+            raise TaskError('恢复授权必须绑定原有请求标识。')
+        result = sorted(task_id(value) for value in values)
+        if len(set(result)) != len(result):
+            raise TaskError('恢复授权的请求标识不可重复。')
+        return result
+
+    def grant_development_recovery(self, scope_id, prior_request_ids, *,
+                                   approval_sha256, additional_requests=3,
+                                   isolated_unresolved_request_ids=()):
+        """Trusted controller only; append one human-approved reference recovery.
+
+        This method has no public HTTP grant route. It neither replays prior
+        requests nor declares their transport, billing or science successful.
+        """
+        scope_id = _scope(scope_id)
+        prior = self._bound_ids(prior_request_ids, required=3)
+        isolated = self._bound_ids(isolated_unresolved_request_ids)
+        if (type(additional_requests) is not int or not 1 <= additional_requests <= 3
+                or not isinstance(approval_sha256, str) or not _IDENTITY.fullmatch(approval_sha256)
+                or not set(isolated).issubset(prior)):
+            raise TaskError('恢复授权需明确的人类批准摘要及最多三次新增请求。')
+        binding = {'version': 1, 'purpose': 'paper_recommendation_development_recovery',
+                   'scope_id': scope_id, 'scope': 'reference_only', 'role': 'reference_only',
+                   'prior_request_ids': prior, 'original_max_requests': 3,
+                   'additional_requests': additional_requests, 'max_requests': 3+additional_requests,
+                   'approval_sha256': approval_sha256,
+                   'isolated_unresolved_request_ids': isolated,
+                   'execution_authorized': False, 'B_input': False}
+        with self.tasks.transaction() as db:
+            saved = db.execute('SELECT document FROM paper_recommendation_recoveries WHERE scope_id=?',
+                               (scope_id,)).fetchone()
+            if saved:
+                existing = json.loads(saved['document'])
+                if any(existing.get(key) != value for key, value in binding.items()):
+                    raise TaskError('同一推荐任务已有其他恢复授权；不可再次追加或改绑。')
+                return self._scope_status(db, scope_id)
+            scope = db.execute('SELECT * FROM paper_recommendation_scopes WHERE id=?', (scope_id,)).fetchone()
+            rows = self._scope_rows(db, scope_id)
+            if (not scope or scope['kind'] != 'reference_only' or scope['max_requests'] != 3
+                    or sorted(row['id'] for row in rows) != prior):
+                raise TaskError('恢复授权只适用于同一推荐任务已用完的原三次请求。')
+            if any(row['state'] not in _RECORDED_TERMINAL_STATES for row in rows):
+                raise TaskError('原推荐请求尚未结束或没有回执；先核对，不增加请求。')
+            unresolved = {row['id'] for row in rows if self._request_state(row) not in _RESOLVED_STATES}
+            if unresolved != set(isolated):
+                raise TaskError('人类批准必须精确绑定全部待核对的旧请求；未隔离的请求仍阻止恢复。')
+            for row in rows:
+                if row['state'] == 'completed':
+                    try:
+                        fresh = self._fresh(json.loads(row['context']))
+                    except (TaskError, ValueError, TypeError, KeyError):
+                        fresh = False
+                    if fresh:
+                        raise TaskError('已有有效推荐，无需开发恢复；原请求与范围保留。')
+            document = {**binding, 'prior_records_sha256': sha256(canonical([dict(row) for row in rows]))}
+            db.execute('INSERT INTO paper_recommendation_recoveries VALUES (?,?,?)',
+                       (scope_id, canonical(document).decode(), datetime.now(timezone.utc).isoformat()))
+            return self._scope_status(db, scope_id)
+
+    @staticmethod
+    def _check_admission(status):
+        if status['blocked_by_unresolved']:
+            raise TaskError('已有推荐请求状态待核对；未重发，也不新增模型请求。')
+        if status['used_requests'] >= status['max_requests']:
+            raise TaskError('本推荐任务已达到原有调用次数上限；请查看已有推荐与失败记录。')
+
     def create(self, scope_id, request_id, provider, question, *, exclude_dois=()):
         scope_id, request_id = _scope(scope_id), task_id(request_id)
         exclude_dois = _exclusions(exclude_dois)
@@ -286,6 +399,8 @@ class PaperRecommendations:
             raise TaskError('候选推荐目前使用已连接的 DeepSeek 模型。')
         with self.tasks.transaction() as db:
             prior = db.execute('SELECT * FROM paper_recommendation_intents WHERE id=?', (request_id,)).fetchone()
+            if prior is None:
+                self._check_admission(self._scope_status(db, scope_id))
         if prior:
             if (prior['scope_id'], prior['provider'], prior['question']) != (scope_id, provider, question):
                 raise TaskError('请求标识已用于其他推荐内容。')
@@ -357,10 +472,7 @@ class PaperRecommendations:
             else:
                 db.execute('INSERT OR IGNORE INTO paper_recommendation_scopes VALUES (?,?,?,?)',
                            (scope_id, 'reference_only', self.max_requests_per_scope, at))
-                limit = db.execute('SELECT max_requests FROM paper_recommendation_scopes WHERE id=?', (scope_id,)).fetchone()[0]
-                count = db.execute('SELECT count(*) FROM paper_recommendation_intents WHERE scope_id=?', (scope_id,)).fetchone()[0]
-                if count >= limit:
-                    raise TaskError('本推荐任务已达到原有调用次数上限；请查看已有推荐与失败记录。')
+                self._check_admission(self._scope_status(db, scope_id))
                 db.execute('INSERT INTO paper_recommendation_intents VALUES (?,?,?,?,?,?,?,?,?,?)',
                            (request_id, scope_id, provider, value['model'] if value else '', question,
                             sha256(canonical(context)), canonical(context).decode(),

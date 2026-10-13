@@ -489,13 +489,14 @@ class PaperRecommendationTests(unittest.TestCase):
             with self.subTest(error_type=type(error)):
                 self.transport.side_effect = error
                 rid = f'{i+2:032x}'
-                result = self.create(request=rid)
+                scope = f'{i+5:032x}'
+                result = self.create(request=rid, scope=scope)
                 self.assertEqual(result['state'], 'failed_or_unknown')
                 self.assertEqual(result['document']['error_code'], 'request_failed_or_unknown')
                 self.assertEqual(result['diagnostics']['transport_attempts'], 1)
                 self.assertIsNone(result['diagnostics']['http_status'])
                 self.assertEqual(self.calls.lookup(rid)['receipt']['transport_attempts'], 1)
-                self.assertEqual(self.create(request=rid), result)
+                self.assertEqual(self.create(request=rid, scope=scope), result)
         self.assertEqual(self.transport.call_count, 2)
         self.assertNotIn('synthetic-connection-key', str(self.service.history(self.scope)))
 
@@ -514,7 +515,7 @@ class PaperRecommendationTests(unittest.TestCase):
             self.assertEqual(result['diagnostics']['request_outcome'], 'unknown')
             response.read.side_effect = None
             response.read.return_value = b'synthetic-connection-key malformed JSON'
-            invalid = self.create(request='3'*32)
+            invalid = self.create(request='3'*32, scope='3'*32)
             self.assertEqual(invalid['state'], 'invalid_output')
             self.assertEqual(invalid['diagnostics']['request_outcome'], 'response_invalid')
             self.assertEqual(invalid['diagnostics']['http_status'], 200)
@@ -523,7 +524,7 @@ class PaperRecommendationTests(unittest.TestCase):
             self.service = PaperRecommendations(self.tasks, self.connections, self.library)
             with patch.object(self.connections, '_read', side_effect=AssertionError('No key for history')):
                 self.assertEqual(self.create(), result)
-                self.assertEqual(self.create(request='3'*32), invalid)
+                self.assertEqual(self.create(request='3'*32, scope='3'*32), invalid)
         self.assertEqual(connection.request.call_count, 2)
         self.assertEqual(self.calls.status()['used_requests'], 2)
         self.assertNotIn('synthetic-connection-key', str(self.service.history(self.scope)) + str(self.calls.history()))
@@ -549,7 +550,7 @@ class PaperRecommendationTests(unittest.TestCase):
             'state': 'not_sent', 'transport_attempts': attempted, 'error_code': 'selection_invalid',
             'response_sha256': None, 'structured_output': None, 'usage': {}})
         with self.tasks.transaction() as db:
-            db.execute('INSERT INTO paper_recommendation_scopes VALUES (?,?,?,?)',
+            db.execute('INSERT OR IGNORE INTO paper_recommendation_scopes VALUES (?,?,?,?)',
                        (SCOPE_PREFIX+self.scope, 'reference_only', 3, 'synthetic'))
             db.execute('INSERT INTO paper_recommendation_intents VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (self.request, SCOPE_PREFIX+self.scope, 'deepseek-official', 'synthetic-model',
@@ -590,6 +591,292 @@ class PaperRecommendationTests(unittest.TestCase):
         self.legacy_intent(attempted=0)
         self.assertEqual(self.service.history(self.scope)[0]['state'], 'not_sent')
         self.transport.assert_not_called()
+
+
+class PaperRecommendationRecoveryTests(unittest.TestCase):
+    """Controller metadata only; all calls use synthetic transport."""
+    def setUp(self):
+        self.f = PaperRecommendationTests('test_scope_cap_cannot_reset_when_service_configuration_changes')
+        self.f.setUp()
+        self.addCleanup(self.f.doCleanups)
+        self.prior = ['a'*32, 'b'*32, self.f.request]
+        self.approval = 'c'*64
+
+    def fail_three(self, *, legacy=False):
+        self.f.transport.side_effect = None
+        self.f.transport.return_value = {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}],
+                                        'usage': {'total_tokens': 7}}
+        for request in self.prior[:2]:
+            self.assertEqual(self.f.create(request=request)['state'], 'invalid_output')
+        if legacy:
+            self.f.legacy_intent()
+            self.assertEqual(self.f.service.history(self.f.scope)[-1]['state'], 'attempted')
+        else:
+            self.assertEqual(self.f.create(request=self.prior[-1])['state'], 'invalid_output')
+
+    def grant(self, **changes):
+        values = {'approval_sha256': self.approval, 'additional_requests': 3,
+                  'isolated_unresolved_request_ids': ()}
+        scope = changes.pop('scope_id', self.f.scope)
+        prior = changes.pop('prior_request_ids', self.prior)
+        values.update(changes)
+        return self.f.service.grant_development_recovery(scope, prior, **values)
+
+    def snapshot(self):
+        with self.f.tasks.transaction() as db:
+            return {table: [tuple(row) for row in db.execute('SELECT * FROM '+table+' ORDER BY id')]
+                    for table in ('paper_recommendation_scopes', 'paper_recommendation_intents',
+                                  'paper_recommendation_receipts')}
+
+    def test_status_is_readonly_and_does_not_create_scope_or_read_key_or_authorize(self):
+        with patch.object(self.f.connections, '_read', side_effect=AssertionError('No credentials for status')):
+            status = self.f.service.scope_status(self.f.scope)
+            self.assertEqual(status, self.f.service.scope_status(SCOPE_PREFIX+self.f.scope))
+        self.assertEqual((status['max_requests'], status['used_requests']), (3, 0))
+        self.assertFalse(status['recovery_authorized'])
+        self.assertFalse(status['blocked_by_unresolved'])
+        self.assertFalse(status['execution_authorized'])
+        self.assertFalse(status['B_input'])
+        with self.f.tasks.transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM paper_recommendation_scopes').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM paper_recommendation_recoveries').fetchone()[0], 0)
+        self.f.transport.assert_not_called()
+        self.assertEqual(self.f.calls.status()['used_requests'], 0)
+
+    def test_append_recovery_exactly_binds_original_three_and_retains_all_history_charges(self):
+        self.fail_three()
+        before, charges = self.snapshot(), self.f.calls.history()
+        calls_before = self.f.transport.call_count
+        with patch.object(self.f.connections, '_read', side_effect=AssertionError('Grant reads no key')):
+            status = self.grant()
+        self.assertEqual((status['max_requests'], status['original_max_requests'], status['used_requests']), (6, 3, 3))
+        self.assertTrue(status['recovery_authorized'])
+        self.assertTrue(status['can_request'])
+        self.assertEqual(status['remaining_requests'], 3)
+        recovery = status['recovery']
+        self.assertEqual(recovery['prior_request_ids'], sorted(self.prior))
+        self.assertEqual(recovery['approval_sha256'], self.approval)
+        self.assertRegex(recovery['prior_records_sha256'], '^[a-f0-9]{64}$')
+        self.assertFalse(recovery['execution_authorized'])
+        self.assertFalse(recovery['B_input'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.f.calls.history(), charges)
+        self.assertEqual(self.f.transport.call_count, calls_before)
+        self.assertEqual(self.f.tasks.list(), [])
+
+    def test_recovery_new_request_uses_original_reference_pipeline_and_real_active_adapter(self):
+        self.fail_three()
+        before = self.f.calls.history()
+        self.grant()
+        self.f.preparer.stop()
+        self.f.transport.side_effect = self.f.response
+        result = self.f.create(request='d'*32)
+        self.assertEqual(result['state'], 'completed', result)
+        supplied = json.loads(self.f.transport.call_args.args[-1]['messages'][-1]['content'])
+        self.assertEqual(supplied['scientific_adapter']['stage'], 'paper_recommendation')
+        self.assertEqual(supplied['registered_paper_candidate_menu']['scope'], 'reference_only')
+        self.assertFalse(supplied['registered_paper_candidate_menu']['B_input'])
+        self.assertFalse(result['execution_ready'])
+        self.assertFalse(result['document']['B_input'])
+        self.assertEqual(self.f.calls.history()[:3], before)
+        self.assertEqual(self.f.calls.status()['used_requests'], 4)
+        self.assertEqual(self.f.service.scope_status(self.f.scope)['used_requests'], 4)
+        self.assertEqual(self.f.tasks.list(), [])
+
+    def test_bound_legacy_attempt_is_isolated_only_by_explicit_human_approval(self):
+        self.fail_three(legacy=True)
+        before, charges = self.snapshot(), self.f.calls.history()
+        status = self.f.service.scope_status(self.f.scope)
+        self.assertTrue(status['blocked_by_unresolved'])
+        self.assertEqual(status['unresolved_request_ids'], [self.f.request])
+        with self.assertRaises(TaskError):
+            self.grant()
+        with self.assertRaises(TaskError):
+            self.grant(isolated_unresolved_request_ids=[self.prior[0]])
+        status = self.grant(isolated_unresolved_request_ids=[self.f.request])
+        self.assertFalse(status['blocked_by_unresolved'])
+        self.assertEqual(status['isolated_unresolved_request_ids'], [self.f.request])
+        legacy = self.f.create()
+        self.assertEqual(legacy['state'], 'attempted')
+        self.assertEqual(legacy['original_state'], 'not_sent')
+        self.assertIsNone(legacy['diagnostics']['http_status'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.f.calls.history(), charges)
+        self.assertEqual(self.f.transport.call_count, 2)
+
+    def test_only_three_new_intents_allowed_and_restart_repeat_grant_cannot_add_more(self):
+        self.fail_three()
+        self.grant()
+        for index in range(3):
+            self.f.create(request=f'{index+40:032x}')
+        status = self.f.service.scope_status(self.f.scope)
+        self.assertEqual((status['used_requests'], status['max_requests'], status['remaining_requests']), (6, 6, 0))
+        self.f.service = PaperRecommendations(self.f.tasks, self.f.connections, self.f.library,
+                                              max_requests_per_scope=16)
+        self.assertEqual(self.grant(prior_request_ids=list(reversed(self.prior))), status)
+        with self.assertRaises(TaskError):
+            self.f.create(request='e'*32)
+        self.assertEqual(self.f.calls.status()['used_requests'], 6)
+        self.assertEqual(self.f.transport.call_count, 6)
+        with self.f.tasks.transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM paper_recommendation_recoveries').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT max_requests FROM paper_recommendation_scopes').fetchone()[0], 3)
+
+    def test_unknown_new_recovery_request_blocks_followups_even_if_old_unknown_is_isolated(self):
+        self.fail_three(legacy=True)
+        self.grant(isolated_unresolved_request_ids=[self.f.request])
+        self.f.transport.side_effect = TimeoutError('synthetic unknown outcome')
+        request = 'd'*32
+        result = self.f.create(request=request)
+        self.assertEqual(result['state'], 'failed_or_unknown')
+        status = self.f.service.scope_status(self.f.scope)
+        self.assertEqual(status['unresolved_request_ids'], [request])
+        self.assertTrue(status['blocked_by_unresolved'])
+        self.assertEqual(status['remaining_requests'], 2)
+        self.assertFalse(status['can_request'])
+        calls_before = self.f.calls.history()
+        self.f.service = PaperRecommendations(self.f.tasks, self.f.connections, self.f.library)
+        with patch.object(self.f.connections, '_read', side_effect=AssertionError('No key for blocked admission')):
+            self.assertEqual(self.f.create(request=request), result)
+            with self.assertRaises(TaskError):
+                self.f.create(request='e'*32)
+        self.assertEqual(self.f.calls.history(), calls_before)
+        self.assertEqual(self.f.transport.call_count, 3)
+        self.assertEqual(self.f.service.scope_status(self.f.scope)['used_requests'], 4)
+
+    def test_grant_rejects_wrong_ids_scope_approval_or_bounds_and_second_amendment(self):
+        self.fail_three()
+        invalid = [dict(prior_request_ids=self.prior[:2]),
+                   dict(prior_request_ids=[self.prior[0], self.prior[1], 'd'*32]),
+                   dict(prior_request_ids=[self.prior[0]]*3), dict(scope_id='f'*32),
+                   dict(approval_sha256='missing'), dict(additional_requests=4),
+                   dict(additional_requests=0), dict(additional_requests=True),
+                   dict(isolated_unresolved_request_ids=['e'*32])]
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(TaskError):
+                self.grant(**change)
+        self.grant()
+        for change in (dict(approval_sha256='d'*64), dict(additional_requests=2),
+                       dict(isolated_unresolved_request_ids=[self.prior[0]])):
+            with self.subTest(change=change), self.assertRaises(TaskError):
+                self.grant(**change)
+        with self.f.tasks.transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM paper_recommendation_recoveries').fetchone()[0], 1)
+
+    def test_receipt_missing_original_request_blocks_grant_and_new_intent(self):
+        self.f.test_missing_receipt_intent_is_unknown_and_not_replayed()
+        with self.assertRaises(TaskError):
+            self.grant()
+        self.assertTrue(self.f.service.scope_status(self.f.scope)['blocked_by_unresolved'])
+        with self.assertRaises(TaskError):
+            self.f.create(request='e'*32)
+        self.f.transport.assert_not_called()
+
+    def test_all_three_original_requests_require_receipts_before_grant(self):
+        self.fail_three()
+        # A separate scope with three durable intents and no dispatch outcome.
+        scope = SCOPE_PREFIX+'f'*32
+        ids = ['d'*32, 'e'*32, 'f'*32]
+        with self.f.tasks.transaction() as db:
+            db.execute('INSERT INTO paper_recommendation_scopes VALUES (?,?,?,?)', (scope, 'reference_only', 3, 'synthetic'))
+            source = db.execute('SELECT * FROM paper_recommendation_intents LIMIT 1').fetchone()
+            for request in ids:
+                db.execute('INSERT INTO paper_recommendation_intents VALUES (?,?,?,?,?,?,?,?,?,?)',
+                           (request, scope, *tuple(source)[2:]))
+                db.execute('INSERT INTO paper_recommendation_receipts VALUES (?,?,?,?,?,?)',
+                           (request, 'dispatching', '{}', '{}', None, '{}'))
+        with self.assertRaises(TaskError):
+            self.grant(scope_id=scope, prior_request_ids=ids, isolated_unresolved_request_ids=ids)
+        self.assertFalse(self.f.service.scope_status(scope)['recovery_authorized'])
+
+    def test_valid_recommendation_rejects_unneeded_recovery_but_changed_source_is_retained(self):
+        self.fail_three()
+        # Unneeded recovery is also rejected for three valid historical replies.
+        other_scope = 'e'*32
+        ids = ['c'*32, 'd'*32, 'e'*32]
+        self.f.transport.side_effect = self.f.response
+        for request in ids:
+            self.assertEqual(self.f.create(scope=other_scope, request=request)['state'], 'completed')
+        with self.assertRaises(TaskError):
+            self.grant(scope_id=other_scope, prior_request_ids=ids)
+        self.f.doc['generated'] = 'synthetic source revision'
+        self.f.save()
+        status = self.grant(scope_id=other_scope, prior_request_ids=ids)
+        self.assertEqual(status['max_requests'], 6)
+        self.assertTrue(all(item['original_state']=='completed' and item['state']=='source_unavailable'
+                            for item in self.f.service.history(other_scope)))
+
+    def test_other_scopes_and_nonstandard_original_limits_are_not_amended(self):
+        self.fail_three()
+        self.grant()
+        status = self.f.service.scope_status('f'*32)
+        self.assertEqual(status['max_requests'], 3)
+        self.assertFalse(status['recovery_authorized'])
+        self.f.service = PaperRecommendations(self.f.tasks, self.f.connections, self.f.library,
+                                              max_requests_per_scope=4)
+        other_scope, ids = 'e'*32, ['c'*32, 'd'*32, 'e'*32]
+        for request in ids:
+            self.f.create(scope=other_scope, request=request)
+        with self.assertRaises(TaskError):
+            self.grant(scope_id=other_scope, prior_request_ids=ids)
+        self.assertEqual(self.f.service.scope_status(other_scope)['max_requests'], 4)
+
+    def test_recovery_record_is_immutable_and_parallel_grants_are_one_approval(self):
+        self.fail_three()
+        results, errors = [], []
+        def granting():
+            try:
+                results.append(self.grant())
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=granting) for _ in range(2)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0], results[1])
+        with self.f.tasks.transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM paper_recommendation_recoveries').fetchone()[0], 1)
+        for statement in ('UPDATE paper_recommendation_recoveries SET document=document',
+                          'DELETE FROM paper_recommendation_recoveries'):
+            with self.assertRaises(sqlite3.DatabaseError):
+                with self.f.tasks.transaction() as db: db.execute(statement)
+
+    def test_last_slot_and_unknown_dispatch_are_guarded_in_same_intent_transaction(self):
+        self.fail_three()
+        self.grant()
+        self.f.create(request='c'*32)
+        self.f.create(request='d'*32)
+        entered, release = threading.Event(), threading.Event()
+        results, errors = [], []
+        def waiting(*args):
+            entered.set()
+            if not release.wait(5): raise AssertionError('synthetic timeout')
+            return self.f.response(*args)
+        self.f.transport.side_effect = waiting
+        def create_last():
+            try:
+                results.append(self.f.create(request='e'*32))
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=create_last)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaises(TaskError):
+                self.f.create(request='f'*32)
+            status = self.f.service.scope_status(self.f.scope)
+            self.assertEqual(status['used_requests'], 6)
+            self.assertEqual(status['unresolved_request_ids'], ['e'*32])
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['state'], 'completed')
+        self.assertEqual(self.f.calls.status()['used_requests'], 6)
 
 
 if __name__ == '__main__':
