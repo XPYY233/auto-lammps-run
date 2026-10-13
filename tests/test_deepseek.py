@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from auto_lammps.deepseek import (DeepSeekClient, DeepSeekConfig, MAX_RESPONSE_BYTES, ModelCalls,
                                   ModelError, https_transport, parse_completion, request_body, usage_from_response)
-from auto_lammps.manifest import canonical
+from auto_lammps.manifest import canonical, sha256
 
 MESSAGES = [{'role': 'system', 'content': 'Return JSON: {"conditions": [], "questions": []}'}]
 
@@ -238,6 +238,153 @@ class DeepSeekTests(unittest.TestCase):
             self.assertEqual(connection.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
             self.assertEqual(stream.read1.call_count,2)
             connection.return_value.close.assert_called_once()
+
+class AllowanceAmendmentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.path=Path(self.tmp.name)/'models.sqlite'
+        self.config=DeepSeekConfig('synthetic-model')
+        self.calls=ModelCalls(self.path,self.config,max_requests=2)
+
+    def revisions(self):
+        with self.calls.transaction() as db:
+            return db.execute('SELECT * FROM policy_revisions ORDER BY seq').fetchall()
+
+    def test_allowance_increase_keeps_full_history_costs_unknowns_and_original_policy(self):
+        transport=Mock(return_value=(200,response()))
+        client=DeepSeekClient(self.calls,transport=transport,key_reader=lambda:'synthetic-key')
+        client.complete_json('a'*32,MESSAGES)
+        transport.side_effect=TimeoutError('Synthetic unknown request')
+        with self.assertRaisesRegex(ModelError,'model_transport_unknown'):
+            client.complete_json('b'*32,MESSAGES)
+        before=self.calls.history()
+        with self.calls.transaction() as db:
+            base=db.execute('SELECT document FROM policy').fetchone()[0]
+        self.calls.amend_allowance(5,reason_sha256='c'*64)
+        reopened=ModelCalls.open_existing(self.path)
+        self.assertEqual(reopened.history(),before)
+        self.assertEqual(reopened.status()['used_requests'],2)
+        self.assertEqual(reopened.status()['remaining_requests'],3)
+        self.assertEqual(reopened.config,self.config)
+        with reopened.transaction() as db:
+            self.assertEqual(db.execute('SELECT document FROM policy').fetchone()[0],base)
+        for identifier in ('a'*32,'b'*32):
+            with self.assertRaisesRegex(ModelError,'request_already_reserved'):
+                reopened.reserve(identifier,b'No retransmission')
+        self.assertEqual(transport.call_count,2)
+
+    def test_live_and_reopened_workers_reserve_using_latest_allowance(self):
+        old_worker=ModelCalls.open_existing(self.path)
+        self.calls.reserve('a'*32,b'first');self.calls.reserve('b'*32,b'second')
+        with self.assertRaisesRegex(ModelError,'model_budget_exhausted'):
+            old_worker.reserve('c'*32,b'before explicit amendment')
+        self.calls.amend_allowance(3,reason_sha256='d'*64)
+        self.assertEqual(old_worker.status()['max_requests'],3)
+        old_worker.reserve('c'*32,b'after explicit amendment')
+        self.assertEqual(ModelCalls.open_existing(self.path).status()['remaining_requests'],0)
+        with self.assertRaisesRegex(ModelError,'model_budget_exhausted'):
+            self.calls.reserve('d'*32,b'fourth')
+
+    def test_per_call_amendments_preserve_latest_allowance_and_chain_of_authorizations(self):
+        from dataclasses import replace
+        with self.calls.transaction() as db:
+            base=db.execute('SELECT document FROM policy').fetchone()[0]
+        self.calls.amend_allowance(5,reason_sha256='a'*64)
+        self.calls.amend_limits(replace(self.config,max_output_tokens=16384),reason_sha256='b'*64)
+        self.calls.amend_allowance(8,reason_sha256='c'*64)
+        self.calls.amend_limits(replace(self.calls.config,timeout_seconds=60),reason_sha256='d'*64)
+        reopened=ModelCalls.open_existing(self.path)
+        self.assertEqual(reopened.status()['max_requests'],8)
+        self.assertEqual(reopened.config.max_output_tokens,16384)
+        self.assertEqual(reopened.config.timeout_seconds,60)
+        previous=base
+        for index,row in enumerate(self.revisions(),1):
+            sequence,document,previous_sha,reason,at=row
+            self.assertEqual(sequence,index)
+            self.assertEqual(previous_sha,sha256(previous.encode()))
+            self.assertEqual(reason,('abcd'[index-1])*64)
+            self.assertTrue(at)
+            previous=document
+        self.assertEqual(json.loads(previous)['provider'],'deepseek')
+        self.assertEqual(json.loads(previous)['protocol'],json.loads(base)['protocol'])
+
+    def test_allowance_amendment_from_stale_worker_preserves_newer_per_call_policy(self):
+        from dataclasses import replace
+        stale=ModelCalls.open_existing(self.path)
+        self.calls.amend_limits(replace(self.config,max_output_tokens=16384),reason_sha256='b'*64)
+        stale.amend_allowance(5,reason_sha256='c'*64)
+        reopened=ModelCalls.open_existing(self.path)
+        self.assertEqual(reopened.config.max_output_tokens,16384)
+        self.assertEqual(reopened.status()['max_requests'],5)
+        with self.assertRaisesRegex(ModelError,'model_policy_changed_reload_before_amendment'):
+            stale.amend_limits(replace(stale.config,timeout_seconds=60),reason_sha256='d'*64)
+        self.assertEqual(len(self.revisions()),2)
+
+    def test_original_constructor_identity_survives_allowance_and_limit_amendments(self):
+        from dataclasses import replace
+        self.calls.amend_allowance(5,reason_sha256='a'*64)
+        self.calls.amend_limits(replace(self.config,max_output_tokens=16384),reason_sha256='b'*64)
+        original=ModelCalls(self.path,self.config,max_requests=2)
+        self.assertEqual(original.status()['max_requests'],5)
+        self.assertEqual(original.config.max_output_tokens,16384)
+        with self.assertRaisesRegex(ModelError,'model_policy_mismatch'):
+            ModelCalls(self.path,self.config,max_requests=5)
+        with self.assertRaisesRegex(ModelError,'model_policy_mismatch'):
+            ModelCalls(self.path,original.config,max_requests=2)
+
+    def test_same_allowance_is_idempotent_and_invalid_or_reduced_allowances_never_append(self):
+        self.calls.reserve('a'*32,b'first');self.calls.reserve('b'*32,b'second')
+        self.calls.amend_allowance(5,reason_sha256='a'*64)
+        self.calls.amend_allowance(5,reason_sha256='a'*64)
+        before=self.revisions()
+        for value in (True,False,0,-1,100001,2.0,'5',None):
+            with self.subTest(value=value),self.assertRaisesRegex(ModelError,'invalid_request_limit'):
+                self.calls.amend_allowance(value,reason_sha256='b'*64)
+        for value in (1,2,4):
+            with self.subTest(value=value),self.assertRaisesRegex(ModelError,'cannot_reduce_limit_or_usage'):
+                self.calls.amend_allowance(value,reason_sha256='b'*64)
+        for reason in (None,'','a'*63,'A'*64,'g'*64):
+            with self.subTest(reason=reason),self.assertRaisesRegex(ModelError,'requires_evidence'):
+                self.calls.amend_allowance(8,reason_sha256=reason)
+        self.assertEqual(self.revisions(),before)
+        self.assertEqual(self.calls.status()['max_requests'],5)
+        self.assertEqual(self.calls.status()['used_requests'],2)
+
+    def test_concurrent_duplicate_amendments_append_once_and_workers_share_new_total(self):
+        workers=[ModelCalls.open_existing(self.path) for _ in range(8)]
+        self.calls.reserve('a'*32,b'original')
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda worker:worker.amend_allowance(4,reason_sha256='b'*64),workers))
+        self.assertEqual(len(self.revisions()),1)
+        def reserve(item):
+            index,worker=item
+            try:
+                worker.reserve(f'{index:032x}',b'new accounted intent')
+                return 'reserved'
+            except ModelError as error:
+                return str(error)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results=list(pool.map(reserve,enumerate(workers)))
+        self.assertEqual(results.count('reserved'),3)
+        self.assertEqual(results.count('model_budget_exhausted'),5)
+        self.assertEqual(self.calls.status()['used_requests'],4)
+        self.assertEqual(self.calls.status()['remaining_requests'],0)
+
+    def test_zero_base_allowance_requires_explicit_increase_and_maximum_bound_is_preserved(self):
+        path=Path(self.tmp.name)/'zero.sqlite'
+        calls=ModelCalls(path,self.config,max_requests=0)
+        with self.assertRaisesRegex(ModelError,'model_budget_exhausted'):
+            calls.reserve('a'*32,b'not authorized')
+        calls.amend_allowance(1,reason_sha256='a'*64)
+        calls.reserve('a'*32,b'explicitly authorized synthetic intent')
+        calls.amend_allowance(100000,reason_sha256='b'*64)
+        self.assertEqual(calls.status()['max_requests'],100000)
+        self.assertEqual(calls.status()['used_requests'],1)
+        with calls.transaction() as db:
+            self.assertEqual(json.loads(db.execute('SELECT document FROM policy').fetchone()[0])['max_requests'],0)
+            for table in ('policy','policy_revisions','calls'):
+                with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM '+table)
+
 
 class LenientJsonTests(unittest.TestCase):
     """字符串内的裸换行（模型写多行脚本时常见）应被容错解析，其他错误不放宽。"""

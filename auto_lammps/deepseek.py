@@ -166,8 +166,7 @@ class ModelCalls:
         if not isinstance(reason_sha256,str) or not re.fullmatch('[a-f0-9]{64}',reason_sha256):
             raise ModelError('limits_amendment_requires_evidence')
         with self.transaction() as db:
-            row=db.execute('SELECT seq,document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
-            previous=row[1] if row else db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0]
+            sequence,previous=self._latest_policy(db)
             policy=json.loads(previous)
             if policy['config']!=asdict(self.config):
                 raise ModelError('model_policy_changed_reload_before_amendment')
@@ -175,8 +174,37 @@ class ModelCalls:
             document=canonical(policy).decode()
             if document!=previous:
                 db.execute('INSERT INTO policy_revisions VALUES (?,?,?,?,?)',
-                    ((row[0]+1) if row else 1,document,sha256(previous.encode()),reason_sha256,datetime.now(timezone.utc).isoformat()))
+                    (sequence+1,document,sha256(previous.encode()),reason_sha256,datetime.now(timezone.utc).isoformat()))
         self.config=config
+
+    @staticmethod
+    def _latest_policy(db):
+        """Read the effective append-only policy in the caller's transaction."""
+        row=db.execute('SELECT seq,document FROM policy_revisions ORDER BY seq DESC LIMIT 1').fetchone()
+        return row if row else (0,db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0])
+
+    def amend_allowance(self, max_requests, *, reason_sha256):
+        """Administrator-approved total allowance increase; never erase spent calls.
+
+        The constructor still binds the immutable base policy. Every change
+        appends the full latest policy, retaining its per-call limits and model.
+        No request sender, browser or model can invoke this amendment implicitly.
+        """
+        if type(max_requests) is not int or not 1<=max_requests<=100000:
+            raise ModelError('invalid_request_limit')
+        if not isinstance(reason_sha256,str) or not re.fullmatch('[a-f0-9]{64}',reason_sha256):
+            raise ModelError('allowance_amendment_requires_evidence')
+        with self.transaction() as db:
+            sequence,previous=self._latest_policy(db)
+            policy=json.loads(previous)
+            used=db.execute('SELECT count(*) FROM calls').fetchone()[0]
+            if max_requests<max(policy['max_requests'],used):
+                raise ModelError('allowance_amendment_cannot_reduce_limit_or_usage')
+            if max_requests!=policy['max_requests']:
+                policy['max_requests']=max_requests
+                db.execute('INSERT INTO policy_revisions VALUES (?,?,?,?,?)',
+                    (sequence+1,canonical(policy).decode(),sha256(previous.encode()),reason_sha256,
+                     datetime.now(timezone.utc).isoformat()))
 
     @contextmanager
     def transaction(self):
@@ -199,7 +227,8 @@ class ModelCalls:
         with self.transaction() as db:
             if db.execute('SELECT 1 FROM calls WHERE id=?', (identifier,)).fetchone():
                 raise ModelError('request_already_reserved')
-            limit = json.loads(db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0])['max_requests']
+            _,document=self._latest_policy(db)
+            limit = json.loads(document)['max_requests']
             if db.execute('SELECT count(*) FROM calls').fetchone()[0] >= limit:
                 raise ModelError('model_budget_exhausted')
             db.execute('INSERT INTO calls VALUES (?,?,?)', (identifier, sha256(body), datetime.now(timezone.utc).isoformat()))
@@ -228,7 +257,8 @@ class ModelCalls:
 
     def status(self):
         with self.transaction() as db:
-            policy = json.loads(db.execute('SELECT document FROM policy WHERE id=1').fetchone()[0])
+            _,document=self._latest_policy(db)
+            policy = json.loads(document)
             used = db.execute('SELECT count(*) FROM calls').fetchone()[0]
             return dict(provider='deepseek', model=self.config.model, used_requests=used,
                         max_requests=policy['max_requests'], remaining_requests=max(0, policy['max_requests']-used))
