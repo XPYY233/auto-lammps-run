@@ -12,7 +12,7 @@ import re
 from .manifest import canonical, sha256
 from .tasks import TaskError, task_id
 
-VERSION = 2
+VERSION = 3
 ROLE = 'paper_reference_human_only'
 MARKER = '\n\n[AUTO-LAMMPS WORKBENCH SCIENTIFIC ADAPTER]\n'
 INSTRUCTION = (
@@ -46,9 +46,15 @@ def _hash(value):
 
 def _capabilities(value):
     if (not isinstance(value, dict) or set(value) != {'planner', 'executor',
-            'runtime_tasks', 'model_stages', 'operations', 'modules', 'output_limits'}):
+            'runtime_tasks', 'model_stages', 'operations', 'modules', 'output_limits', 'source_partition'}):
         raise WorkbenchAdapterError('实装工作台能力合同缺失。')
     limits = value['output_limits']
+    partition = value['source_partition']
+    if (not isinstance(partition, dict) or set(partition) != {'chunk_pages', 'max_pages', 'policy'}
+            or type(partition['chunk_pages']) is not int or partition['chunk_pages'] != 1
+            or type(partition['max_pages']) is not int or not 1 <= partition['max_pages'] <= 64
+            or partition['policy'] != 'complete_single_page_blocks_v1'):
+        raise WorkbenchAdapterError('实装工作台来源分块合同缺失。')
     if (not isinstance(limits, dict) or set(limits) != {'extraction_records_per_response'}
             or type(limits['extraction_records_per_response']) is not int
             or not 1 <= limits['extraction_records_per_response'] <= 10000):

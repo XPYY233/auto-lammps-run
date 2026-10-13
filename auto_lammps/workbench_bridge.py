@@ -16,7 +16,7 @@ import re
 import time
 
 from .deepseek import (DeepSeekClient, MAX_RESPONSE_BYTES, ModelError, parse_completion,
-                       request_body, usage_from_response)
+                       request_body, response_diagnostics, usage_from_response)
 from .manifest import canonical, sha256
 from .papers import doi_text
 from .runtime_launcher import read_regular
@@ -25,6 +25,7 @@ from .workbench_adapter import WorkbenchAdapterError, WorkbenchScientificAdapter
 
 
 HUMAN_ROLE = 'paper_reference_human_only'
+WORKBENCH_CHUNK_PAGES = 1
 _HASH = re.compile(r'[a-f0-9]{64}')
 _MODEL_ERRORS = {
     'workbench_model_options_outside_policy': '工作台调用选项超出本项目已配置的模型策略，未发送。',
@@ -147,6 +148,15 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
             session_id=session_id, db=database,
             finalizer=finalizer.AtomicEvidenceDBFinalizer(database),
             checkpoint_runtime=checkpoint_runtime)
+        # Configure the exported native starter, not its extraction/planner
+        # implementation. Dense four-page blocks exceeded response limits;
+        # one-page blocks retain every source page and native budget checks.
+        class PageBoundedStarter(business.EvidenceDBLiteratureJobStarter):
+            CHUNK_PAGES = WORKBENCH_CHUNK_PAGES
+        starter = PageBoundedStarter(database, jobs)
+        ports = replace(ports, assembler=business.LiteratureExtractionBusinessAssembler(
+            jobs, session_id=session_id, starter=starter,
+            checkpoint_runtime=checkpoint_runtime))
         exports = export.EvidenceExportService(
             workspace_resolver=export.WorkspaceEvidenceProjectionResolver(database),
             federated_resolver=None)
@@ -163,6 +173,8 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'model_stages': sorted(job.MODEL_STAGES),
                 'output_limits': {'extraction_records_per_response':
                     stage_budget.MAX_EXTRACTED_RECORDS_PER_RESPONSE},
+                'source_partition': {'chunk_pages': starter.CHUNK_PAGES,
+                    'max_pages': starter.MAX_PAGES, 'policy': 'complete_single_page_blocks_v1'},
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
                     for module in (job, business, workflow, stages, stage_budget,
@@ -243,7 +255,8 @@ class WorkbenchModelClient:
         receipt = dict(provider='deepseek', requested_model=self.client.model,
             purpose='literature_workbench_extraction', role=HUMAN_ROLE,
             task=task, request_sha256=sha256(body), state='not_sent',
-            usage=None, transport_attempts=0, scientific_adapter=proof)
+            usage=None, transport_attempts=0, scientific_adapter=proof,
+            request_bytes=len(body), max_output_tokens=max_tokens)
         try:
             key = self.client.key_reader()
             if (not isinstance(key, str) or not key or len(key) > 4096
@@ -258,7 +271,8 @@ class WorkbenchModelClient:
             status, content = self.client.transport(body, key, config.timeout_seconds)
             if type(status) is not int or not isinstance(content, bytes) or len(content) > MAX_RESPONSE_BYTES:
                 raise ModelError('invalid_transport_response')
-            receipt.update(http_status=status, response_sha256=sha256(content))
+            receipt.update(http_status=status, response_sha256=sha256(content),
+                **response_diagnostics(content))
             if status != 200:
                 receipt['state'] = 'rejected'
                 raise ModelError('provider_request_failed')
@@ -266,7 +280,13 @@ class WorkbenchModelClient:
             result = parse_completion(content)
             receipt.update(state='completed', output_sha256=sha256(canonical(result)),
                 structured_output=result)
-        except Exception:
+        except Exception as exc:
+            receipt['error'] = (str(exc) if type(exc) is ModelError and str(exc) in {
+                'model_key_missing_or_invalid', 'workbench_model_connection_changed',
+                'invalid_transport_response', 'provider_request_failed', 'invalid_json',
+                'invalid_response', 'incomplete_generation', 'empty_or_unexpected_output',
+                'json_object_required', 'response_too_large', 'model_tls_trust_unavailable'}
+                else 'model_transport_unknown')
             self.client.calls.record(identifier, receipt)
             raise WorkbenchBridgeError('workbench_model_request_not_completed') from None
         self.client.calls.record(identifier, receipt)
@@ -752,6 +772,18 @@ class WorkbenchExtractionBridge:
                 error=_MODEL_ERRORS.get(code, '文献工作台未完成提取；原请求记录保留，未自动重试。'))
             if isinstance(exc, WorkbenchAdapterError):
                 result['error'] = str(exc)
+            if code in {'literature_call_outcome_unknown', 'workbench_model_request_not_completed'}:
+                saved = client.calls.lookup(adapter.requests[-1]) if adapter.requests else None
+                receipt = (saved or {}).get('receipt') or {}
+                proof = receipt.get('scientific_adapter') or {}
+                if (receipt.get('state') == 'response_invalid'
+                        and proof.get('identity') == adapter.adapter.identity):
+                    result['error_code'] = 'workbench_model_response_invalid'
+                    result['error'] = ('模型已返回，但输出不完整或 JSON 无效；原请求与费用保留，未自动重试。')
+                    if receipt.get('finish_reason') == 'length':
+                        result['error'] = ('模型答复达到单次输出上限，未得到完整 JSON；原请求与费用保留，未自动重试。')
+                    result['validation_details'] = [{key: receipt[key] for key in (
+                        'state', 'finish_reason', 'max_output_tokens', 'error') if key in receipt}]
             if code == 'literature_stage_invalid':
                 # Explain a native shape/budget failure from our own saved
                 # receipts. Do not rewrite the response, skip validation,

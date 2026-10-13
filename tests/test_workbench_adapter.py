@@ -21,7 +21,9 @@ class WorkbenchAdapterTests(unittest.TestCase):
             'operations': {k: 'test.'+k for k in
                 ('assemble', 'execute', 'project', 'plan_next', 'finalize')},
             'modules': {'test.module': 'e'*64},
-            'output_limits': {'extraction_records_per_response': 64}}
+            'output_limits': {'extraction_records_per_response': 64},
+            'source_partition': {'chunk_pages': 1, 'max_pages': 64,
+                'policy': 'complete_single_page_blocks_v1'}}
         call = {'call_id': 'native-1', 'task': 'extraction', 'messages': deepcopy(self.messages),
             'max_tokens': 4000, 'options': {'thinking': False, 'temperature': 0.45}}
         call['call_digest'] = native_digest(call)
@@ -79,6 +81,16 @@ class WorkbenchAdapterTests(unittest.TestCase):
         for kwargs in ({'capability_reader': None}, {'stage_reader': None}):
             with self.assertRaises(WorkbenchAdapterError):
                 self.build(**kwargs)
+
+    def test_partition_drift_or_incomplete_scope_is_rejected_before_send(self):
+        for partition in ({}, {'chunk_pages': True, 'max_pages': 64,
+                'policy': 'complete_single_page_blocks_v1'},
+                {**self.capability['source_partition'], 'chunk_pages': 4}):
+            with self.subTest(partition=partition), self.assertRaises(WorkbenchAdapterError):
+                self.build(capability_reader=lambda: {**self.capability, 'source_partition': partition})
+        self.capability['source_partition']['max_pages'] = 32
+        with self.assertRaises(WorkbenchAdapterError):
+            self.adapter.prepare(self.messages, self.options)
 
     def test_malformed_or_missing_capability_is_rejected(self):
         variants = [None, {}, {**self.capability, 'executor': None},

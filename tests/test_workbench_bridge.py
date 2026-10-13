@@ -28,7 +28,9 @@ def synthetic_capabilities():
         'operations': {key: 'synthetic_executor.' + key for key in
             ('assemble', 'execute', 'project', 'plan_next', 'finalize')},
         'modules': {'synthetic_module': 'e'*64},
-        'output_limits': {'extraction_records_per_response': 64}}
+        'output_limits': {'extraction_records_per_response': 64},
+        'source_partition': {'chunk_pages': 1, 'max_pages': 64,
+            'policy': 'complete_single_page_blocks_v1'}}
 
 
 def synthetic_stage(messages, options):

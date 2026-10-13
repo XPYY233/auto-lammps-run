@@ -38,9 +38,9 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         self.paper = self.papers.link_task(paper['id'], paper['revision'], self.task['id'])
         self.source = self.root/'source.pdf'
         document = fitz.open()
-        # Six actual page blocks produce the original runner's twelve-call
+        # Six actual single-page blocks produce the original runner's twelve-call
         # initial and coverage stages. No native planner behavior is mirrored.
-        for number in range(1, 25):
+        for number in range(1, 7):
             page = document.new_page()
             page.insert_text((72, 72), 'Results. Sample C has hardness 4.0 GPa at 400 K.')
             page.insert_text((72, 95), f'Synthetic page {number}.')
@@ -91,7 +91,7 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
             contract = payload['messages'][0]['content']
             chunk = int(re.search(r'"native_call_id":"[ab]-chunk-(\d+)-', contract).group(1))
             value = {'data': [{'value_text': '4.0', 'meaning': '样品硬度', 'unit': 'GPa',
-                'context_explanation': '样品 C 在 400 K 条件下的测量', 'source_page': chunk*4-3,
+                'context_explanation': '样品 C 在 400 K 条件下的测量', 'source_page': chunk,
                 'source_locator': 'Results', 'source_excerpt': 'Sample C has hardness 4.0 GPa at 400 K',
                 'evidence_type': 'measured', 'source_precision': 'exact_text'}],
                 'findings': [], 'pending_tasks': []}
@@ -104,6 +104,24 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
     def extract(self, request_id=None, **kwargs):
         return self.bridge.extract(self.task['id'], request_id or self.original_id,
             self.binding, self.client, connection_revision=1, credential_generation=1, **kwargs)
+
+    def test_native_single_page_partition_preserves_full_source_and_budget(self):
+        from auto_research.evidence.literature_extraction_business_action import EvidenceDBLiteratureJobStarter
+        from auto_research.evidence.literature_extraction_budget import task_budget_for_page_blocks
+        draft = self.bridge.runtime.ports.assembler.assemble(
+            {'paper_id': self.binding.workbench_paper_id, 'force_rescan': False})
+        token = draft.outbound['job_handle']
+        state = self.bridge.runtime.decode_job_state(self.bridge.runtime.jobs.export_private_state(
+            token, session_id=self.bridge.runtime.session_id))
+        self.assertEqual(len(state.chunks), 6)
+        self.assertTrue(all(len(block) == 1 for block in state.chunks))
+        self.assertEqual([page['page'] for block in state.chunks for page in block], list(range(1, 7)))
+        self.assertEqual(len(state.stage['calls']), 12)
+        self.assertEqual(task_budget_for_page_blocks(len(state.chunks)).max_calls, 56)
+        self.assertEqual(EvidenceDBLiteratureJobStarter.CHUNK_PAGES, 4)
+        self.assertEqual(self.bridge.runtime.native_capability_reader()['source_partition'],
+            {'chunk_pages': 1, 'max_pages': 64, 'policy': 'complete_single_page_blocks_v1'})
+        self.assertEqual(self.outgoing, [])
 
     def test_native_record_limit_failure_keeps_outputs_and_does_not_retry_or_publish(self):
         value = {'data': [{} for _ in range(64)], 'findings': [{}], 'pending_tasks': []}
@@ -131,6 +149,27 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         self.assertEqual(self.bridge.runtime.data_items(self.bridge.runtime.database,
             self.binding.workbench_paper_id), [])
         self.assertFalse(result['execution_authorized'])
+
+    def test_native_truncated_reply_is_known_invalid_not_unknown_and_never_retried(self):
+        def truncated(body, key, timeout):
+            self.outgoing.append(json.loads(body))
+            return 200, canonical({'choices': [{'finish_reason': 'length', 'message': {
+                'role': 'assistant', 'content': '{"data":['}}],
+                'usage': {'prompt_tokens': 4, 'completion_tokens': 16000, 'total_tokens': 16004}})
+        self.client.transport = truncated
+        result = self.extract()
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['error_code'], 'workbench_model_response_invalid')
+        self.assertIn('达到单次输出上限', result['error'])
+        receipt = self.calls.lookup(result['model_request_ids'][-1])['receipt']
+        self.assertEqual(receipt['state'], 'response_invalid')
+        self.assertEqual(receipt['finish_reason'], 'length')
+        self.assertEqual(receipt['error'], 'incomplete_generation')
+        self.assertEqual(receipt['max_output_tokens'], 16000)
+        self.assertEqual(self.extract(), result)
+        self.assertEqual(len(self.outgoing), 1)
+        self.assertEqual(self.bridge.runtime.data_items(self.bridge.runtime.database,
+            self.binding.workbench_paper_id), [])
 
     def fail_after_coverage(self, *, legacy=False):
         from auto_research.evidence.literature_extraction_job import LiteratureExtractionJobError
