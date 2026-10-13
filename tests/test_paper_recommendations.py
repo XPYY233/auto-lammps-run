@@ -112,6 +112,7 @@ class PaperRecommendationTests(unittest.TestCase):
         self.assertEqual(supplied['scientific_adapter']['stage'],'paper_recommendation')
         self.assertEqual(supplied['registered_paper_candidate_menu']['scope'],'reference_only')
         self.assertFalse(supplied['registered_paper_candidate_menu']['B_input'])
+        self.assertEqual(supplied['registered_paper_candidate_menu']['citation_count'],{'minimum':2,'maximum':16})
 
     def test_large_ineligible_catalog_retains_full_evidence_but_does_not_duplicate_model_file_lists(self):
         self.preparer.stop()

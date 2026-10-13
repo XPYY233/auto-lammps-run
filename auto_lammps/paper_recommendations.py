@@ -171,7 +171,8 @@ def recommendation_selection_context(candidates):
             'source_sha256': sha256(Path(__file__).read_bytes()), 'scope': 'reference_only', 'role': 'reference_only',
             'menu': menu, 'output_schema': {'candidate_index': 'integer fixed menu index',
             'reason': 'brief Chinese reason grounded in cited metadata',
-            'citations': 'distinct integer evidence indices from both paired resource kinds'},
+            'citations': 'two to sixteen distinct integer evidence indices from both paired resource kinds'},
+            'citation_count': {'minimum': 2, 'maximum': 16},
             'execution_ready': False, 'scientific_status': 'not_evaluated', 'B_input': False}
 
 
@@ -292,6 +293,7 @@ class PaperRecommendations:
                     '{"candidate_index":0,"reason":"brief Chinese reason","citations":[0,1]}. '
                     'Indices here illustrate the output shape, not a recommendation. Use distinct citation indices '
                     'from the chosen candidate evidence, including BOTH author_source and potential. '
+                    'Use two to sixteen citations only; usually two to four sufficient relevant indices. '
                     'Cite the actual metadata; do not infer missing files, license, DOI, workflow or physical validity. '
                     'Paired directory claims are candidates, not a verified bundle, executed reference or reproduced paper. '
                     'No PDF, source code, targets, B input or computing tools are available. '
