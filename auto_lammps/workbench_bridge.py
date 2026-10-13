@@ -28,6 +28,7 @@ HUMAN_ROLE = 'paper_reference_human_only'
 WORKBENCH_CHUNK_PAGES = 1
 _HASH = re.compile(r'[a-f0-9]{64}')
 _MODEL_ERRORS = {
+    'workbench_context_changed': '提取来源、模型配置或授权已变化；后续模型请求暂停，原记录保留。',
     'workbench_model_options_outside_policy': '工作台调用选项超出本项目已配置的模型策略，未发送。',
     'workbench_model_context_too_large': '工作台来源上下文超出本项目已配置的单次模型容量，未发送。',
     'workbench_model_request_not_completed': '工作台模型请求未完成；请求和费用记录保留，不会自动重试。',
@@ -219,7 +220,8 @@ class WorkbenchModelClient:
     the saved per-call policy, never raise it. There is no credential fallback,
     provider selection, tool execution, network redirect or automatic retry.
     """
-    def __init__(self, client, *, task, paper, source_sha256, request_id, adapter=None):
+    def __init__(self, client, *, task, paper, source_sha256, request_id, adapter=None,
+                 before_model_request=None):
         task_id(task); task_id(paper); task_id(request_id)
         _digest(source_sha256)
         if not isinstance(client, DeepSeekClient):
@@ -230,6 +232,7 @@ class WorkbenchModelClient:
         self.requests = []
         self._credential_digest = None
         self.adapter = adapter
+        self.before_model_request = before_model_request
 
     def request_json(self, messages, *, task, max_tokens, thinking=None, temperature=None):
         if (task not in {'extraction', 'analysis'} or type(max_tokens) is not int
@@ -256,6 +259,11 @@ class WorkbenchModelClient:
         body = canonical(payload)
         if len(body) > config.max_input_bytes:
             raise WorkbenchBridgeError('workbench_model_context_too_large')
+        if self.before_model_request is not None:
+            try:
+                self.before_model_request()
+            except Exception:
+                raise WorkbenchBridgeError('workbench_context_changed') from None
         identifier = sha256(canonical({**self.identity, 'ordinal': len(self.requests) + 1}))[:32]
         self.client.calls.reserve(identifier, body)
         self.requests.append(identifier)
@@ -607,9 +615,9 @@ class WorkbenchExtractionBridge:
             db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
                 (request_id, canonical(document).decode(), sha256(canonical(document))))
 
-    def extract(self, identifier, request_id, binding, client, *, force_rescan=False,
+    def extraction_identity(self, identifier, request_id, binding, client, *, force_rescan=False,
                 repair_visuals=False, resume_of=None, connection_revision, credential_generation):
-        """Controller-authorized user click; no B fields are accepted or read."""
+        """Read-only identity/options check shared by queued and synchronous actions."""
         task_id(request_id)
         if (type(force_rescan) is not bool or type(repair_visuals) is not bool
                 or (force_rescan and repair_visuals)
@@ -632,6 +640,16 @@ class WorkbenchExtractionBridge:
             automatic_retry=False)
         if resume_of is not None:
             intent['resume_of'] = resume_of
+        return intent
+
+    def extract(self, identifier, request_id, binding, client, *, force_rescan=False,
+                repair_visuals=False, resume_of=None, connection_revision, credential_generation,
+                before_model_request=None):
+        """Controller-authorized user click; no B fields are accepted or read."""
+        intent=self.extraction_identity(identifier,request_id,binding,client,
+            force_rescan=force_rescan,repair_visuals=repair_visuals,resume_of=resume_of,
+            connection_revision=connection_revision,credential_generation=credential_generation)
+        paper={key:intent['paper_id'] if key=='id' else intent[key] for key in ('id','title','doi')}
         binding_hash = sha256(canonical(intent))
         with self.papers.tasks.transaction() as db:
             prior = db.execute('SELECT i.binding_sha256, i.document intent, r.document receipt '
@@ -691,7 +709,8 @@ class WorkbenchExtractionBridge:
                 db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
                     (request_id, canonical(continuation).decode(), sha256(canonical(continuation))))
         adapter = WorkbenchModelClient(client, task=identifier, paper=paper['id'],
-            source_sha256=binding.pdf_sha256, request_id=request_id)
+            source_sha256=binding.pdf_sha256, request_id=request_id,
+            before_model_request=before_model_request)
         result = {**intent, 'state': 'failed', 'model_request_ids': []}
         if recovery:
             result.update(reused_model_calls=recovery['reused_model_calls'],
