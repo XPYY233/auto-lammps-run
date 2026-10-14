@@ -30,6 +30,13 @@ test('three suggestions preserve cap on rerender and do not reset failures',asyn
  const f=fixture(Array.from({length:3},()=>({state:'invalid_output',request_id:'d'.repeat(32)})));await f.render();await f.render();
  assert.ok(f.all().filter(x=>x.textContent===BUTTON).every(x=>x.disabled));assert.equal(f.calls.filter(x=>x.data).length,0);
 });
+test('reviewing a saved answer sends no new generation and preserves its parent identity',async()=>{
+ const parent='d'.repeat(32),f=fixture([{state:'invalid_output',request_id:parent}]);await f.render();
+ assert.equal(f.calls.filter(x=>x.data).length,0);
+ await f.all().find(x=>x.textContent==='重新核验这份已保存答复（不调用模型）').onclick();
+ const post=f.calls.find(x=>x.data);assert.equal(post.path,`/api/tasks/${ID}/reference-target-analysis/${parent}/review`);
+ assert.deepEqual(Object.keys(post.data),[]);
+});
 test('delayed history cannot populate another task',async()=>{
  const f=fixture();let resolve;f.c.api=()=>new Promise(r=>resolve=r);const pending=f.render();f.c.current.id='e'.repeat(32);resolve({task_id:ID,history:[]});await pending;
  assert.equal(f.all().some(x=>x.textContent===BUTTON),false);

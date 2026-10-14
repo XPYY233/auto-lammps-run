@@ -1248,7 +1248,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/paper-recommendations/{scope_id}')
     def paper_recommendation_history(scope_id: str):
-        return {'scope_id': scope_id, 'history': recommendations.history(scope_id)}
+        return {'scope_id': scope_id, 'history': recommendations.history(scope_id),
+                'status': recommendations.scope_status(scope_id)}
 
     @app.post('/api/paper-recommendations')
     def paper_recommendation_create(data: PaperRecommendationInput):
@@ -1266,6 +1267,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         require_open_task(identifier)
         context = workbench_context(identifier)
         return reference_targets.analyze(identifier, data.request_id, context['client'],
+            connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'])
+
+    @app.post('/api/tasks/{identifier}/reference-target-analysis/{parent_request}/review')
+    def review_reference_target_answer(identifier: str, parent_request: str, data: Input):
+        require_open_task(identifier)
+        context = workbench_context(identifier)
+        return reference_targets.review_existing(identifier, parent_request, context['client'],
             connection_revision=context['connection_revision'],
             credential_generation=context['credential_generation'])
 

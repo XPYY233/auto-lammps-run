@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync('auto_lammps/web_assets/app.js','utf8');
 const block=source.slice(source.indexOf('let paperRecommendationScope=null;'),source.indexOf('async function refreshPapers()'));
-function setup(history=[]){
+function setup(history=[],status){
  const elements=new Map(), calls=[],saved=new Map([['auto-lammps-paper-recommendation-scope','a'.repeat(32)]]);
  function node(tag,text='',className=''){
   const item={tag,textContent:text,className,children:[],isConnected:true,disabled:false,hidden:false,attributes:{},append(...v){this.children.push(...v);},replaceChildren(...v){this.children=v;},setAttribute(k,v){this.attributes[k]=v;}};
@@ -13,7 +13,7 @@ function setup(history=[]){
  const view=node('section');view.id='papers-view';
  const sandbox={node,$:s=>elements.get(s.slice(1)),localStorage:{getItem:k=>saved.get(k),setItem:(k,v)=>saved.set(k,v)},crypto:{randomUUID:()=> 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'},
   paperOverviewCatalog:{result:{papers:[{selection:'selected',doi:'10.1234/already'},{selection:'candidate',doi:'10.1234/unselected'}]}},
-  action:fn=>fn(),api:async(url,data)=>{calls.push({url,data});return {history};}};
+  action:fn=>fn(),api:async(url,data)=>{calls.push({url,data});return {history,status};}};
  vm.createContext(sandbox);vm.runInContext(block,sandbox);
  const walk=item=>[item,...item.children.flatMap(child=>typeof child==='object'?walk(child):[])];
  return {sandbox,calls,saved,view,elements,all:()=>walk(view)};
@@ -47,6 +47,19 @@ test('historical attempted call is not displayed as unsent and prevents replay',
  const f=setup([{state:'attempted',original_state:'not_sent'}]);await f.sandbox.appendPaperRecommendations();
  assert.ok(f.all().some(e=>e.textContent==='模型请求已尝试，未取得有效答复'));
  const run=f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇');assert.equal(run.disabled,true);await run.onclick();
+ assert.equal(f.calls.filter(c=>c.data).length,0);
+});
+test('approved bounded recovery retains old attempts and enables only an explicit fresh request',async()=>{
+ const records=[{state:'invalid_output'},{state:'source_unavailable'},{state:'attempted'}];
+ const f=setup(records,{max_requests:6,used_requests:3,recovery_authorized:true,blocked_by_unresolved:false,can_request:true});
+ await f.sandbox.appendPaperRecommendations();assert.equal(f.calls.filter(c=>c.data).length,0);
+ const run=f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇');assert.equal(run.disabled,false);
+ assert.ok(f.all().some(e=>String(e.textContent).includes('3/6 次推荐')));await run.onclick();
+ const post=f.calls.find(c=>c.data);assert.equal(post.data.scope_id,'a'.repeat(32));
+});
+test('new unresolved recovery blocks further calls despite authorized remaining allowance',async()=>{
+ const f=setup([{state:'attempted'},{state:'unknown'}],{max_requests:6,recovery_authorized:true,blocked_by_unresolved:true,can_request:false});
+ await f.sandbox.appendPaperRecommendations();const run=f.all().find(e=>e.tag==='button'&&e.textContent==='让应用 AI 推荐下一篇');assert.equal(run.disabled,true);await run.onclick();
  assert.equal(f.calls.filter(c=>c.data).length,0);
 });
 test('original three-request cap is not reset on page rerender',async()=>{

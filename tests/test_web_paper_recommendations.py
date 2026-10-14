@@ -24,6 +24,9 @@ class WebPaperRecommendationTests(unittest.TestCase):
         self.assertEqual(len(menu.json()['verified_candidates']),1)
         history=self.client.get('/api/paper-recommendations/'+'1'*32)
         self.assertEqual(history.json()['history'],[])
+        self.assertEqual(history.json()['status']['max_requests'], 3)
+        self.assertFalse(history.json()['status']['recovery_authorized'])
+        self.assertTrue(history.json()['status']['can_request'])
         self.f.transport.assert_not_called()
         self.assertEqual(self.f.tasks.list(),[])
 

@@ -164,6 +164,31 @@ class ReferenceTargetAnalysisWebTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.f.calls.status()['used_requests'], 1)
 
+    def test_saved_answer_review_route_uses_same_task_and_project_binding_without_generation(self):
+        url = self.base+'/'+self.request_id+'/review'
+        with patch('auto_lammps.reference_targets.ReferenceTargetAnalysis.review_existing',
+                   return_value={'state':'completed','new_model_calls':0}) as review:
+            reply = self.client.post(url, json={}, headers=HEADERS)
+            self.assertEqual(reply.status_code, 200, reply.text)
+            self.assertEqual(reply.json()['new_model_calls'], 0)
+            args, kwargs = review.call_args
+            self.assertEqual(args[:2], (self.task['id'], self.request_id))
+            self.assertEqual(args[2].model, self.f.client.model)
+            self.assertGreaterEqual(kwargs['connection_revision'], 1)
+            self.assertEqual(kwargs['credential_generation'], kwargs['connection_revision'])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.f.calls.status()['used_requests'], 0)
+
+    def test_saved_answer_review_route_rejects_browser_science_missing_origin_and_finished_task(self):
+        url = self.base+'/'+self.request_id+'/review'
+        with patch('auto_lammps.reference_targets.ReferenceTargetAnalysis.review_existing') as review:
+            self.assertEqual(self.client.post(url, json={}, headers={}).status_code, 403)
+            self.assertEqual(self.client.post(url, json={'report':{'targets':[]}}, headers=HEADERS).status_code, 422)
+            self.tasks.manage_lifecycle(self.task['id'], self.task['revision'], 0, 'finish')
+            self.assertEqual(self.client.post(url, json={}, headers=HEADERS).status_code, 422)
+            review.assert_not_called()
+        self.assertEqual(self.sent, [])
+
     def test_pdf_bytes_change_blocks_classification_without_replacing_retained_P(self):
         original_package = (self.folder/'manifest.json').read_bytes()
         import fitz

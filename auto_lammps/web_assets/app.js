@@ -1537,8 +1537,8 @@ async function appendPaperRecommendations(){
  const scope=recommendationScope(),body=node('div');panel.replaceChildren(node('summary','让应用 AI 从成套资源中推荐论文 · 查看来源、势函数与缺项'),body);
  const alive=()=>!view.hidden&&panel.isConnected&&recommendationScope()===scope;
  body.append(node('p','优先读取资源库中的作者工作流与势函数配对。推荐仅说明目录证据；选定后仍需核验全文、提取 P 并确定计算目标，不会提交 HPC。','form-note'));
- let records=[];
- try{records=(await api('/api/paper-recommendations/'+scope)).history||[];}catch(error){if(alive())body.append(node('p','推荐记录暂不可读取；先刷新记录，未发送新请求。','form-note'));return;}
+ let records=[],status={};
+ try{const response=await api('/api/paper-recommendations/'+scope);records=response.history||[];status=response.status||{};}catch(error){if(alive())body.append(node('p','推荐记录暂不可读取；先刷新记录，未发送新请求。','form-note'));return;}
  if(!alive())return;
  const labels={completed:'应用 AI 已推荐候选',unavailable:'现有目录没有符合条件的成套候选',not_sent:'模型请求未发送',rejected:'模型服务拒绝请求',attempted:'模型请求已尝试，未取得有效答复',invalid_output:'模型推荐未通过来源核验',source_unavailable:'推荐来源版本已变化',connection_changed:'模型连接已变化',failed_or_unknown:'模型请求状态待核对',unknown:'模型请求状态待核对'};
  for(const record of records){
@@ -1554,11 +1554,13 @@ async function appendPaperRecommendations(){
   if(record.usage?.total_tokens)item.append(node('p','已记录模型用量：'+record.usage.total_tokens+' tokens','form-note'));
   body.append(item);
  }
- const unresolved=records.some(record=>['unknown','failed_or_unknown','attempted'].includes(record.state));
+ const limit=Number.isInteger(status.max_requests)&&status.max_requests>=3&&status.max_requests<=6?status.max_requests:3;
+ const unresolved=typeof status.blocked_by_unresolved==='boolean'?status.blocked_by_unresolved:records.some(record=>['unknown','failed_or_unknown','attempted'].includes(record.state));
  const field=node('textarea');field.id='paper-recommendation-question';field.maxLength=1000;field.setAttribute('aria-label','论文推荐要求');field.value=records.at(-1)?.question||'请推荐下一篇用于完整 P–A–B 验证的论文。优先作者 LAMMPS 工作流、势函数、元素映射和许可已配对、原文条件与源码无已知冲突的候选；明确仍待核验的正文及资源缺项。';
  const excluded=(paperOverviewCatalog?.result?.papers||[]).filter(p=>p.selection==='selected').map(p=>p.doi).filter(Boolean);
- body.append(node('label','论文推荐要求'),field,node('p','本次默认排除已选论文：'+(excluded.join('、')||'无')+'。每组推荐最多三次；未知请求不自动重发。','form-note'));
- const run=node('button','让应用 AI 推荐下一篇','primary');run.disabled=unresolved||records.length>=3;body.append(run);
+ body.append(node('label','论文推荐要求'),field,node('p','本次默认排除已选论文：'+(excluded.join('、')||'无')+`。已使用 ${records.length}/${limit} 次推荐；未知请求不自动重发。`,'form-note'));
+ if(status.recovery_authorized)body.append(node('p','已批准本筛选任务最多三次开发恢复；原失败、费用和未获答复记录保留，B 的限制保持。','form-note'));
+ const run=node('button','让应用 AI 推荐下一篇','primary');run.disabled=unresolved||records.length>=limit||status.can_request===false;body.append(run);
  if(unresolved)body.append(node('p','请先核对已有模型回执，不能换编号重复发送。','form-note'));
  run.onclick=()=>action(async()=>{if(!alive()||run.disabled)return;run.disabled=true;await api('/api/paper-recommendations',{scope_id:scope,request_id:crypto.randomUUID().replaceAll('-',''),question:field.value,exclude_dois:excluded});if(alive())await appendPaperRecommendations();});
  const refresh=node('button','刷新推荐与来源记录','quiet');refresh.onclick=()=>action(appendPaperRecommendations);body.append(refresh);
@@ -3134,8 +3136,9 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
   if(!alive()||result.task_id!==id)return;
   const records=result.history||[];content.replaceChildren();
   const pending=records.some(r=>['prepared','dispatching','reserved','calling','unknown'].includes(r.state));
-  const latest=records.at(-1),answer=latest?.state==='completed'?latest.report:null;
+  const latest=records.at(-1),review=latest?.reviews?.filter(r=>r.state==='completed').at(-1),answer=latest?.state==='completed'?latest.report:review?.report;
   if(answer){
+   if(review)content.append(node('p','这份已保存的 AI 答复经通用格式规范化后通过复核；原失败与费用保留，没有新模型调用，科学范围仍待确认。','form-note'));
    const names={raw_lammps:'LAMMPS 原始计算',postprocessing:'计算数据后处理',analytical:'解析模型',cited:'引用资料',unclear:'方法待核定'};
    const labels=new Map((answer.inventory?.targets||[]).map(row=>[row.id,row.label]));
    content.append(node('p',`已核对全部 ${answer.targets.length} 项目标 · ${answer.dependencies.length} 组共享依赖；这是有出处的模型建议，仍需确认科学范围。`,'form-note'));
@@ -3154,7 +3157,14 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
   const history=node('details');history.append(node('summary',`查看 ${records.length} 次目标核定记录、失败原因与用量`));
   for(const record of records){const item=node('article');const label=({completed:'完整建议已返回',source_unavailable:'原建议保留，来源已变化',invalid_output:'建议未通过检查',failed:'模型调用未完成',unavailable:'出处或契约尚未齐备',paused:'来源或配置变化，已暂停',prepared:'已登记请求，正在核定',dispatching:'应用 AI 正在核定',reserved:'已登记请求，正在核定',calling:'应用 AI 正在核定',unknown:'请求状态待核对'})[record.state]||'状态待核对';item.append(node('p',(record.at?new Date(record.at).toLocaleString('zh-CN')+' · ':'')+label),node('small','请求 '+record.request_id));
    if(record.receipt?.message)item.append(node('p',record.receipt.message));
-   if(Number.isInteger(record.usage?.total_tokens))item.append(node('small','已记录模型用量 '+record.usage.total_tokens));history.append(item);}content.append(history);
+   if(Number.isInteger(record.usage?.total_tokens))item.append(node('small','已记录模型用量 '+record.usage.total_tokens));
+   for(const savedReview of record.reviews||[]){item.append(node('p',savedReview.state==='completed'?'已保存答复格式复核通过':'已保存答复复核未通过'),node('p',savedReview.message||''));}
+   if(record.state==='invalid_output'&&!(record.reviews||[]).some(r=>r.state==='completed')){
+    const check=node('button','重新核验这份已保存答复（不调用模型）');check.onclick=async()=>{if(!alive()||check.disabled)return;check.disabled=true;
+     try{await api(`/api/tasks/${id}/reference-target-analysis/${record.request_id}/review`,{});if(alive())await refresh();}
+     catch(error){if(alive()){item.append(node('p','原答复复核未完成：'+error.message,'error'));check.disabled=false;}}};item.append(check);
+   }
+   history.append(item);}content.append(history);
   const run=node('button','让应用 AI 核定全部 P 目标与共享计算依赖','primary');run.disabled=pending||records.length>=3;
   const note=node('p',pending?'原请求仍待核对，不新发或重建。':records.length>=3?'本任务三次建议已用完，原产物与费用保留。':`已使用 ${records.length}/3 次目标建议；仅明确点击后调用已配置模型。`,'form-note');
   const reload=node('button','刷新目标核定记录');reload.onclick=refresh;
