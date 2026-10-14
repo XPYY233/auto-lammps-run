@@ -50,6 +50,15 @@ class PaperRecommendationTests(unittest.TestCase):
         self.source.write_text(json.dumps(self.doc))
         self.source.chmod(0o600)
 
+    def test_runtime_capability_comes_from_actual_potential_metadata_gate(self):
+        from auto_lammps import potentials
+        menu=self.service.menu()
+        capability=recommendation_selection_context(menu['verified_candidates'])['runtime_potential_capability']
+        self.assertEqual(capability['metadata_formats'], list(potentials.SUPPORTED_FORMATS))
+        self.assertEqual(capability['implementation_sha256'], sha256(Path(potentials.__file__).read_bytes()))
+        self.assertNotIn('sw', capability['metadata_formats'])
+        self.assertFalse(menu['execution_ready'])
+
     def prepare(self, stage, messages, evidence):
         self.assertEqual(stage, 'paper_recommendation')
         self.assertEqual(evidence['role'], 'reference_only')

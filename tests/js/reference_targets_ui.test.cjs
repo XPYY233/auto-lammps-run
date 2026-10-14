@@ -41,6 +41,11 @@ test('delayed history cannot populate another task',async()=>{
  const f=fixture();let resolve;f.c.api=()=>new Promise(r=>resolve=r);const pending=f.render();f.c.current.id='e'.repeat(32);resolve({task_id:ID,history:[]});await pending;
  assert.equal(f.all().some(x=>x.textContent===BUTTON),false);
 });
+test('an appended failed review is not offered as a fresh zero-call repair again',async()=>{
+ const f=fixture([{state:'invalid_output',request_id:'d'.repeat(32),reviews:[{state:'unavailable',message:'引用仍不匹配'}]}]);await f.render();
+ assert.equal(f.all().some(x=>x.textContent==='重新核验这份已保存答复（不调用模型）'),false);
+ assert.equal(f.calls.filter(x=>x.data).length,0);
+});
 test('full suggested targets and shared dependencies remain visible with exact citations',async()=>{
  const report={inventory:{targets:[{id:'one',label:'Table 1'},{id:'two',label:'Fig. 3'}]},targets:[{target_id:'one',priority:1,data_class:'raw_lammps',reason:'原文计算',dependency_ids:['shared'],missing:[],citations:[{source_locator:'PDF page 2',quote:'Exact source'}]},{target_id:'two',priority:2,data_class:'postprocessing',reason:'共用原始输出',dependency_ids:['shared'],missing:['方法待核验'],citations:[]}],dependencies:[{id:'shared',label:'共用计算',description:'一次输出支持两项目标',data_class:'raw_lammps',requires:[],missing:[],citations:[]}],limitations:['保留全部目标，尚未选定范围']};
  const f=fixture([{state:'completed',request_id:'d'.repeat(32),report}]);await f.render();const texts=f.all().map(x=>x.textContent);

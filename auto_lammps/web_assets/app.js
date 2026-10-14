@@ -3159,7 +3159,7 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
    if(record.receipt?.message)item.append(node('p',record.receipt.message));
    if(Number.isInteger(record.usage?.total_tokens))item.append(node('small','已记录模型用量 '+record.usage.total_tokens));
    for(const savedReview of record.reviews||[]){item.append(node('p',savedReview.state==='completed'?'已保存答复格式复核通过':'已保存答复复核未通过'),node('p',savedReview.message||''));}
-   if(record.state==='invalid_output'&&!(record.reviews||[]).some(r=>r.state==='completed')){
+   if(record.state==='invalid_output'&&!(record.reviews||[]).length){
     const check=node('button','重新核验这份已保存答复（不调用模型）');check.onclick=async()=>{if(!alive()||check.disabled)return;check.disabled=true;
      try{await api(`/api/tasks/${id}/reference-target-analysis/${record.request_id}/review`,{});if(alive())await refresh();}
      catch(error){if(alive()){item.append(node('p','原答复复核未完成：'+error.message,'error'));check.disabled=false;}}};item.append(check);

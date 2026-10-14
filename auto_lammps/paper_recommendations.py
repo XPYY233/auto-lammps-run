@@ -178,8 +178,14 @@ def recommendation_selection_context(candidates):
                 raise ScientificAdapterError('Reference candidate citations are invalid')
         menu.append({'candidate_index': index, 'bundle_id': item['bundle_id'],
                      'citation_indices': [citation['index'] for citation in item['evidence']]})
+    from . import potentials
     return {'tool': 'registered_paper_candidate_menu', 'version': VERSION,
             'source_sha256': sha256(Path(__file__).read_bytes()), 'scope': 'reference_only', 'role': 'reference_only',
+            'runtime_potential_capability': {'metadata_formats':list(potentials.SUPPORTED_FORMATS),
+                'implementation_sha256':sha256(Path(potentials.__file__).read_bytes()),
+                'availability':'format_support_only_not_file_or_engine_verification',
+                'unsupported_style_policy':'report_additional_adapter_work_do_not_claim_execution_ready',
+                'selection_preference':'prefer_existing_supported_formats_when_requested'},
             'menu': menu, 'output_schema': {'candidate_index': 'integer fixed menu index',
             'reason': 'brief Chinese reason grounded in cited metadata',
             'citations': 'two to sixteen distinct integer evidence indices from both paired resource kinds'},

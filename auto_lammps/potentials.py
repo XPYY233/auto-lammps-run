@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from .manifest import canonical, private_directory, read_file, root_descriptor, sha256
 
 MAX_FILE = 16 * 1024 * 1024
+SUPPORTED_FORMATS = ('snap', 'meam', 'eam/alloy')
 SNAP_DIAGONAL_RULE = 'remove-diagonalstyle-3-v1'
 SNAP_DIAGONAL_SOURCE = ('https://github.com/lammps/lammps/blob/'
                         'd71abe6102c44577442ba7f03b7378a83166b9fd/doc/src/pair_snap.rst')
@@ -58,7 +59,7 @@ def _metadata(document):
     for key in ('name', 'license', 'applicability', 'usage_evidence'):
         _text(document[key])
     if (not isinstance(document['format'], str) or not isinstance(document['units'], str)
-            or document['format'] not in {'snap', 'meam', 'eam/alloy'} or document['units'] not in {'metal', 'real'}):
+            or document['format'] not in SUPPORTED_FORMATS or document['units'] not in {'metal', 'real'}):
         raise PotentialError('Unsupported model format or units')
     if document['format'] == 'meam' and document['units'] != 'metal':
         raise PotentialError('MEAM binding currently requires source-verified metal units')
