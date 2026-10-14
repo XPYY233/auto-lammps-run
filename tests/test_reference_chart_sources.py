@@ -52,6 +52,54 @@ class ReferenceChartSourceTests(unittest.TestCase):
         for marker in ('P_ANSWER_CANARY', 'P_RECEIPT_CANARY', 'B_FROZEN_PRIVATE_CANARY', 'PRIVATE_', 'P_energy'):
             self.assertNotIn(marker, encoded)
 
+    def add_categories(self):
+        fixture = self.fixture
+        fixture.contents['data.csv'] = (b'cycle,A_energy,pair,phase,P_energy\n'
+            b'0,1,X-Y,final,P_ANSWER_CANARY\n1,2,X-X,final,P_ANSWER_CANARY\n'
+            b'2,,X-Y,final,P_ANSWER_CANARY\n3,4,X-Y,initial,P_ANSWER_CANARY\n'
+            b'4,5,X-Y,final,P_ANSWER_CANARY\n')
+        fixture.document['views'][0]['tables'][0]['columns'] += [
+            dict(key=key, label=key, unit='1', kind='text', source_role='reference')
+            for key in ('pair', 'phase')]
+        fixture.save()
+
+    def test_exact_category_filters_preserve_original_row_positions_and_missing_data(self):
+        self.add_categories()
+        option = self.selection()
+        self.assertEqual(option['filter_categories'], [
+            dict(name='pair', values=['X-X', 'X-Y']), dict(name='phase', values=['final', 'initial'])])
+        result = self.chart(filters=[dict(column='pair', value='X-Y'), dict(column='phase', value='final')])
+        self.assertEqual(result['csv'], b'cycle,A_energy\n0,1\n2,\n4,5\n')
+        self.assertEqual(result['preview_table_rows'], [1, 5])
+        self.assertEqual(result['preview'], [[0., 1.], [4., 5.]])
+        self.assertEqual((result['rows'], result['source_total_rows'], result['filtered_out_rows']), (3, 5, 2))
+        self.assertEqual(result['missing_pair_count'], 1)
+        self.assertEqual(result['source_sha256'], sha256(self.fixture.contents['data.csv']))
+        self.assertEqual(result['filters'][0], dict(column='pair', value='X-Y'))
+        self.assertNotIn('P_ANSWER_CANARY', json.dumps(option)+result['csv'].decode())
+
+    def test_filters_cannot_name_answer_columns_numeric_columns_or_undeclared_values(self):
+        self.add_categories()
+        for filters in ([dict(column='P_energy', value='P_ANSWER_CANARY')],
+                        [dict(column='cycle', value='0')], [dict(column='pair', value='X-Z')],
+                        [dict(column='pair', value='X-Y', operation='regex')],
+                        [dict(column='pair', value='X-Y')]*2, [], 'pair=X-Y'):
+            with self.subTest(filters=filters), self.assertRaises(ResultUnavailable):
+                self.chart(filters=filters)
+
+    def test_category_menu_does_not_silently_drop_values_to_fit_context(self):
+        self.add_categories()
+        self.fixture.contents['data.csv'] = ('cycle,A_energy,pair,phase,P_energy\n' + ''.join(
+            f'{index},1,value{index},final,P_ANSWER_CANARY\n' for index in range(129))).encode()
+        self.fixture.save()
+        with self.assertRaises(ResultUnavailable):
+            self.selection()
+
+    def test_empty_filter_intersection_is_not_a_successful_chart(self):
+        self.add_categories()
+        with self.assertRaises(ResultUnavailable):
+            self.chart(filters=[dict(column='pair', value='X-X'), dict(column='phase', value='initial')])
+
     def test_no_text_column_is_promoted_by_numeric_looking_content(self):
         declaration = self.fixture.document['views'][0]['tables'][0]
         declaration['columns'][1]['kind'] = 'text'

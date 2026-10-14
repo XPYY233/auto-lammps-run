@@ -124,7 +124,8 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         self.assertEqual(self.outgoing, [])
 
     def test_native_record_limit_failure_keeps_outputs_and_does_not_retry_or_publish(self):
-        value = {'data': [{} for _ in range(64)], 'findings': [{}], 'pending_tasks': []}
+        limit = self.bridge.runtime.native_capability_reader()['output_limits']['extraction_records_per_response']
+        value = {'data': [{} for _ in range(limit)], 'findings': [{}], 'pending_tasks': []}
         def oversized(body, key, timeout):
             self.outgoing.append(json.loads(body))
             return 200, canonical({'choices': [{'finish_reason': 'stop', 'message': {
@@ -134,12 +135,12 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         result = self.extract()
         self.assertEqual(result['state'], 'failed')
         self.assertEqual(result['error_code'], 'workbench_response_record_limit')
-        self.assertIn('每次 64 条上限', result['error'])
+        self.assertIn(f'每次 {limit} 条上限', result['error'])
         self.assertTrue(result['validation_details'])
         for detail in result['validation_details']:
-            self.assertEqual(detail['data_count'], 64)
+            self.assertEqual(detail['data_count'], limit)
             self.assertEqual(detail['finding_count'], 1)
-            self.assertEqual(detail['limit'], 64)
+            self.assertEqual(detail['limit'], limit)
             receipt = self.calls.lookup(detail['request_id'])['receipt']
             self.assertEqual(receipt['structured_output'], value)
             self.assertEqual(receipt['state'], 'completed')

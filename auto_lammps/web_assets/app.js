@@ -2776,11 +2776,14 @@ function renderAICharts(items,taskId,{box=$('#discussion-charts'),channel='chart
   metadata.textContent=JSON.stringify({task_id:taskId,role:chart.role||'agent',analysis_id:chart.analysis_id,source_file:chart.file,
     source_sha256:chart.source_sha256,data_sha256:chart.csv_sha256,x:chart.x,y:chart.y,
     total_rows:chart.rows,plotted_rows:chart.preview.length,sampled:chart.sampled,
+    filters:chart.filters||[],source_total_rows:chart.source_total_rows||chart.rows,
     output_status:chart.output_status||null,scientific_status:chart.scientific_status||null});svg.append(metadata);
   const csv=node('a','下载完整数据 CSV','quiet');csv.href=`/api/tasks/${encodeURIComponent(taskId)}/${channel}/${encodeURIComponent(item.id)}/download`;
   const svgLink=node('a','下载图表 SVG','quiet');svgLink.download='auto-lammps-ai-chart.svg';svgLink.href='#';
   svgLink.onclick=()=>{svgLink.href='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(svg));};
-  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部行'}。横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。${channel==='reference-charts'?(chart.output_valid===true?'作者 A 已有数值；':'作者 A 部分数值；'):'仅重绘已有结果，'}科学结论尚待核验。`,'plot-caption'));
+  const filterNote=chart.filters?.length?`筛选 ${chart.filters.map(item=>`${item.column} = ${item.value}`).join(' 且 ')}；原表 ${chart.source_total_rows} 行，匹配 ${chart.rows} 行。`:'';
+  const rowsNote=chart.missing_pair_count?`保留 ${chart.missing_pair_count} 行缺失配对，不补值。`:'';
+  row.append(svg,csv,svgLink,node('p',`${chart.file} · 来源 SHA-256：${chart.source_sha256} · ${filterNote}${chart.rows} 行完整数据；图中${chart.sampled?'等间隔预览 '+chart.preview.length+' 行':'显示全部有效配对'}。${rowsNote}横轴 ${chart.x} (${chart.x_unit})，纵轴 ${chart.y} (${chart.y_unit})。${channel==='reference-charts'?(chart.output_valid===true?'作者 A 已有数值；':'作者 A 部分数值；'):'仅重绘已有结果，'}科学结论尚待核验。`,'plot-caption'));
   box.append(row);
  }
 }
@@ -3122,6 +3125,59 @@ function renderAuthorDiscussion(box,report,identity){
 }
 
 let targetPreviewGeneration=0;
+function referenceLammpsTargetIds(answer){
+ const dependencies=new Map(answer.dependencies.map(row=>[row.id,row]));
+ const usesLammps=(id,seen=new Set())=>{if(seen.has(id))return false;seen.add(id);const row=dependencies.get(id);
+  return Boolean(row&&(row.data_class==='raw_lammps'||row.requires.some(parent=>usesLammps(parent,seen))));};
+ return answer.targets.filter(row=>row.data_class==='raw_lammps'||row.dependency_ids.some(id=>usesLammps(id))).map(row=>row.target_id);
+}
+async function renderReferenceScopeSelection(box,id,record,answer,review,alive){
+ const form=node('section',undefined,'reference-scope-selection');box.append(form);
+ form.append(node('h4','选择这次要复现的论文目标'),node('p','按应用 AI 的原文核定选择目标，共享依赖只记录一次。保存范围不会提交 A，也不会改写已运行的历史。','form-note'));
+ const key=id+':'+record.request_id+':'+(review?.review_id||'original')+':'+record.context_sha256;
+ const states=renderReferenceScopeSelection.states||(renderReferenceScopeSelection.states=new Map());
+ let state=states.get(key);if(!state){state={selected:new Set(),reason:'',preview:null,pending:null};states.set(key,state);}
+ const notice=node('p','','form-note'),saved=node('div'),choices=node('details'),controls=new Map();
+ choices.append(node('summary',`打开选择 ${answer.targets.length} 个图表目标（逐项勾选）`));
+ const labels=new Map(answer.inventory.targets.map(row=>[row.id,row.label]));
+ const invalidate=()=>{state.preview=null;previewBox.replaceChildren();approve.disabled=true;preview.disabled=state.selected.size===0||Boolean(state.pending);};
+ for(const row of answer.targets){const label=node('label'),input=node('input');input.type='checkbox';input.checked=state.selected.has(row.target_id);input.disabled=Boolean(state.pending);
+  input.setAttribute('aria-label',labels.get(row.target_id)||row.target_id);label.append(input,node('span',labels.get(row.target_id)||row.target_id));choices.append(label);controls.set(row.target_id,input);
+  input.onchange=()=>{if(input.checked)state.selected.add(row.target_id);else state.selected.delete(row.target_id);invalidate();};}
+ const choose=node('button','选择作者 LAMMPS 数据及其派生图表');choose.disabled=Boolean(state.pending);
+ choose.onclick=()=>{state.selected=new Set(referenceLammpsTargetIds(answer));for(const [target,input] of controls)input.checked=state.selected.has(target);
+  state.reason='依据应用 AI 的全文核定，只选择作者 LAMMPS 数据及依赖这些数据的图表；其他方法和引用资料保留在 P 清单中。';reason.value=state.reason;invalidate();};
+ const reasonLabel=node('label','未选目标的理由（只选部分目标时填写）'),reason=node('textarea');reason.value=state.reason;reason.disabled=Boolean(state.pending);reason.maxLength=2000;
+ reason.setAttribute('aria-label','未选论文目标的理由');reason.oninput=()=>{state.reason=reason.value;invalidate();};reasonLabel.append(reason);
+ const preview=node('button','查看所选范围与共享计算'),previewBox=node('div'),approve=node('button',state.pending?'核对并保存同一范围':'确认保存这份范围');
+ preview.disabled=state.selected.size===0||Boolean(state.pending);approve.disabled=!state.preview&&!state.pending;
+ const body=()=>({target_request_id:record.request_id,selected_ids:[...state.selected],exclusion_reason:state.reason,...(review?{target_review_id:review.review_id}:{})});
+ const showPreview=value=>{previewBox.replaceChildren();const scope=value.scope;
+  previewBox.append(node('p',`选择 ${scope.selected_ids.length} 项目标 · 共用 ${scope.dependencies.length} 组依赖（含上游）`),node('p',scope.kind==='continuation_scope'?'这是已有运行后的追加范围，原运行和失败记录保留，不补作事前冻结。':'这是运行前的新范围，仍需作者原流程方案与运行批准。','form-note'));
+  for(const dependency of scope.dependencies)previewBox.append(node('p',dependency.id+' · '+dependency.label));
+  for(const blocker of scope.blockers)previewBox.append(node('p',blocker.id+' · '+(blocker.missing.join('；')||'方法尚未核定'),'form-note'));
+  previewBox.append(node('small','范围摘要 '+value.scope_sha256));};
+ preview.onclick=async()=>{if(!alive()||preview.disabled)return;preview.disabled=true;notice.textContent='正在核对已选目标与来源，不调用模型或提交计算…';
+  const selection=body();try{const value=await api(`/api/tasks/${id}/reference-scopes/preview`,selection);if(!alive())return;
+   if(JSON.stringify(selection)!==JSON.stringify(body())){notice.textContent='预览期间选择已改变，请按当前选择重新核对。';return;}
+   state.preview={value,body:selection};showPreview(value);approve.disabled=false;notice.textContent='已生成完整范围预览。确认只保存这份范围；缺项仍须处理。';}
+  catch(error){if(alive()){state.preview=null;approve.disabled=true;notice.textContent='范围尚未核对：'+error.message;}}finally{if(alive())preview.disabled=false;}};
+ approve.onclick=async()=>{if(!alive()||approve.disabled)return;approve.disabled=true;
+  if(!state.pending){state.pending={...state.preview.body,revision:current.revision,scope_id:crypto.randomUUID().replaceAll('-',''),expected_scope_sha256:state.preview.value.scope_sha256};}
+  for(const input of controls.values())input.disabled=true;choose.disabled=true;reason.disabled=true;preview.disabled=true;
+  notice.textContent='正在保存原范围请求；不会派发 A 或 B…';
+  try{const value=await api(`/api/tasks/${id}/reference-scopes`,state.pending);if(!alive())return;
+   state.pending=null;state.preview=null;notice.textContent=`范围已保存：${value.scope.selected_ids.length} 项目标、${value.scope.dependencies.length} 组共享依赖。作者运行仍待方案与批准。`;
+   saved.replaceChildren(node('small','范围记录 '+value.id),node('p',value.scope.kind==='continuation_scope'?'已有运行的追加范围；原任务、失败、费用保留。':'已记录运行前范围。'));
+   for(const input of controls.values())input.disabled=false;choose.disabled=false;reason.disabled=false;preview.disabled=false;}
+  catch(error){if(alive()){notice.textContent='保存回执需核对：'+error.message+'；再点击只核对/发送同一范围身份，不建新身份。';approve.textContent='核对并保存同一范围';approve.disabled=false;}}
+ };
+ form.append(choose,choices,reasonLabel,preview,previewBox,approve,notice,saved);
+ if(state.preview)showPreview(state.preview.value);
+ try{const history=await api(`/api/tasks/${id}/reference-scopes`);if(alive()&&history.latest){const last=history.latest;
+  saved.append(node('p',`最近保存范围：${last.scope.selected_ids.length} 项目标 · ${last.scope.dependencies.length} 组依赖 · ${last.state==='recorded'?'来源可核对':'原来源暂不可核对，保留历史'}`),node('small','范围记录 '+last.id));}}
+ catch(error){if(alive())saved.append(node('p','已有范围记录暂不可读取：'+error.message,'form-note'));}
+}
 async function renderReferenceTargetAnalysis(panel,report,identity){
  const section=node('section',undefined,'reference-target-analysis');panel.append(section);
  const id=report.task_id,generation=renderPaperEvidence.generation,alive=()=>current?.id===id&&section.isConnected&&
@@ -3153,6 +3209,8 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
     for(const gap of group.missing)item.append(node('p','待核验：'+gap,'form-note'));
     for(const ref of group.citations)item.append(node('p',ref.source_locator),node('blockquote',ref.quote));groups.append(item);}content.append(groups);
    for(const limitation of answer.limitations)content.append(node('p',limitation,'form-note'));
+   if(current?.mode==='reproduction')await renderReferenceScopeSelection(content,id,latest,answer,review,alive);
+   if(!alive())return;
   }
   const history=node('details');history.append(node('summary',`查看 ${records.length} 次目标核定记录、失败原因与用量`));
   for(const record of records){const item=node('article');const label=({completed:'完整建议已返回',source_unavailable:'原建议保留，来源已变化',invalid_output:'建议未通过检查',failed:'模型调用未完成',unavailable:'出处或契约尚未齐备',paused:'来源或配置变化，已暂停',prepared:'已登记请求，正在核定',dispatching:'应用 AI 正在核定',reserved:'已登记请求，正在核定',calling:'应用 AI 正在核定',unknown:'请求状态待核对'})[record.state]||'状态待核对';item.append(node('p',(record.at?new Date(record.at).toLocaleString('zh-CN')+' · ':'')+label),node('small','请求 '+record.request_id));

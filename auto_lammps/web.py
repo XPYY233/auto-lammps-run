@@ -285,6 +285,19 @@ class ReferenceTargetAnalysisInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class ReferenceScopePreview(Input):
+    target_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    selected_ids: list[str] = Field(min_length=1, max_length=512)
+    exclusion_reason: str = Field(default='', max_length=2000)
+    target_review_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+
+
+class ReferenceScopeCreate(ReferenceScopePreview):
+    revision: int = Field(ge=1)
+    scope_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    expected_scope_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
                reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
     if execution_jobs:
@@ -428,6 +441,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             model_ledger_sha256=model_ledger_identity(context['client']))
     reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
         connection_provider=reference_target_connection)
+    from .reference_scope import ReferenceScopeService
+    reference_scopes = ReferenceScopeService(store, papers, reference_targets)
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
         source_discovery=source_discovery, reference_views=reference_evidence_views,
@@ -1277,6 +1292,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return reference_targets.review_existing(identifier, parent_request, context['client'],
             connection_revision=context['connection_revision'],
             credential_generation=context['credential_generation'])
+
+    @app.get('/api/tasks/{identifier}/reference-scopes')
+    def reference_scope_history(identifier: str):
+        return reference_scopes.status(identifier)
+
+    @app.post('/api/tasks/{identifier}/reference-scopes/preview')
+    def reference_scope_preview(identifier: str, data: ReferenceScopePreview):
+        require_open_task(identifier)
+        return reference_scopes.preview(identifier, data.target_request_id, data.selected_ids,
+            data.exclusion_reason, target_review_id=data.target_review_id)
+
+    @app.post('/api/tasks/{identifier}/reference-scopes')
+    def reference_scope_create(identifier: str, data: ReferenceScopeCreate):
+        require_open_task(identifier)
+        return reference_scopes.create(identifier, data.revision, data.scope_id, data.target_request_id,
+            data.selected_ids, data.exclusion_reason, target_review_id=data.target_review_id,
+            expected_scope_sha256=data.expected_scope_sha256)
 
     @app.get('/api/tasks/{identifier}/workbench/images/{entity_uid}')
     def workbench_image(identifier: str, entity_uid: str, source_sha256: str):

@@ -40,18 +40,38 @@ def chart_selection_context(options):
                 or any(not isinstance(column, dict) or not isinstance(column.get('name'), str)
                     or not column['name'] or not isinstance(column.get('unit'), str) for column in columns)):
             raise ScientificAdapterError('Verified chart column contract is missing')
+        categories = source.get('filter_categories', [])
+        if not isinstance(categories, list) or len(categories) > 20:
+            raise ScientificAdapterError('Verified chart category contract is missing')
+        seen = set()
+        for category in categories:
+            if (not isinstance(category, dict) or set(category) != {'name', 'values'}
+                    or not isinstance(category['name'], str) or not category['name']
+                    or category['name'] in seen or not isinstance(category['values'], list)
+                    or not 1 <= len(category['values']) <= 128
+                    or any(not isinstance(value, str) or not 1 <= len(value) <= 100
+                           for value in category['values'])
+                    or len(set(category['values'])) != len(category['values'])):
+                raise ScientificAdapterError('Verified chart category values are missing')
+            seen.add(category['name'])
         menu.append({'table_index': number, 'analysis_id': source['analysis_id'], 'file': source['file'],
-            'axes': [{'index': index, **column} for index, column in enumerate(columns)]})
-    return {'tool': 'verified_numeric_chart_selection', 'version': 1,
+            'axes': [{'index': index, **column} for index, column in enumerate(columns)],
+            'category_filters': [{'column_index': index, 'name': category['name'],
+                'values': [{'value_index': value_index, 'value': value}
+                           for value_index, value in enumerate(category['values'])]}
+                for index, category in enumerate(categories)]})
+    return {'tool': 'verified_numeric_chart_selection', 'version': 2,
         'source_sha256': sha256(Path(__file__).read_bytes()), 'menu': menu,
         'output_schema': {'table_index': 'integer menu index', 'x_index': 'integer axis index',
-            'y_index': 'different integer axis index'},
+            'y_index': 'different integer axis index',
+            'filters': 'optional 1..4 objects {column_index: integer, value_index: integer}; distinct columns; exact AND'},
         'execution': 'trusted_source_revalidation_and_full_two_column_CSV',
         'scientific_status': 'not_evaluated', 'new_physics_or_fit': False}
 
 
 def _selection(selection, options):
-    if isinstance(selection, dict) and set(selection) == {'table_index', 'x_index', 'y_index'}:
+    if isinstance(selection, dict) and set(selection) in (
+            {'table_index', 'x_index', 'y_index'}, {'table_index', 'x_index', 'y_index', 'filters'}):
         values = [selection[key] for key in ('table_index', 'x_index', 'y_index')]
         if any(type(value) is not int for value in values):
             raise ChartSelectionInvalid('chart_selection_index_invalid')
@@ -61,8 +81,27 @@ def _selection(selection, options):
         source = options[table]
         if x == y or any(not 0 <= axis < len(source['columns']) for axis in (x, y)):
             raise ChartSelectionInvalid('chart_axes_not_declared')
-        return dict(analysis_id=source['analysis_id'], file=source['file'],
-            x=source['columns'][x]['name'], y=source['columns'][y]['name'])
+        axes = dict(analysis_id=source['analysis_id'], file=source['file'],
+                    x=source['columns'][x]['name'], y=source['columns'][y]['name'])
+        if 'filters' in selection:
+            filters = selection['filters']
+            categories = source.get('filter_categories', [])
+            if not isinstance(filters, list) or not 1 <= len(filters) <= 4:
+                raise ChartSelectionInvalid('chart_filter_not_declared')
+            seen, resolved = set(), []
+            for item in filters:
+                if (not isinstance(item, dict) or set(item) != {'column_index', 'value_index'}
+                        or type(item['column_index']) is not int or type(item['value_index']) is not int
+                        or not 0 <= item['column_index'] < len(categories)
+                        or item['column_index'] in seen):
+                    raise ChartSelectionInvalid('chart_filter_not_declared')
+                category = categories[item['column_index']]
+                if not 0 <= item['value_index'] < len(category['values']):
+                    raise ChartSelectionInvalid('chart_filter_not_declared')
+                seen.add(item['column_index'])
+                resolved.append(dict(column=category['name'], value=category['values'][item['value_index']]))
+            axes['filters'] = resolved
+        return axes
     if not isinstance(selection, dict) or set(selection) != {'analysis_id', 'file', 'x', 'y'}:
         raise ChartSelectionInvalid('chart_output_shape_invalid')
     return selection
@@ -114,12 +153,16 @@ class ResultCharts:
         if len(options)>32:raise TaskError('结果表超过自动选图上限，请先在已有结果中自选图表。')
         return options
 
-    def _chart_data(self, identifier, analysis_id, name, x, y):
+    def _chart_data(self, identifier, analysis_id, name, x, y, filters=None):
         owners = [provider for provider in self.source_providers if provider.owns(analysis_id)]
         if len(owners) > 1:
             raise TaskError('图表来源适配器身份冲突。')
         if owners:
+            if filters is not None:
+                return owners[0].chart_data(identifier, analysis_id, name, x, y, filters=filters)
             return owners[0].chart_data(identifier, analysis_id, name, x, y)
+        if filters is not None:
+            raise TaskError('此结果来源未声明分类筛选能力。')
         if self.reader is None:
             raise TaskError('没有登记此图表来源。')
         return self.reader.chart_data(identifier, analysis_id, name, x, y)
@@ -136,7 +179,7 @@ class ResultCharts:
             state=row['state'] or 'unknown'
             if state=='completed' and chart:
                 try:
-                    data=self._chart_data(identifier,chart['analysis_id'],chart['file'],chart['x'],chart['y'])
+                    data=self._chart_data(identifier,chart['analysis_id'],chart['file'],chart['x'],chart['y'],chart.get('filters'))
                     saved=read_regular(self.directory/(row['id']+'.csv'),MAX_TABLE_BYTES,private=True)
                     if (data['csv_sha256']!=chart['csv_sha256'] or data['source_sha256']!=chart['source_sha256']
                             or saved!=data['csv']):
@@ -187,6 +230,10 @@ class ResultCharts:
             'You select ONE chart from verified numeric table metadata for a researcher. '
             'Return only JSON {"table_index":0,"x_index":0,"y_index":1}, using integer indices from the '
             'scientific_adapter verified numeric chart menu. The two axis indices must be different. '
+            'When a requested category or element pair is a declared category filter, add "filters":'
+            '[{"column_index":0,"value_index":0}] using only the chosen table menu. This is a shape example, '
+            'not a selection; use the actual category values. Filters are exact AND, distinct columns, at most four. '
+            'Omit filters when no subset was requested. Never use a text category as a numeric axis. '
             'This is an output SHAPE example, not a recommendation to choose table 0 or these axes. '
             'Never copy or guess hashes, filenames or column names. '
             'For requests that cannot be answered by one existing two-axis chart, return exactly '
@@ -239,7 +286,7 @@ class ResultCharts:
                 if axes['x']==axes['y'] or not all(
                     axes[key] in [column['name'] for column in matches[0]['columns']] for key in ('x','y')):
                     raise ChartSelectionInvalid('chart_axes_not_declared')
-                try:data=self._chart_data(identifier,axes['analysis_id'],axes['file'],axes['x'],axes['y'])
+                try:data=self._chart_data(identifier,axes['analysis_id'],axes['file'],axes['x'],axes['y'],axes.get('filters'))
                 except (ValueError,KeyError,TypeError,OSError,RuntimeError) as error:
                     raise ChartSourceChanged('Verified chart source changed') from error
                 if data['source_sha256']!=matches[0]['source_sha256']:

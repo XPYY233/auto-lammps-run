@@ -63,6 +63,52 @@ class ReferenceChartUserTests(unittest.TestCase):
         self.assertEqual(ordinary.history(self.identifier), [])
         self.assertEqual(self.calls.status()['used_requests'], 1)
 
+    def test_AI_selects_exact_category_from_active_menu_and_receipt_survives_restart(self):
+        self.base.add_categories()
+        self.transport.return_value = {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(
+            dict(table_index=0, x_index=0, y_index=1,
+                 filters=[dict(column_index=0, value_index=1), dict(column_index=1, value_index=0)]))}}]}
+        result = self.send().json()
+        self.assertEqual(result['state'], 'completed')
+        chart = result['chart']
+        self.assertEqual(chart['filters'], [dict(column='pair', value='X-Y'), dict(column='phase', value='final')])
+        self.assertEqual((chart['source_total_rows'], chart['rows'], chart['filtered_out_rows']), (5, 3, 2))
+        self.assertEqual(chart['preview_table_rows'], [1, 5])
+        self.assertEqual(self.web.get(self.url+'/'+'c'*32+'/download').content, b'cycle,A_energy\n0,1\n2,\n4,5\n')
+        payload = self.transport.call_args.args[4]
+        menu = json.loads(payload['messages'][-1]['content'])['scientific_adapter']['capabilities']['chart_selection']
+        self.assertEqual(menu['version'], 2)
+        self.assertEqual(menu['menu'][0]['category_filters'][0]['values'][1]['value'], 'X-Y')
+        with self.client() as reopened:
+            self.assertEqual(reopened.get(self.url).json()['charts'][0], result)
+        self.assertEqual(self.send().json(), result)
+        self.transport.assert_called_once()
+        for forbidden in ('P_ANSWER_CANARY', 'P_RECEIPT_CANARY', 'B_FROZEN_PRIVATE_CANARY', 'PRIVATE_'):
+            self.assertNotIn(forbidden, json.dumps(payload)+json.dumps(result))
+
+    def test_AI_cannot_invent_filter_or_duplicate_column_and_failure_is_not_retried(self):
+        self.base.add_categories()
+        for value, request in ((True, '1'*32), (999, '2'*32)):
+            self.transport.return_value = {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(
+                dict(table_index=0, x_index=0, y_index=1, filters=[dict(column_index=0, value_index=value)]))}}]}
+            first = self.send(request).json()
+            self.assertEqual(first['state'], 'invalid_output')
+            self.assertEqual(first['chart']['error_code'], 'chart_filter_not_declared')
+            self.assertEqual(self.send(request).json(), first)
+        self.assertEqual(self.transport.call_count, 2)
+
+    def test_changed_category_artifact_hides_saved_filter_plot(self):
+        self.base.add_categories()
+        self.transport.return_value = {'choices': [{'message': {'content': json.dumps(
+            dict(table_index=0, x_index=0, y_index=1, filters=[dict(column_index=0, value_index=1)]))}}]}
+        self.assertEqual(self.send().json()['state'], 'completed')
+        path = self.fixture.folder/'data.csv'
+        path.write_bytes(path.read_bytes().replace(b'X-Y', b'X-Z'))
+        item = self.web.get(self.url).json()['charts'][0]
+        self.assertEqual(item['state'], 'source_unavailable')
+        self.assertIsNone(item['chart'])
+        self.assertNotEqual(self.web.get(self.url+'/'+'c'*32+'/download').status_code, 200)
+
     def test_stale_source_blocks_before_model_and_change_hides_old_plot(self):
         self.assertEqual(self.send(source='a'*64).status_code, 409)
         self.transport.assert_not_called()
