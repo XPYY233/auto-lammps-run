@@ -25,6 +25,17 @@ def response(value=None, **changes):
 
 
 class DeepSeekTests(unittest.TestCase):
+    def test_full_input_capacity_is_bounded_and_old_default_is_preserved(self):
+        from auto_lammps.deepseek import MAX_INPUT_BYTES
+        self.assertEqual(DeepSeekConfig('synthetic-model').max_input_bytes, 65536)
+        config=DeepSeekConfig('synthetic-model', max_input_bytes=524288)
+        body=request_body(config,[{'role':'user','content':'Return json. '+('x'*300000)}])
+        self.assertGreater(len(body),262144)
+        with self.assertRaisesRegex(ModelError,'invalid_model_limits'):
+            DeepSeekConfig('synthetic-model',max_input_bytes=MAX_INPUT_BYTES+1)
+        with self.assertRaisesRegex(ModelError,'input_too_large'):
+            request_body(config,[{'role':'user','content':'Return json. '+('x'*524288)}])
+
     def test_limit_amendment_is_append_only_and_keeps_costs(self):
         from dataclasses import replace
         with tempfile.TemporaryDirectory() as folder:

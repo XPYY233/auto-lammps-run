@@ -20,6 +20,7 @@ from .tls_context import ssl_context
 
 APP_ID = 0x414C4D43
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_INPUT_BYTES = 1024 * 1024
 
 
 class ModelError(ValueError):
@@ -52,7 +53,7 @@ class DeepSeekConfig:
     def __post_init__(self):
         if not isinstance(self.model, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', self.model):
             raise ModelError('invalid_model')
-        for value, limit in ((self.max_output_tokens, 131072), (self.max_input_bytes, 262144), (self.timeout_seconds, 600)):
+        for value, limit in ((self.max_output_tokens, 131072), (self.max_input_bytes, MAX_INPUT_BYTES), (self.timeout_seconds, 600)):
             if type(value) is not int or not 1 <= value <= limit:
                 raise ModelError('invalid_model_limits')
 

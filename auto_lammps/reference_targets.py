@@ -532,7 +532,7 @@ class ReferenceTargetAnalysis:
             saved_call = client.calls.lookup(candidate['id']) or {}
             model_receipt = saved_call.get('receipt') or {}
             if model_receipt.get('state') != 'completed': continue
-            if (parent['input'] != context['input'] or parent['model_binding'] != context['model_binding']
+            if (parent['input'] != context['input'] or not self._revision_binding_matches(parent['model_binding'], context['model_binding'], client)
                     or saved_call.get('request_sha256') != parent['request_sha256']
                     or model_receipt.get('request_sha256') != parent['request_sha256']
                     or model_receipt.get('http_status') != 200 or model_receipt.get('finish_reason') != 'stop'
@@ -569,6 +569,24 @@ class ReferenceTargetAnalysis:
             return {**context, 'messages':messages, 'scientific_adapter':proof,
                 'request_sha256':sha256(body), 'revision_parent':revision}
         return context
+
+    @staticmethod
+    def _revision_binding_matches(previous, current, client):
+        if previous == current: return True
+        old, new = deepcopy(previous), deepcopy(current)
+        old_config, new_config = old.pop('config'), new.pop('config')
+        old_authority, new_authority = old.pop('authorization_sha256'), new.pop('authorization_sha256')
+        old_size, new_size = old_config.pop('max_input_bytes'), new_config.pop('max_input_bytes')
+        if old != new or old_config != new_config or not new_size > old_size: return False
+        # Only an explicit append-only controller policy may enlarge input.
+        # Model, key generation, thinking, output/time bounds and sources stay fixed.
+        with client.calls.transaction() as db:
+            policies=[row[0] for row in db.execute('SELECT document FROM policy WHERE id=1')]
+            policies.extend(row[0] for row in db.execute('SELECT document FROM policy_revisions ORDER BY seq'))
+        return (any(sha256(value.encode())==old_authority and json.loads(value)['config']==previous['config']
+                    for value in policies)
+                and sha256(policies[-1].encode())==new_authority
+                and json.loads(policies[-1])['config']==current['config'])
 
     @contextmanager
     def _lease(self, identifier):

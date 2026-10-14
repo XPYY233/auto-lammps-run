@@ -1,5 +1,6 @@
 """Synthetic same-answer revisions; no real model, paper or HPC."""
 from copy import deepcopy
+from dataclasses import replace
 import json
 import unittest
 from unittest.mock import patch
@@ -83,6 +84,25 @@ class ReferenceTargetIterationTests(unittest.TestCase):
             return value
         with patch.object(self.f.calls,'lookup',side_effect=modified):
             result=self.f.analyze(request_id='e'*32)
+        self.assertEqual(result['state'],'unavailable')
+        self.assertEqual(result['receipt']['error_code'],'revision_parent_changed')
+        self.assertEqual(len(self.f.sent),1)
+
+    def test_append_only_input_capacity_increase_can_reuse_original_answer_without_reset(self):
+        first,original=self.failed()
+        old=self.f.calls.config
+        self.f.calls.amend_limits(replace(old,max_input_bytes=524288),reason_sha256='a'*64)
+        result=self.f.analyze(request_id='e'*32)
+        self.assertEqual(result['state'],'unavailable')
+        self.assertEqual(len(self.f.sent),2)
+        payload=json.loads(self.f.sent[1]['messages'][-1]['content'])
+        self.assertEqual(payload['reference_target_revision']['complete_previous_answer'],original['receipt']['structured_output'])
+        self.assertEqual(self.f.calls.lookup(self.f.request_id),original)
+        self.assertEqual(self.f.calls.status()['used_requests'],2)
+
+    def test_output_limit_amendment_does_not_silently_rebind_a_previous_answer(self):
+        self.failed();self.f.calls.amend_limits(replace(self.f.calls.config,max_output_tokens=20000),reason_sha256='a'*64)
+        result=self.f.analyze(request_id='e'*32)
         self.assertEqual(result['state'],'unavailable')
         self.assertEqual(result['receipt']['error_code'],'revision_parent_changed')
         self.assertEqual(len(self.f.sent),1)
