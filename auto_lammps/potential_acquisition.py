@@ -211,18 +211,18 @@ class MeamAcquisition:
         return report
 
 
-def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None, policy=None, capture=None):
+def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None, policy=None, capture=None,
+                            discovery_library=None):
     paper = papers.get(identifier)
-    candidates = [c for c in paper.get('source_discovery', {}).get('candidates', [])
-                  if c.get('association') == 'doi_and_title']
-    if len(candidates) != 1:
+    from .reference_resource_association import reference_resource_candidate
+    candidate = reference_resource_candidate(paper, discovery_library=discovery_library)
+    if candidate is None:
         return {'state': 'source_unresolved'}
-    candidate, = candidates
     if reader is None:
         from .remote_resources import RemoteResources
         options = {'capture': capture} if capture is not None else {}
         acquisition = RemoteResources(audit_directory, policy, **options).acquire(candidate['repository'], candidate['commit'])
-        papers.record_reference_resources(identifier, acquisition)
+        papers.record_reference_resources(identifier, acquisition, discovery_library=discovery_library)
         report = acquisition.get('potential_acquisition')
         if report is None:
             return {'state': acquisition['state'], 'bindings': [], 'files': []}
@@ -230,7 +230,7 @@ def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None,
         if policy is not None:
             raise AcquisitionError('Synthetic reader cannot be combined with HPC policy')
         report = MeamAcquisition(audit_directory, reader=reader).acquire(candidate['repository'], candidate['commit'])
-    papers.record_potential_acquisition(identifier, report)
+    papers.record_potential_acquisition(identifier, report, discovery_library=discovery_library)
     return report
 
 

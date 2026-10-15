@@ -42,6 +42,18 @@ class PaperWorkflowTests(unittest.TestCase):
     def save_catalog(self):
         self.catalog_file.write_bytes(canonical(self.catalog)); self.catalog_file.chmod(0o600)
 
+    def test_check_resources_retains_real_catalog_binding_without_claiming_search_or_fetch(self):
+        self.catalog['tier_a']=[self.row()]; self.save_catalog()
+        report=self.service.prepare_resources(self.task['id'],self.task['revision'])
+        saved=self.papers.get(self.paper['id'])
+        self.assertIn('resource_catalog_association',saved)
+        self.assertNotIn('source_discovery',saved)
+        self.assertNotIn('reference_resources',saved)
+        self.assertFalse(report['resources']['source_ready'])
+        before=saved['revision']
+        self.service.prepare_resources(self.task['id'],self.task['revision'])
+        self.assertEqual(self.papers.get(self.paper['id'])['revision'],before)
+
     def row(self, **changes):
         return dict(repo=NAME, commit=COMMIT, title=TITLE, doi=DOI, pair_style=['meam'],
             potentials=['library.meam', 'alloy.meam'], inputs=['in.alloy'], elements=['Co', 'Ni'],

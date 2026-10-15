@@ -414,16 +414,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def reference_target_sources(identifier):
         report = paper_evidence_views.get(identifier) if paper_evidence_views else None
         if not report or not report.get('target_inventory'):
-            raise TaskError('本论文已提取 P 的完整目标清单尚未接入；未从仓库默认批次推定目标。')
+            return workbench_targets.reference_target_source(identifier)
         binding = workbench_binding(identifier)
         reader = getattr(getattr(workbench_bridge, 'runtime', None), 'native_paper_sources_reader', None)
         if binding is None or not callable(reader):
             raise TaskError('文献工作台的完整原文出处读取尚未接入；不以图表标签代替原文。')
-        if binding.paper_id != report['paper_id']:
-            raise TaskError('原文绑定与已提取 P 不属于同一篇论文。')
         original = reader(binding.workbench_paper_id)
         if original['pdf_sha256'] != binding.pdf_sha256:
             raise TaskError('原论文 PDF 摘要已变化；未将新正文与旧 P 混用。')
+        if binding.paper_id != report['paper_id']:
+            raise TaskError('原文绑定与已提取 P 不属于同一篇论文。')
         return dict(task_id=identifier, paper_id=report['paper_id'],
             paper={'title': report['title'], 'doi': report['doi']},
             role='paper_reference_human_only', inventory=report['target_inventory'],
@@ -439,6 +439,41 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             connection_revision=context['connection_revision'],
             credential_generation=context['credential_generation'],
             model_ledger_sha256=model_ledger_identity(context['client']))
+    def workbench_target_sources(identifier):
+        binding = workbench_binding(identifier)
+        if binding is None or workbench_bridge is None:
+            raise TaskError('这篇论文的原生文献工作台绑定尚未配置。')
+        receipts = workbench_bridge.history(identifier)
+        published = [row for row in receipts if row.get('state') in {'completed','completed_with_limitations'}
+            and row.get('source_sha256') == binding.pdf_sha256
+            and row.get('workbench_status') in {'completed','saved_index_pending'}]
+        if not published:
+            raise TaskError('请先完成原生工作台的全文核验与发布；失败或未知请求不能替代完整 P。')
+        receipt = published[-1]
+        if (receipt.get('task_id') != identifier or receipt.get('paper_id') != binding.paper_id
+                or receipt.get('role') != 'paper_reference_human_only'
+                or not isinstance(receipt.get('source_receipt_sha256'), str)):
+            raise TaskError('原生 P 发布回执与当前论文身份不一致。')
+        evidence = workbench_bridge.evidence(identifier, binding)
+        reader = getattr(workbench_bridge.runtime, 'native_paper_sources_reader', None)
+        if not callable(reader):
+            raise TaskError('原生 P 的完整原文读取能力尚未连接。')
+        original = reader(binding.workbench_paper_id)
+        if (original['pdf_sha256'] != binding.pdf_sha256
+                or evidence['paper_id'] != binding.paper_id
+                or evidence['source_sha256'] != binding.pdf_sha256):
+            raise TaskError('原生 P、PDF 与当前任务的来源摘要不一致。')
+        artifacts = {key:evidence[key] for key in ('items','visuals')}
+        digest = sha256(canonical(receipt))
+        return dict(task_id=identifier, paper_id=binding.paper_id,
+            paper={key:evidence[key] for key in ('title','doi')}, role='paper_reference_human_only',
+            sources=original['sources'], **artifacts,
+            publication=dict(state='published', request_id=receipt['request_id'],
+                receipt_sha256=digest, artifacts_sha256=sha256(canonical(artifacts))),
+            source_binding=dict(pdf_sha256=binding.pdf_sha256, source_receipt_sha256=digest))
+    from .workbench_target_inventory import WorkbenchTargetInventory
+    workbench_targets = WorkbenchTargetInventory(store, papers, workbench_target_sources,
+        connection_provider=reference_target_connection)
     reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
         connection_provider=reference_target_connection)
     from .reference_scope import ReferenceScopeService
@@ -1256,6 +1291,39 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if result is None:
             raise TaskError('没有这条文献提取记录。')
         return result
+
+    @app.get('/api/tasks/{identifier}/workbench/targets')
+    def workbench_target_history(identifier: str):
+        store.get(identifier)
+        ready, reason = False, ''
+        try:
+            workbench_target_sources(identifier)
+            ready = True
+        except (TaskError, ValueError, OSError):
+            reason = '请先完成本论文的原生 P 提取与发布；失败或未知请求不会被当成完整 P。'
+        return dict(task_id=identifier, history=workbench_targets.history(identifier),
+            status=workbench_targets.status(identifier), source=workbench_targets.source_report(identifier),
+            published_P_ready=ready, disabled_reason=reason,
+            execution_authorized=False, B_input=False)
+
+    @app.post('/api/tasks/{identifier}/workbench/targets')
+    def generate_workbench_targets(identifier: str, data: ReferenceTargetAnalysisInput):
+        require_open_task(identifier)
+        context = workbench_context(identifier)
+        if not context['enabled']:
+            raise TaskError('请先启用本项目应用模型连接。')
+        return workbench_targets.generate(identifier, data.request_id, context['client'],
+            connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'])
+
+    @app.post('/api/tasks/{identifier}/workbench/targets/{request_id}/import')
+    def import_workbench_targets(identifier: str, request_id: str, data: Revision):
+        require_open_task(identifier)
+        paper_workflow._editable(identifier, data.revision, before_execution=True)
+        source = workbench_targets.source_report(identifier, request_id)
+        if source['state'] != 'completed':
+            raise TaskError('这份工作台图表库存尚未完整生成或原 P 已变化；不能导入。')
+        return store.import_target_inventory(identifier, data.revision, source['report']['inventory'])
 
     @app.get('/api/paper-recommendations')
     def paper_recommendation_menu():

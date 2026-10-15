@@ -326,7 +326,18 @@ class PaperStore:
             self._write(db, doc, 'source_search_completed:'+search_id)
         return self.get(identifier)
 
-    def record_potential_acquisition(self, identifier, report):
+    def record_catalog_association(self, identifier, report, *, discovery_library):
+        """Record actual catalog selection, never manufacture a search result."""
+        from .reference_resource_association import validate_catalog_association
+        with self.tasks.transaction() as db:
+            doc = self._read(db, identifier)
+            verified = validate_catalog_association(doc, report, discovery_library)
+            if doc.get('resource_catalog_association') != verified:
+                doc['resource_catalog_association'] = verified
+                self._write(db, doc, 'resource_catalog_associated:'+verified['id'])
+        return self.get(identifier)
+
+    def record_potential_acquisition(self, identifier, report, *, discovery_library=None):
         """Reference controller records collection; grants no use or score approval."""
         if (not isinstance(report, dict) or report.get('schema_version') != 1
                 or report.get('state') not in {'finished', 'partial'}
@@ -338,10 +349,8 @@ class PaperStore:
         acquisition_id = task_id(report.get('id'))
         with self.tasks.transaction() as db:
             doc = self._read(db, identifier)
-            candidates = doc.get('source_discovery', {}).get('candidates', [])
-            if not any(c.get('association') == 'doi_and_title' and
-                       c.get('repository') == report.get('repository') and
-                       c.get('commit') == report.get('commit') for c in candidates):
+            from .reference_resource_association import reference_resource_matches
+            if not reference_resource_matches(doc, report, discovery_library=discovery_library):
                 raise TaskError('势函数来源与已核对的论文仓库不一致')
             if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?',
                           (identifier, 'potential_acquired:'+acquisition_id)).fetchone():
@@ -350,7 +359,7 @@ class PaperStore:
             self._write(db, doc, 'potential_acquired:'+acquisition_id)
         return self.get(identifier)
 
-    def record_reference_resources(self, identifier, report):
+    def record_reference_resources(self, identifier, report, *, discovery_library=None):
         """Remote source identities for the reference side; no scientific pass."""
         if (not isinstance(report, dict) or report.get('schema_version') != 1
                 or report.get('state') not in {'finished', 'partial', 'unknown'}
@@ -362,10 +371,8 @@ class PaperStore:
         acquisition_id = task_id(report.get('id'))
         with self.tasks.transaction() as db:
             doc = self._read(db, identifier)
-            if not any(c.get('association') == 'doi_and_title' and
-                       c.get('repository') == report.get('repository') and
-                       c.get('commit') == report.get('commit')
-                       for c in doc.get('source_discovery', {}).get('candidates', [])):
+            from .reference_resource_association import reference_resource_matches
+            if not reference_resource_matches(doc, report, discovery_library=discovery_library):
                 raise TaskError('超算参考资料与已核对的论文仓库不一致')
             event = 'reference_resources_prepared:'+acquisition_id+':'+report['state']
             if db.execute('SELECT 1 FROM paper_revisions WHERE paper_id=? AND event=?', (identifier, event)).fetchone():

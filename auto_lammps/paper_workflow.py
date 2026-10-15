@@ -127,9 +127,11 @@ class PaperWorkflowService:
         # discovery row merely because it lists two kinds or a familiar name.
         source = paper.get('reference_resources') or {}
         potential = paper.get('potential_acquisition') or source.get('potential_acquisition') or {}
-        matches = [c for c in paper.get('source_discovery', {}).get('candidates', [])
-            if c.get('association') == 'doi_and_title' and c.get('repository') == source.get('repository')
-            and c.get('commit') == source.get('commit')]
+        from .reference_resource_association import reference_resource_matches
+        try:
+            matches = reference_resource_matches(paper, source, discovery_library=self.library)
+        except TaskError:
+            matches = False
         source_files, models = _files(source.get('files')), _files(potential.get('files'))
         ready = bool(matches and source.get('state') == 'finished' and source.get('location') == 'hpc'
             and source.get('source_complete') is True and source_files
@@ -270,8 +272,15 @@ class PaperWorkflowService:
             actions=actions, execution_authorized=False)
 
     def prepare_resources(self, identifier, revision):
-        self._editable(identifier, revision)
-        # Intentionally a fresh catalog/receipt read, not a download or run.
+        _, paper = self._editable(identifier, revision)
+        resources = self._resources(paper)
+        paired = [row for row in resources['bundles'] if row['candidate_complete']]
+        if len(paired) == 1:
+            from .reference_resource_association import ReferenceResourceAssociation
+            ReferenceResourceAssociation(self.papers, self.library).associate(paper['id'],
+                [row['id'] for row in paired[0]['entries']], catalog_sha256=resources['catalog_sha256'])
+        # This retains a real catalog association, not a search or acquisition.
+        # Original files still require the independent HPC retrieval receipt.
         return self.get(identifier)
 
     def search_github(self, identifier, revision):

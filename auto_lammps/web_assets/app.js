@@ -2998,6 +2998,7 @@ function appendWorkbenchEntry(box){
   const refresh=node('button','查看提取进度与已保存数据','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
   const evidence=record.evidence;if(!evidence)return;
   content.append(node('h3',evidence.title),node('p','DOI '+evidence.doi+' · 论文原文结果 P'));
+  appendWorkbenchTargetInventory(content,id,active);
   if(evidence.items?.length){
    const table=node('table',undefined,'reference-data-table');
    const head=node('tr');for(const text of ['数值','单位','含义','来源'])head.append(node('th',text));table.append(head);
@@ -3017,6 +3018,54 @@ function appendWorkbenchEntry(box){
  };
  entry.loadWorkbench=async()=>{if(!active())return;const generation=++loadGeneration,record=await api(`/api/tasks/${id}/workbench`);if(active()&&generation===loadGeneration&&record.task_id===id){draw(record);if(entry.poll)clearTimeout(entry.poll);if((record.jobs||[]).some(job=>['queued','dispatching'].includes(job.state)))entry.poll=setTimeout(()=>{if(active()&&!pending)entry.loadWorkbench().catch(()=>{if(active())content.append(node('p','进度暂未刷新；后台提取和已有记录保留，请稍后刷新。','form-note'));});},6000);}};
  const load=node('button','打开文献提取与已有证据','quiet');load.onclick=()=>action(entry.loadWorkbench);content.append(load);
+}
+function appendWorkbenchTargetInventory(container,id,parentActive){
+ const panel=node('details',undefined,'reference-target-analysis');container.append(panel);
+ panel.append(node('summary','整理 P 的图表目标、优先级与共享计算依赖'));
+ const area=node('div');panel.append(area);
+ const alive=()=>current?.id===id&&parentActive()&&panel.isConnected;
+ let pending=false,readGeneration=0;
+ async function refresh(){
+  const generation=++readGeneration;
+  const data=await api(`/api/tasks/${id}/workbench/targets`);
+  if(!alive()||generation!==readGeneration||data.task_id!==id)return;
+  area.replaceChildren(node('p','应用 AI 根据已发布 P 和完整原文整理目标；不会替你选择范围、冻结任务或提交计算。','form-note'));
+  if(data.disabled_reason)area.append(node('p',data.disabled_reason,'form-note'));
+  const saved=data.source,report=saved?.state==='completed'?saved.report:null;
+  if(report){
+   area.append(node('h4','完整目标清单 · AI 建议，尚未选定本次范围'),node('p',report.inventory.coverage_note));
+   const table=node('table',undefined,'reference-data-table'),head=node('tr');
+   for(const label of ['优先级','原文目标','工况','所需数据与可用性'])head.append(node('th',label));table.append(head);
+   for(const target of report.inventory.targets){const row=node('tr');
+    for(const value of [report.priorities[target.id],target.label,target.conditions,target.outputs+' · '+target.availability])row.append(node('td',String(value??'—')));table.append(row);
+   }area.append(table);
+   for(const note of report.limitations||[])area.append(node('p',note,'form-note'));
+   const use=node('button','使用这份 P 目标清单，继续选择范围','quiet');area.append(use);
+   use.onclick=()=>action(async()=>{if(!alive()||use.disabled)return;use.disabled=true;
+    const updated=await api(`/api/tasks/${id}/workbench/targets/${saved.request_id}/import`,{revision:current.revision});
+    if(!alive())return;current=updated;await afterChange('P 目标清单已读取；请核对范围与条件，尚未提交计算。');
+   });
+   await renderReferenceTargetAnalysis(area,{task_id:id},id+':'+report.input_sha256);
+   if(!alive())return;
+  }else if(saved?.state==='stale')area.append(node('p','原 P 已变化；旧库存与费用仍保留，不能混用新旧来源。','error'));
+  const history=node('details');history.append(node('summary',`查看 ${data.history.length} 次目标整理、失败原因与模型用量`));
+  for(const item of data.history){const row=node('article');
+   row.append(node('p','请求 '+item.request_id+' · '+item.state));
+   if(item.receipt?.message)row.append(node('p',item.receipt.message));
+   if(Number.isInteger(item.usage?.total_tokens))row.append(node('small','已记录模型用量 '+item.usage.total_tokens));history.append(row);
+  }area.append(history);
+  const run=node('button','让应用 AI 整理完整 P 为图表目标','primary');
+  run.disabled=pending||Boolean(report)||!data.published_P_ready||data.status.blocked||data.status.remaining_rounds===0;
+  const note=node('p',`已使用 ${data.status.used_rounds}/${data.status.maximum_rounds} 轮；保留完整前稿、错误和费用。`,'form-note');
+  run.onclick=async()=>{if(!alive()||run.disabled)return;pending=true;run.disabled=true;note.textContent='应用 AI 正在整理完整 P；可以离开页面，返回后查看同一请求记录。';
+   try{await api(`/api/tasks/${id}/workbench/targets`,{request_id:crypto.randomUUID().replaceAll('-','')});}
+   catch(error){if(alive())note.textContent='原目标整理请求需要核对：'+error.message;}
+   finally{pending=false;if(alive())await refresh();}
+  };
+  const reload=node('button','刷新图表目标整理记录','quiet');reload.onclick=()=>refresh().catch(error=>{if(alive())notice(error.message,true);});
+  area.append(run,reload,note);
+ }
+ const load=node('button','查看 P 目标整理与已有记录','quiet');load.onclick=()=>refresh().catch(error=>{if(alive())notice(error.message,true);});area.append(load);
 }
 function paperWorkflowAction(item,status){
  const row=node('div',undefined,'workflow-action'),id=current.id,generation=refreshPaperWorkflow.generation;
