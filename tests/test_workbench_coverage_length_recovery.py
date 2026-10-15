@@ -191,6 +191,112 @@ class CoverageLengthEvidenceTests(unittest.TestCase):
         with self.fixture.tasks.transaction() as db:
             self.assertEqual(self.bridge._continuation(db, 'c'*32)['job_token'], child_token)
 
+    def admit_unpaid_child_near_parent_expiry(self):
+        self.begin_failure()
+        parent = self.bridge.runtime.native_recovery_reader(self.token)
+        issued = parent['checkpoint'].manifest.expires_at - 100
+        with patch('auto_lammps.workbench_known_failure.time.time', return_value=issued):
+            with patch.object(self.bridge.runtime.ports.assembler, 'preflight',
+                    side_effect=TaskError('Synthetic unpaid interruption')):
+                result = self.extract(self.child_id, resume_of=self.original_id)
+        self.assertEqual(result['state'], 'failed', result)
+        self.assertEqual(result['model_request_ids'], [])
+        with self.fixture.tasks.transaction() as db:
+            token = self.bridge._continuation(db, self.child_id)['job_token']
+        child = self.bridge.runtime.native_recovery_reader(token)
+        self.assertEqual(child['checkpoint'].manifest.issued_at, issued)
+        self.assertEqual(child['job'].issued_at, issued)
+        lifetime = min(86400,
+            parent['checkpoint'].manifest.expires_at - parent['checkpoint'].manifest.issued_at,
+            int(parent['job'].expires_at - parent['job'].issued_at))
+        self.assertEqual(child['checkpoint'].manifest.expires_at, issued + lifetime)
+        self.assertEqual(child['job'].expires_at, issued + lifetime)
+        self.assertGreater(issued + lifetime, parent['checkpoint'].manifest.expires_at)
+        self.assert_unchanged()
+        return parent, child, token
+
+    @unittest.skipUnless(coverage_native_available(), 'optional coverage continuation dependency is unavailable')
+    def test_expired_parent_only_reproves_and_resumes_the_existing_sealed_child(self):
+        parent, child, token = self.admit_unpaid_child_near_parent_expiry()
+        self.fixture.restart()
+        future = parent['checkpoint'].manifest.expires_at + 10
+        with patch('auto_lammps.workbench_known_failure.time.time', return_value=future):
+            options = self.bridge.recovery_options(self.fixture.task['id'], self.fixture.binding,
+                self.client, connection_revision=1, credential_generation=1)
+            self.assertTrue(next(row for row in options if row['resume_of'] == self.child_id)['enabled'], options)
+            with patch.object(self.bridge.runtime.ports.assembler._starter, 'start',
+                    side_effect=AssertionError('An expired parent must not create a fresh scan')):
+                result = self.extract('c'*32, resume_of=self.child_id)
+        self.assertEqual(result['state'], 'no_evidence_published', result)
+        self.assertEqual(result['reused_model_calls'], 14)
+        self.assertEqual(result['inherited_failed_reserved_tokens'], 12000)
+        with self.fixture.tasks.transaction() as db:
+            self.assertEqual(self.bridge._continuation(db, 'c'*32)['job_token'], token)
+        saved = self.bridge.runtime.native_recovery_reader(token)
+        self.assertEqual(saved['checkpoint'].manifest.issued_at, child['checkpoint'].manifest.issued_at)
+        self.assertEqual(saved['checkpoint'].manifest.expires_at, child['checkpoint'].manifest.expires_at)
+        self.assertEqual(known_fixtures.NormalKnownFailureBridgeTests.checkpoint_bytes(
+            self.bridge.runtime.native_recovery_reader(self.token)), self.parent_bytes)
+
+    @unittest.skipUnless(coverage_native_available(), 'optional coverage continuation dependency is unavailable')
+    def test_expired_parent_without_admitted_child_is_not_renewable(self):
+        self.begin_failure()
+        parent = self.bridge.runtime.native_recovery_reader(self.token)
+        with patch('auto_lammps.workbench_known_failure.time.time',
+                return_value=parent['checkpoint'].manifest.expires_at + 1):
+            with self.assertRaises(TaskError):
+                self.extract(self.child_id, resume_of=self.original_id)
+        self.assert_unchanged()
+        with self.fixture.tasks.transaction() as db:
+            self.assertIsNone(self.bridge._continuation(db, self.child_id))
+
+    @unittest.skipUnless(coverage_native_available(), 'optional coverage continuation dependency is unavailable')
+    def test_claim_without_sealed_child_cannot_reprove_expired_parent(self):
+        self.begin_failure()
+        runtime = self.bridge.runtime
+        self.bridge.runtime = replace(runtime, native_known_failure_creator=lambda *a, **k:
+            (_ for _ in ()).throw(TaskError('Synthetic failure before child admission')))
+        result = self.extract(self.child_id, resume_of=self.original_id)
+        self.assertEqual(result['state'], 'failed', result)
+        self.assertEqual(result['model_request_ids'], [])
+        self.bridge.runtime = runtime
+        parent = runtime.native_recovery_reader(self.token)
+        from auto_lammps.workbench_known_failure import known_failure_context
+        with self.assertRaises(TaskError):
+            known_failure_context(self.bridge, self.fixture.task['id'], self.original_id,
+                self.fixture.binding, self.client, connection_revision=1, credential_generation=1,
+                continuation_request_id=self.child_id, now=parent['checkpoint'].manifest.expires_at + 1)
+        self.assert_unchanged()
+
+    @unittest.skipUnless(coverage_native_available(), 'optional coverage continuation dependency is unavailable')
+    def test_expired_parent_requires_exact_child_lineage_and_live_child_window(self):
+        parent, child, token = self.admit_unpaid_child_near_parent_expiry()
+        from auto_lammps.workbench_known_failure import known_failure_context
+        runtime = self.bridge.runtime
+        checkpoint = child['checkpoint']
+        future = parent['checkpoint'].manifest.expires_at + 10
+        mutations = (
+            replace(checkpoint, continuation_lineage=replace(checkpoint.continuation_lineage,
+                parent_checkpoint_digest='d'*64)),
+            replace(checkpoint, continuation_lineage=replace(checkpoint.continuation_lineage,
+                parent_job_state_digest='d'*64)),
+            replace(checkpoint, continuation_lineage=replace(checkpoint.continuation_lineage,
+                continuation_request_id='d'*32)),
+            replace(checkpoint, manifest=replace(checkpoint.manifest,
+                issued_at=parent['checkpoint'].manifest.expires_at)),
+            replace(checkpoint, manifest=replace(checkpoint.manifest, expires_at=future)),
+        )
+        for changed in mutations:
+            with self.subTest(changed=changed.manifest.issued_at):
+                self.bridge.runtime = replace(runtime, native_recovery_reader=lambda value:
+                    {**child, 'checkpoint': changed} if value == token else runtime.native_recovery_reader(value))
+                with self.assertRaises(TaskError):
+                    known_failure_context(self.bridge, self.fixture.task['id'], self.original_id,
+                        self.fixture.binding, self.client, connection_revision=1, credential_generation=1,
+                        continuation_request_id=self.child_id, now=future)
+        self.bridge.runtime = runtime
+        self.assert_unchanged()
+
     @unittest.skipUnless(coverage_native_available(), 'optional coverage continuation dependency is unavailable')
     def test_maximum_fragment_parent_uses_only_authenticated_513th_slot(self):
         import fitz
@@ -234,6 +340,33 @@ class CoverageLengthEvidenceTests(unittest.TestCase):
         self.assertEqual(context.recovery_metadata['max_tokens'], 4620000)
         self.assertEqual(context.proof_kwargs['max_output_tokens'], 12000)
         self.assertEqual(len(self.outgoing), 156)  # Preview never dispatches.
+        from auto_research.evidence.literature_extraction_job import LiteratureExtractionJobError
+        export = self.bridge.runtime.jobs.export_private_state
+        def next_stage(token, **kwargs):
+            raw = export(token, **kwargs)
+            if self.bridge.runtime.decode_job_state(raw).stage['name'] == 'coverage_verification':
+                raise LiteratureExtractionJobError('literature_job_state_invalid',
+                    'Synthetic stop after the complete restored coverage stage')
+            return raw
+        with patch.object(self.bridge.runtime.ports.assembler._starter, 'start',
+                side_effect=AssertionError('Recovery must not restart the source scan')):
+            with patch.object(self.bridge.runtime.jobs, 'export_private_state', next_stage):
+                recovered = self.extract(self.child_id, resume_of=self.original_id)
+        self.assertEqual(recovered['state'], 'failed', recovered)
+        self.assertEqual(recovered['reused_model_calls'], 155)
+        self.assertEqual(recovered['inherited_failed_reserved_tokens'], 12000)
+        self.assertEqual(recovered['new_model_calls'], 97)
+        self.assertEqual(len(self.outgoing), 253)
+        self.assertEqual(self.outgoing[156]['max_tokens'], 32000)
+        with self.fixture.tasks.transaction() as db:
+            child_token = self.bridge._continuation(db, self.child_id)['job_token']
+        child = self.bridge.runtime.native_recovery_reader(child_token)
+        self.assertEqual(child['checkpoint'].manifest.max_calls, 513)
+        self.assertEqual(child['checkpoint'].spent_calls, 253)
+        self.assertEqual(child['checkpoint'].receipts[:155], parent['checkpoint'].receipts[:-1])
+        self.assertEqual(child['checkpoint'].stage, 'coverage_gap')
+        self.assertEqual(len(child['execution'].completed_results), 126)
+        self.assertEqual(child['checkpoint'].continuation_lineage.failed_receipt.max_tokens, 12000)
 
 
 if __name__ == '__main__':

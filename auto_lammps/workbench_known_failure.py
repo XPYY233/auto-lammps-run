@@ -44,6 +44,7 @@ class KnownFailureContext:
     prefix_digests: tuple
     model_request_ids: tuple
     recovery_metadata: dict
+    planning_time: int
 
 
 def _evidence(bridge, identifier, request_id, binding, client, *,
@@ -150,8 +151,7 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
         and manifest.credential_generation == credential_generation
         and tuple(manifest.task_models) == (('analysis', client.model), ('extraction', client.model))
         and manifest.executor_id == adapter.installed['executor']['id']
-        and manifest.executor_version == adapter.installed['executor']['version']
-        and manifest.expires_at > now)
+        and manifest.executor_version == adapter.installed['executor']['version'])
     stage = job.stage
     prefix = execution.completed_results
     receipts = checkpoint.receipts
@@ -276,8 +276,57 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
         native_capability_sha256=current_native, prior_native_capability_sha256=prior_native,
         intent_sha256=sha256(canonical(original)), receipt_sha256=sha256(canonical(failure)),
         checkpoint_revision=checkpoint.revision)
-    return KnownFailureContext(token, proof_kwargs, tuple(deepcopy(prefix)),
-        tuple(native_digest(r) for r in prefix), tuple(call_ids), metadata), native
+    context = KnownFailureContext(token, proof_kwargs, tuple(deepcopy(prefix)),
+        tuple(native_digest(r) for r in prefix), tuple(call_ids), metadata, int(now))
+    if manifest.expires_at <= now:
+        # A consumed parent may be re-proved for its existing child only. A
+        # renderer claim alone cannot renew it or admit another child.
+        _require(claimed is not None and claimed['id'] == continuation_request_id)
+        planning_time = _existing_child_planning_time(bridge, context, native,
+            continuation_request_id, now)
+        context = replace(context, planning_time=planning_time)
+    return context, native
+
+
+def _existing_child_planning_time(bridge, context, parent, request_id, now):
+    _require(request_id is not None)
+    from auto_research.evidence.literature_task_checkpoint_codec import encode_checkpoint
+    token = bridge._known_child_token(context.parent_token, request_id)
+    child = bridge.runtime.native_recovery_reader(token)
+    checkpoint, job = child['checkpoint'], child['job']
+    original, original_job = parent['checkpoint'], parent['job']
+    lineage = checkpoint.continuation_lineage
+    issued = checkpoint.manifest.issued_at
+    lifetime = min(86_400, original.manifest.expires_at - original.manifest.issued_at,
+        int(original_job.expires_at - original_job.issued_at))
+    _require(lineage is not None and lineage.parent_task_id == original.manifest.task_id
+        and lineage.parent_revision == original.revision
+        and lineage.parent_checkpoint_digest == sha256(encode_checkpoint(original))
+        and lineage.parent_job_state_digest == sha256(parent['execution'].job_state)
+        and lineage.failed_receipt == original.receipts[-1]
+        and lineage.continuation_request_id == request_id
+        and tuple(lineage.prefix_result_digests) == context.prefix_digests
+        and canonical(json.loads(lineage.proof_bytes)) == canonical({
+            'schema_version': 'literature-known-length-proof-v1', **context.proof_kwargs})
+        and lineage.original_max_calls == original.manifest.max_calls
+        and lineage.original_max_tokens == original.manifest.max_tokens
+        and type(issued) is int and original.manifest.issued_at <= issued < original.manifest.expires_at
+        and lifetime > 0 and checkpoint.manifest.expires_at == issued + lifetime > now
+        and job.issued_at == issued and job.expires_at == issued + lifetime
+        and checkpoint.manifest.task_id == 'literature_' + sha256(token.encode())
+        and checkpoint.manifest.max_calls == original.manifest.max_calls + 1
+        and checkpoint.manifest.max_tokens == original.manifest.max_tokens + 32_000
+        and checkpoint.receipts[:len(original.receipts) - 1] == original.receipts[:-1]
+        and checkpoint.spent_calls >= original.spent_calls
+        and checkpoint.spent_tokens >= original.spent_tokens
+        and job.token == token and job.paper_id == original_job.paper_id
+        and dict(job.paper) == dict(original_job.paper) and job.snapshot == original_job.snapshot
+        and job.chunks == original_job.chunks and job.experiment_profile == original_job.experiment_profile
+        and job.focuses == original_job.focuses and job.learning_guidance == original_job.learning_guidance)
+    for field in ('session_digest', 'provider_id', 'runtime_revision', 'credential_generation',
+            'task_models', 'executor_id', 'executor_version', 'pdf_snapshot_fingerprint'):
+        _require(getattr(checkpoint.manifest, field) == getattr(original.manifest, field))
+    return issued
 
 
 def _proof_verifier(bridge, identifier, request_id, binding, client, settings, expected):
@@ -308,8 +357,8 @@ def known_failure_context(bridge, identifier, request_id, binding, client, *,
         plan = planner(context.parent_token, continuation_token=preview_token,
             continuation_request_id=preview_request, proof_kwargs=deepcopy(context.proof_kwargs),
             verify_proof=_proof_verifier(bridge, identifier, request_id, binding, client, settings, context),
-            now=int(settings['now']))
-        _validate_child(plan, context, native, preview_token, preview_request)
+            now=context.planning_time)
+        _validate_child(plan, context, native, preview_token, preview_request, now=context.planning_time)
         metadata = {**context.recovery_metadata, 'max_calls': plan['checkpoint'].manifest.max_calls,
             'max_tokens': plan['checkpoint'].manifest.max_tokens, 'replacement_max_tokens': 32_000}
         return replace(context, recovery_metadata=metadata)
@@ -319,7 +368,7 @@ def known_failure_context(bridge, identifier, request_id, binding, client, *,
         raise _deny() from None
 
 
-def _validate_child(child, context, parent, token, request_id):
+def _validate_child(child, context, parent, token, request_id, *, now):
     checkpoint, execution, job = child['checkpoint'], child['execution'], child['job']
     original, original_job = parent['checkpoint'], parent['job']
     lineage = checkpoint.continuation_lineage
@@ -342,8 +391,13 @@ def _validate_child(child, context, parent, token, request_id):
         and checkpoint.state in {'authorized', 'paused'} and checkpoint.lease_owner_digest is None
         and checkpoint.lease_expires_at is None)
     for field in ('session_digest', 'provider_id', 'runtime_revision', 'credential_generation',
-            'task_models', 'executor_id', 'executor_version', 'pdf_snapshot_fingerprint', 'expires_at'):
+            'task_models', 'executor_id', 'executor_version', 'pdf_snapshot_fingerprint'):
         _require(getattr(checkpoint.manifest, field) == getattr(original.manifest, field))
+    lifetime = min(86_400, original.manifest.expires_at - original.manifest.issued_at,
+        int(original_job.expires_at - original_job.issued_at))
+    _require(type(now) is int and original.manifest.issued_at <= now < original.manifest.expires_at
+        and lifetime > 0 and checkpoint.manifest.issued_at == job.issued_at == now
+        and checkpoint.manifest.expires_at == job.expires_at == now + lifetime)
     _require(job.token == token and job.paper_id == original_job.paper_id
         and dict(job.paper) == dict(original_job.paper) and job.snapshot == original_job.snapshot
         and job.chunks == original_job.chunks and job.experiment_profile == original_job.experiment_profile
@@ -383,6 +437,7 @@ def create_known_failure_child(bridge, identifier, request_id, binding, client, 
             now=time.time() if now is None else now, continuation_request_id=continuation_request_id)
         evidence, parent = _evidence(bridge, identifier, request_id, binding, client, **settings)
         _require(evidence.proof_kwargs == context.proof_kwargs and evidence.prefix_digests == context.prefix_digests)
+        _require(parent['checkpoint'].manifest.expires_at > settings['now'])
         token = sha256(canonical({'known_length_child': continuation_request_id,
             'parent_token': context.parent_token, 'parent_native_task_id': context.proof_kwargs['native_task_id']}))
         creator = getattr(bridge.runtime, 'native_known_failure_creator', None)
@@ -391,7 +446,7 @@ def create_known_failure_child(bridge, identifier, request_id, binding, client, 
             continuation_request_id=continuation_request_id, proof_kwargs=deepcopy(context.proof_kwargs),
             verify_proof=_proof_verifier(bridge, identifier, request_id, binding, client, settings, evidence),
             now=int(settings['now']))
-        _validate_child(child, evidence, parent, token, continuation_request_id)
+        _validate_child(child, evidence, parent, token, continuation_request_id, now=int(settings['now']))
         _require(child['job'].snapshot_ref != parent['job'].snapshot_ref)
         return {**context.recovery_metadata, 'job_token': token,
             'parent_job_token': context.parent_token, 'continuation_request_id': continuation_request_id,
