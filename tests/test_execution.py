@@ -63,8 +63,12 @@ class ExecutionTests(unittest.TestCase):
         # This is a remote deployment descriptor, not the installed test runner.
         # Local file-only transports below select sys.executable themselves.
         common=dict(host_alias='fixture-login',python_path='/fixture/bin/python3',root_path=str(requests))
-        stage_endpoint=StageEndpoint(**common,helper_path=str(Path(remote_stage.__file__).resolve()),helper_sha256=sha256(Path(remote_stage.__file__).read_bytes()))
-        submit_endpoint=StageEndpoint(**common,helper_path=str(Path(remote_submit.__file__).resolve()),helper_sha256=sha256(Path(remote_submit.__file__).read_bytes()))
+        # Deploy byte-identical helpers into the synthetic remote filesystem;
+        # the local installed package may live under a non-ASCII directory.
+        stage_helper=remote.root/'remote_stage.py';remote.private(stage_helper,Path(remote_stage.__file__).read_bytes())
+        submit_helper=remote.root/'remote_submit.py';remote.private(submit_helper,Path(remote_submit.__file__).read_bytes())
+        stage_endpoint=StageEndpoint(**common,helper_path=str(stage_helper),helper_sha256=sha256(stage_helper.read_bytes()))
+        submit_endpoint=StageEndpoint(**common,helper_path=str(submit_helper),helper_sha256=sha256(submit_helper.read_bytes()))
         collect_endpoint=StageEndpoint(**common,helper_path=str(self.helper),helper_sha256=sha256(self.helper.read_bytes()))
         staging=StagingService(self.ledger,StageClient(stage_endpoint,self.root/'uploads'))
         submission=SubmissionService(self.ledger,SlurmSubmitter(self.ledger,submit_endpoint,self.root/'dispatch'))

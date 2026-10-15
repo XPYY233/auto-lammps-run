@@ -44,7 +44,9 @@ class BuildTests(unittest.TestCase):
         self.auth=BuildAuthorization(self.control,profile_sha256=self.profile_sha,reviewed_commit='e'*40,approval_sha256=H)
         # No remote interpreter or compiler is executed by this synthetic adapter.
         common=dict(host_alias='fixture-hpc',python_path='/fixture/bin/python3',root_path=str(self.requests))
-        self.endpoint=StageEndpoint(**common,helper_path=str(Path(worker.__file__).resolve()),helper_sha256=sha256(Path(worker.__file__).read_bytes()))
+        helper=self.root/'installed-build-worker.py'
+        helper.write_bytes(Path(worker.__file__).read_bytes());helper.chmod(0o400)
+        self.endpoint=StageEndpoint(**common,helper_path=str(helper),helper_sha256=sha256(helper.read_bytes()))
         submit=StageEndpoint(**common,helper_path=str(self.root/'installed-submit.py'),helper_sha256=H)
         self.stager=StagingService(self.ledger,StageClient(self.endpoint,self.root/'stage-audit'))
         self.submitter=SlurmSubmitter(self.ledger,submit,self.root/'submit-audit')

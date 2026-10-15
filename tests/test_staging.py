@@ -54,7 +54,9 @@ class StagingTests(unittest.TestCase):
         self.remote.mkdir(mode=0o700)
         self.policy(65536 + RESOURCE.storage_bytes)
         self.payload = b''.join(upload_chunks(self.snapshot))
-        self.helper = Path(remote_stage.__file__).resolve()
+        self.helper = self.root/'remote_stage.py'
+        self.helper.write_bytes(Path(remote_stage.__file__).read_bytes())
+        self.helper.chmod(0o400)
         self.endpoint = StageEndpoint('synthetic-login', REMOTE_PYTHON, str(self.helper),
                                       sha256(self.helper.read_bytes()), str(self.remote))
 
