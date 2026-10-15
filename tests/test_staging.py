@@ -25,6 +25,7 @@ from auto_lammps.submission import Submission
 H = 'a' * 64
 REQUEST = 'b' * 32
 RESOURCE = Resources(2, 60, 2*1024*1024, 32768)
+REMOTE_PYTHON = '/fixture/bin/python3'
 
 
 def receiver_worker(root, request, digest, payload, barrier, queue):
@@ -54,7 +55,7 @@ class StagingTests(unittest.TestCase):
         self.policy(65536 + RESOURCE.storage_bytes)
         self.payload = b''.join(upload_chunks(self.snapshot))
         self.helper = Path(remote_stage.__file__).resolve()
-        self.endpoint = StageEndpoint('synthetic-login', str(Path(sys.executable).resolve()), str(self.helper),
+        self.endpoint = StageEndpoint('synthetic-login', REMOTE_PYTHON, str(self.helper),
                                       sha256(self.helper.read_bytes()), str(self.remote))
 
     def policy(self, size):
@@ -161,7 +162,11 @@ class StagingTests(unittest.TestCase):
         self.assertIn('PermitLocalCommand=no',argv)
         # Execute only the standalone file receiver on synthetic files. No SSH,
         # sbatch, shell script or LAMMPS engine runs in this integration test.
-        return _capture(shlex.split(argv[-1]), **kwargs)
+        command = shlex.split(argv[-1])
+        self.assertEqual(command[0], REMOTE_PYTHON)
+        # The SSH command describes the remote interpreter. Only this synthetic
+        # transport executes its pinned, file-only helper with the local runner.
+        return _capture([sys.executable, *command[1:]], **kwargs)
 
     def test_full_streaming_client_to_pinned_receiver_and_reserved_ledger(self):
         ledger = Ledger(self.root / 'ledger.sqlite')
@@ -376,11 +381,13 @@ class ExternalGeometryStagingTests(unittest.TestCase):
         helper = service/'remote_stage.py'
         helper.write_bytes(Path(remote_stage.__file__).read_bytes()); helper.chmod(0o400)
         self.catalog.rename(service/'geometry-catalog'); self.catalog = service/'geometry-catalog'
-        endpoint = StageEndpoint('synthetic-login', str(Path(sys.executable).resolve()), str(helper),
+        endpoint = StageEndpoint('synthetic-login', REMOTE_PYTHON, str(helper),
                                  sha256(helper.read_bytes()), str(self.remote))
         client = StageClient(endpoint, self.root/'audit')
         def local_receiver(argv, **kwargs):
-            return _capture(shlex.split(argv[-1]), **kwargs)
+            command = shlex.split(argv[-1])
+            self.assertEqual(command[0], REMOTE_PYTHON)
+            return _capture([sys.executable, *command[1:]], **kwargs)
         with patch('auto_lammps.staging._capture', side_effect=local_receiver):
             client.upload(Submission(REQUEST,self.snapshot.digest,RESOURCE), self.snapshot)
         receipt = json.loads((self.remote/REQUEST/'stage.json').read_bytes())

@@ -60,7 +60,9 @@ class ExecutionTests(unittest.TestCase):
         requests=Path(remote.profile['requests_root'])
         (requests/'policy.json').write_bytes(canonical(dict(schema_version=1,max_total_bytes=4*1024*1024,approval_sha256='a'*64)))
         self.helper=remote.root/'runtime_launcher.py';self.helper.write_bytes(Path(runtime.__file__).read_bytes())
-        common=dict(host_alias='fixture-login',python_path=str(Path(sys.executable).resolve()),root_path=str(requests))
+        # This is a remote deployment descriptor, not the installed test runner.
+        # Local file-only transports below select sys.executable themselves.
+        common=dict(host_alias='fixture-login',python_path='/fixture/bin/python3',root_path=str(requests))
         stage_endpoint=StageEndpoint(**common,helper_path=str(Path(remote_stage.__file__).resolve()),helper_sha256=sha256(Path(remote_stage.__file__).read_bytes()))
         submit_endpoint=StageEndpoint(**common,helper_path=str(Path(remote_submit.__file__).resolve()),helper_sha256=sha256(Path(remote_submit.__file__).read_bytes()))
         collect_endpoint=StageEndpoint(**common,helper_path=str(self.helper),helper_sha256=sha256(self.helper.read_bytes()))

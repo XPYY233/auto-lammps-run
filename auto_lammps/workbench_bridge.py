@@ -283,7 +283,9 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 snapshot_blobs=snapshot_blobs)
             state = execution.decode_execution_state(checkpoint.private_payload)
             decoded = persistence.decode_job_private_state(state.job_state)
-            ready = (checkpoint.state in {'authorized', 'paused'} and checkpoint.stage == 'initial_focus'
+            ready = (checkpoint.state in {'authorized', 'paused'}
+                and checkpoint.stage == plan['checkpoint'].stage
+                and checkpoint.stage in {'initial_focus', 'coverage_gap'}
                 and checkpoint.lease_owner_digest is None
                 and state.completed_results == plan['execution'].completed_results
                 and checkpoint.receipts == plan['checkpoint'].receipts)
@@ -831,7 +833,7 @@ class WorkbenchExtractionBridge:
                     or any(r.state not in {'succeeded','planned'} for r in checkpoint.receipts)):
                 raise ValueError('child identity')
             original_native = self.runtime.native_recovery_reader(parent.parent_token)['checkpoint']
-            reused = len(parent.successful_prefix)
+            reused = parent.recovery_metadata['reused_model_calls']
             if checkpoint.receipts[:reused] != original_native.receipts[:-1]:
                 raise ValueError('inherited prefix changed')
             ledger = []
@@ -893,7 +895,8 @@ class WorkbenchExtractionBridge:
                         or stage['calls'][i]['call_digest'] != relevant[i].call_digest):
                     raise ValueError('child stage mismatch')
             return {'kind':'known_length_existing_child','job_token':token,'reused_model_calls':reused+len(ledger),
-                'prefix_count':len(prefix),'inherited_failed_model_calls':1,'inherited_failed_tokens':16000,
+                'prefix_count':len(prefix),'inherited_failed_model_calls':1,
+                'inherited_failed_tokens':parent.recovery_metadata['inherited_failed_tokens'],
                 'stage_fingerprint':execution.stage_fingerprint,'native_capability_sha256':current_native,
                 'prior_native_capability_sha256':current_native,'intent_sha256':sha256(canonical(latest)),
                 'receipt_sha256':sha256(canonical(failure)),'checkpoint_revision':checkpoint.revision,
@@ -1046,7 +1049,8 @@ class WorkbenchExtractionBridge:
             result.update(reused_model_calls=recovery['reused_model_calls'],
                 further_model_calls_accounted=True)
             if recovery.get('inherited_failed_model_calls'):
-                result.update(inherited_failed_model_calls=1, inherited_failed_reserved_tokens=16_000,
+                result.update(inherited_failed_model_calls=1,
+                    inherited_failed_reserved_tokens=recovery['inherited_failed_tokens'],
                     local_recovery_used=True)
         try:
             if recovery and recovery.get('kind') == 'known_length_continuation':

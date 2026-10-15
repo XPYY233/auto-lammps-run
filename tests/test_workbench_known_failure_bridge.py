@@ -130,7 +130,9 @@ class NormalKnownFailureBridgeTests(unittest.TestCase):
         self.assertTrue(callable(runtime.native_known_failure_creator))
         capabilities = runtime.native_capability_reader()
         self.assertIn('auto_research.evidence.literature_known_length_recovery', capabilities['modules'])
-        self.assertEqual(capabilities['output_limits']['extraction_records_per_response'], 64)
+        from auto_research.evidence.literature_extraction_budget import MAX_EXTRACTED_RECORDS_PER_RESPONSE
+        self.assertEqual(capabilities['output_limits']['extraction_records_per_response'],
+                         MAX_EXTRACTED_RECORDS_PER_RESPONSE)
         source = runtime.native_paper_sources_reader(self.fixture.binding.workbench_paper_id)
         self.assertEqual(source['pdf_sha256'], self.fixture.source_sha)
         self.assertEqual(len(source['sources']), 26)

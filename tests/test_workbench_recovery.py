@@ -106,6 +106,8 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
             self.binding, self.client, connection_revision=1, credential_generation=1, **kwargs)
 
     def test_native_single_page_partition_preserves_full_source_and_budget(self):
+        from auto_research.evidence import deepseek_extraction as extraction
+        from auto_research.evidence import literature_extraction_job as native_job
         from auto_research.evidence.literature_extraction_business_action import EvidenceDBLiteratureJobStarter
         from auto_research.evidence.literature_extraction_budget import task_budget_for_page_blocks
         draft = self.bridge.runtime.ports.assembler.assemble(
@@ -116,11 +118,23 @@ class NativeWorkbenchRecoveryTests(unittest.TestCase):
         self.assertEqual(len(state.chunks), 6)
         self.assertTrue(all(len(block) == 1 for block in state.chunks))
         self.assertEqual([page['page'] for block in state.chunks for page in block], list(range(1, 7)))
+        # The installed native partitioner may split dense pages at whole-line
+        # boundaries; these small pages must still retain their exact full text.
+        import fitz
+        with fitz.open(self.source) as document:
+            original = [page.get_text('text').strip() for page in document]
+        self.assertEqual([page['text'] for block in state.chunks for page in block], original)
         self.assertEqual(len(state.stage['calls']), 12)
         self.assertEqual(task_budget_for_page_blocks(len(state.chunks)).max_calls, 56)
         self.assertEqual(EvidenceDBLiteratureJobStarter.CHUNK_PAGES, 4)
-        self.assertEqual(self.bridge.runtime.native_capability_reader()['source_partition'],
-            {'chunk_pages': 1, 'max_pages': 64, 'policy': 'complete_single_page_blocks_v1'})
+        expected = {'chunk_pages': 1, 'max_pages': 64, 'policy': 'complete_single_page_blocks_v1'}
+        if callable(getattr(native_job, '_source_fragment_chunks', None)):
+            expected.update(policy='whole_line_source_fragments_v1',
+                max_lines=extraction.MAX_SOURCE_FRAGMENT_LINES,
+                max_chars=extraction.MAX_SOURCE_FRAGMENT_CHARS,
+                max_fragments=min((native_job.MAX_STAGE_CALLS-8)//8,
+                    (native_job.MAX_STAGE_TOKENS-52000)//72000))
+        self.assertEqual(self.bridge.runtime.native_capability_reader()['source_partition'], expected)
         self.assertEqual(self.outgoing, [])
 
     def test_native_record_limit_failure_keeps_outputs_and_does_not_retry_or_publish(self):

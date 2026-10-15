@@ -136,7 +136,8 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
     checkpoint, execution, job = native['checkpoint'], native['execution'], native['job']
     manifest = checkpoint.manifest
     _require(getattr(checkpoint, 'continuation_lineage', None) is None)
-    _require(checkpoint.state == 'outcome_unknown' and checkpoint.stage == 'initial_focus'
+    stage_limits = {'initial_focus': 16_000, 'coverage_gap': 12_000}
+    _require(checkpoint.state == 'outcome_unknown' and checkpoint.stage in stage_limits
         and checkpoint.reason_code == 'literature_call_outcome_unknown')
     _require(checkpoint.lease_owner_digest is None and checkpoint.lease_expires_at is None)
     _require(job.token == token and job.paper_id == binding.workbench_paper_id
@@ -154,12 +155,23 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
     stage = job.stage
     prefix = execution.completed_results
     receipts = checkpoint.receipts
-    _require(execution.receipt_offset == 0 and execution.completion_result is None
+    offset = execution.receipt_offset
+    _require(type(offset) is int and 0 <= offset < len(receipts)
+        and execution.completion_result is None
         and execution.stage_fingerprint == stage['stage_fingerprint']
-        and checkpoint.stage == stage['name'] and len(receipts) == len(prefix) + 1
+        and checkpoint.stage == stage['name'] and len(receipts) == offset + len(prefix) + 1
         and len(prefix) < len(stage['calls'])
         and all(r.state == 'succeeded' for r in receipts[:-1])
         and receipts[-1].state == 'outcome_unknown')
+    # Earlier stages are sealed separately from the current stage's call plan.
+    # Their receipts remain global; never index them into the coverage plan or
+    # mistake the current-stage prefix for every already paid response.
+    prior_stages = {row['stage']: row['stage_fingerprint'] for row in job.stage_outputs}
+    _require((checkpoint.stage == 'initial_focus' and offset == 0 and not prior_stages)
+        or (checkpoint.stage == 'coverage_gap' and offset > 0
+            and set(prior_stages) == {'initial_focus'}
+            and all(r.stage == 'initial_focus' and r.task == 'extraction'
+                and r.max_tokens == 16_000 for r in receipts[:offset])))
     _require(checkpoint.spent_calls == len(receipts)
         and checkpoint.spent_tokens == sum(r.max_tokens for r in receipts))
     call_records, call_ids = [], []
@@ -175,51 +187,75 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
             _require(record is not None and record.get('request_id') == call_id
                 and isinstance(record.get('receipt'), dict))
             saved = record['receipt']; index = len(call_records)
-            _require(index < len(receipts) and index < len(stage['calls']))
-            call = stage['calls'][index]; native_receipt = receipts[index]
-            _require(call['call_digest'] == native_receipt.call_digest
-                and native_receipt.stage == stage['name'] and native_receipt.task == saved.get('task') == 'extraction'
-                and native_receipt.model == client.model and native_receipt.max_tokens == call['max_tokens'])
+            _require(index < len(receipts))
+            native_receipt = receipts[index]
             actual_proof = saved.get('scientific_adapter')
             _require(isinstance(actual_proof, dict)
-                and actual_proof.get('native_contract_sha256') == old_native)
-            historical_adapter = WorkbenchScientificAdapter(proof_identity,
-                capability_reader=lambda p=actual_proof: p['native_capabilities'],
-                stage_reader=lambda: {'paper_id': job.paper_id, 'paper': dict(job.paper),
-                    'pdf_sha256': job.snapshot['pdf_sha256'], 'stage': stage,
-                    'runtime_task': lambda task: task})
-            historical_adapter.positions[stage['stage_fingerprint']] = index
-            options = dict(task='extraction', max_tokens=call['max_tokens'],
-                thinking=call['options'].get('thinking'), temperature=call['options'].get('temperature'))
-            messages, expected_proof = historical_adapter.prepare(call['messages'], options)
-            _require(canonical(actual_proof) == canonical(expected_proof))
-            payload = json.loads(request_body(replace(client.calls.config, max_output_tokens=call['max_tokens']),
-                messages, model=client.model,
-                thinking=client.thinking if options['thinking'] is None else options['thinking']))
-            if options['temperature'] is not None:
-                payload['temperature'] = options['temperature']
-            body = canonical(payload)
-            _require(saved.get('request_sha256') == record.get('request_sha256') == sha256(body)
+                and actual_proof.get('identity') == proof_identity
+                and actual_proof.get('name') == 'literature_workbench_scientific_adapter'
+                and actual_proof.get('adapter_source_sha256') == adapter.adapter_sha256
+                and actual_proof.get('native_contract_sha256') == old_native
+                and sha256(canonical(actual_proof.get('native_capabilities'))) == old_native
+                and actual_proof.get('source_identity_sha256') == sha256(canonical(proof_identity))
+                and actual_proof.get('scientific_validation') is False
+                and actual_proof.get('release_to_B') is False
+                and actual_proof.get('native_call_digest') == native_receipt.call_digest
+                and actual_proof.get('stage') == native_receipt.stage
+                and native_receipt.task == saved.get('task') == 'extraction'
+                and native_receipt.model == client.model
+                and native_receipt.ordinal == index + 1
+                and native_receipt.max_tokens == saved.get('max_output_tokens'))
+            if index < offset:
+                _require(native_receipt.state == 'succeeded'
+                    and actual_proof.get('stage_fingerprint') == prior_stages.get(native_receipt.stage))
+                expected_request_sha256 = _hash(saved.get('request_sha256'))
+            else:
+                local_index = index - offset
+                _require(local_index < len(stage['calls']))
+                call = stage['calls'][local_index]
+                _require(call['call_digest'] == native_receipt.call_digest
+                    and native_receipt.stage == stage['name']
+                    and native_receipt.max_tokens == call['max_tokens'])
+                historical_adapter = WorkbenchScientificAdapter(proof_identity,
+                    capability_reader=lambda p=actual_proof: p['native_capabilities'],
+                    stage_reader=lambda: {'paper_id': job.paper_id, 'paper': dict(job.paper),
+                        'pdf_sha256': job.snapshot['pdf_sha256'], 'stage': stage,
+                        'runtime_task': lambda task: task})
+                historical_adapter.positions[stage['stage_fingerprint']] = local_index
+                options = dict(task='extraction', max_tokens=call['max_tokens'],
+                    thinking=call['options'].get('thinking'), temperature=call['options'].get('temperature'))
+                messages, expected_proof = historical_adapter.prepare(call['messages'], options)
+                _require(canonical(actual_proof) == canonical(expected_proof))
+                payload = json.loads(request_body(replace(client.calls.config, max_output_tokens=call['max_tokens']),
+                    messages, model=client.model,
+                    thinking=client.thinking if options['thinking'] is None else options['thinking']))
+                if options['temperature'] is not None:
+                    payload['temperature'] = options['temperature']
+                expected_request_sha256 = sha256(canonical(payload))
+            _require(saved.get('request_sha256') == record.get('request_sha256') == expected_request_sha256
                 and saved.get('provider') == 'deepseek' and saved.get('requested_model') == client.model
                 and saved.get('purpose') == 'literature_workbench_extraction' and saved.get('role') == ROLE
                 and type(saved.get('transport_attempts')) is int and saved['transport_attempts'] == 1
                 and type(saved.get('http_status')) is int and saved['http_status'] == 200
-                and saved.get('max_output_tokens') == call['max_tokens'])
+                and saved.get('max_output_tokens') == native_receipt.max_tokens)
             _hash(saved.get('response_sha256'))
             usage = saved.get('usage')
             _require(isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0
                 for k in ('prompt_tokens', 'completion_tokens', 'total_tokens'))
                 and usage['total_tokens'] == usage['prompt_tokens'] + usage['completion_tokens'])
-            if index < len(prefix):
+            if index < len(receipts) - 1:
                 _require(saved.get('state') == 'completed' and saved.get('finish_reason') == 'stop'
                     and isinstance(saved.get('structured_output'), dict)
                     and saved.get('output_sha256') == sha256(canonical(saved['structured_output']))
-                    and native_digest(saved['structured_output']) == native_receipt.result_digest == native_digest(prefix[index]))
+                    and native_digest(saved['structured_output']) == native_receipt.result_digest)
+                if index >= offset:
+                    _require(native_receipt.result_digest == native_digest(prefix[index - offset]))
             else:
                 _require(saved.get('state') == 'response_invalid' and saved.get('finish_reason') == 'length'
                     and saved.get('error') == 'incomplete_generation'
-                    and call['max_tokens'] == 16_000 and call['options'].get('thinking') is False
-                    and 0 < usage['completion_tokens'] <= 16_000)
+                    and call['max_tokens'] == stage_limits[stage['name']]
+                    and call['options'].get('thinking') is False
+                    and 0 < usage['completion_tokens'] <= call['max_tokens'])
             call_records.append(saved); call_ids.append(call_id)
     _require(len(set(call_ids)) == len(call_ids) == len(receipts))
     terminal = call_records[-1]
@@ -232,11 +268,11 @@ def _evidence(bridge, identifier, request_id, binding, client, *,
         executor_id=manifest.executor_id, executor_version=manifest.executor_version, model=client.model,
         request_sha256=terminal['request_sha256'], response_sha256=terminal['response_sha256'],
         http_status=200, finish_reason='length', response_state='response_invalid',
-        error_code='incomplete_generation', transport_attempts=1, max_output_tokens=16_000,
+        error_code='incomplete_generation', transport_attempts=1, max_output_tokens=receipts[-1].max_tokens,
         usage_total_tokens=terminal['usage']['total_tokens'], usage_completion_tokens=terminal['usage']['completion_tokens'])
     metadata = dict(kind='known_length_continuation', job_token=token, source_request_id=request_id,
-        reused_model_calls=len(prefix), prefix_count=len(prefix), inherited_failed_model_calls=1,
-        inherited_failed_tokens=16_000, stage_fingerprint=execution.stage_fingerprint,
+        reused_model_calls=len(receipts) - 1, prefix_count=len(prefix), inherited_failed_model_calls=1,
+        inherited_failed_tokens=receipts[-1].max_tokens, stage_fingerprint=execution.stage_fingerprint,
         native_capability_sha256=current_native, prior_native_capability_sha256=prior_native,
         intent_sha256=sha256(canonical(original)), receipt_sha256=sha256(canonical(failure)),
         checkpoint_revision=checkpoint.revision)
@@ -297,7 +333,8 @@ def _validate_child(child, context, parent, token, request_id):
     _require(lineage.original_max_calls == original.manifest.max_calls
         and lineage.original_max_tokens == original.manifest.max_tokens)
     _require(checkpoint.manifest.task_id == 'literature_' + sha256(token.encode())
-        and checkpoint.manifest.max_calls == original.manifest.max_calls + 1 <= 512
+        and original.manifest.max_calls <= 512
+        and checkpoint.manifest.max_calls == original.manifest.max_calls + 1 <= 513
         and checkpoint.manifest.max_tokens == original.manifest.max_tokens + 32_000 <= 8_200_000
         and checkpoint.spent_calls == original.spent_calls
         and checkpoint.spent_tokens == original.spent_tokens
@@ -312,7 +349,8 @@ def _validate_child(child, context, parent, token, request_id):
         and job.chunks == original_job.chunks and job.experiment_profile == original_job.experiment_profile
         and job.focuses == original_job.focuses and job.learning_guidance == original_job.learning_guidance
         and job.stage_outputs == original_job.stage_outputs)
-    _require(execution.receipt_offset == 0 and tuple(execution.completed_results) == context.successful_prefix
+    _require(execution.receipt_offset == parent['execution'].receipt_offset
+        and tuple(execution.completed_results) == context.successful_prefix
         and execution.stage_fingerprint == job.stage['stage_fingerprint']
         and job.stage['name'] == checkpoint.stage == original_job.stage['name']
         and len(job.stage['calls']) == len(original_job.stage['calls']))
