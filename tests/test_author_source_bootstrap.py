@@ -118,16 +118,20 @@ os.open=_readonly_directory
                 for path, expected in before.items():
                     self.assertEqual((path.stat().st_mode, path.read_bytes() if path.is_file() else None), expected)
 
-    def test_group_or_world_writable_nested_directories_are_rejected(self):
+    def test_owned_group_writable_inside_private_source_reads_but_world_write_is_rejected(self):
         for kind, fx in self.fixtures():
             nested, _, chosen = self.nested_source(kind, fx)
             for mode in (0o775, 0o777):
                 with self.subTest(reader=kind, mode=oct(mode)):
                     nested.chmod(mode)
                     report = self.read(kind, fx, self.local_capture(), chosen)
-                    self.assertEqual(report['state'], 'rejected')
-                    self.assertEqual(report['rejection_reason'], 'owned_nonwritable_source_subdirectory_required')
-                    self.assertEqual(report['files'], [])
+                    self.assertEqual(report['state'], 'read' if mode==0o775 else 'rejected')
+                    if mode==0o775:
+                        self.assertEqual(report['files'][0]['text'].encode(), fx.texts[chosen[0]['path']])
+                    else:
+                        self.assertEqual(report['rejection_reason'], 'source_subdirectory_world_writable')
+                        self.assertEqual(report['files'], [])
+                    self.assertEqual(stat.S_IMODE(fx.source.stat().st_mode),0o700)
                     self.assertEqual(stat.S_IMODE(nested.stat().st_mode), mode)
 
     def test_unowned_nested_directory_is_rejected_without_changing_ownership(self):
@@ -147,7 +151,7 @@ os.fstat=_different_owner
 '''.replace('TARGET_INODE', repr((original.st_dev, original.st_ino)))
                 report = self.read(kind, fx, self.local_capture(prefix=prefix), chosen)
                 self.assertEqual(report['state'], 'rejected')
-                self.assertEqual(report['rejection_reason'], 'owned_nonwritable_source_subdirectory_required')
+                self.assertEqual(report['rejection_reason'], 'source_subdirectory_owner_mismatch')
                 self.assertEqual(nested.stat().st_uid, original.st_uid)
 
     def test_nested_symlinks_remain_rejected(self):

@@ -164,15 +164,19 @@ def _root_descriptor(path):
 def _source_subdirectory(name, parent):
     """Descend only inside an already opened private source root, without writes.
 
-    Historical mkdir(parents=True) directories can be 0755. Their owner must
-    still match, and no group/other writer may replace a pinned child entry.
-    The enclosing source root and final files retain their private checks.
+    Historical mkdir(parents=True) directories can be 0755 or 0775. The
+    enclosing same-owner 0700 source root remains the access boundary; a
+    group-write bit beneath it does not grant another UID traversal access.
+    Keep same-owner/no-world-write, NOFOLLOW and private final-file checks.
+    Returned bytes must still match the pinned size and content digest.
     """
     descriptor = _directory(name, parent)
     try:
         info = os.fstat(descriptor)
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
-            raise AuthorSourceError('owned_nonwritable_source_subdirectory_required')
+        if info.st_uid != os.getuid():
+            raise AuthorSourceError('source_subdirectory_owner_mismatch')
+        if stat.S_IMODE(info.st_mode) & 0o002:
+            raise AuthorSourceError('source_subdirectory_world_writable')
         return descriptor
     except BaseException:
         os.close(descriptor)
