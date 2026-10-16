@@ -80,6 +80,32 @@ class OutputAnalysisTests(unittest.TestCase):
         self.assertEqual(self.post('b'*32).json()['request_id'],'a'*32)
         self.assertEqual(self.transport.call_count,1)
 
+    def test_aggregate_and_join_keep_column_evidence_and_reusable_numeric_results(self):
+        self.proposal['plan']['operations']=[
+            dict(id='means',method='aggregate',table='samples',group_by=[],columns=[
+                dict(name='n',column='value',reducer='count',unit='1'),
+                dict(name='mean',column='value',reducer='mean',unit='1')]),
+            dict(id='paired',method='join',left='means',right='means',
+                on=[dict(left='n',right='n')],columns=[
+                    dict(name='left_mean',side='left',column='mean',unit='1'),
+                    dict(name='right_mean',side='right',column='mean',unit='1')]),
+            dict(id='stats',method='summary',table='paired',column='left_mean'),
+            dict(id='plot',method='scatter',table='paired',x='left_mean',y='right_mean')]
+        for table,columns in [('means',['n','mean']),('paired',['left_mean','right_mean'])]:
+            self.proposal['column_evidence'].extend(dict(table=table,column=column,
+                meaning='Synthetic aggregate or paired measurement',unit='1',citations=['meaning'])
+                for column in columns)
+        answer=self.post().json();self.assertEqual(answer['state'],'completed',answer)
+        self.assertEqual(answer['result']['numeric_results'][0]['values']['mean'],2)
+        self.assertEqual(len(answer['result']['figures']['figures']),1)
+        self.assertEqual(self.transport.call_count,1)
+
+    def test_aggregate_column_cannot_omit_evidence(self):
+        self.proposal['plan']['operations']=[dict(id='means',method='aggregate',
+            table='samples',group_by=[],columns=[dict(name='mean',column='value',reducer='mean',unit='1')])]
+        answer=self.post().json();self.assertEqual(answer['state'],'invalid_output',answer)
+        self.assertIsNone(answer['result'])
+
     def test_unknown_request_blocks_new_ID_and_keeps_original(self):
         self.transport.side_effect=TimeoutError('SENSITIVE_UPSTREAM_CANARY')
         answer=self.post();self.assertEqual(answer.json()['state'],'unknown',answer.text)

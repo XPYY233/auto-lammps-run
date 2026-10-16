@@ -3223,20 +3223,41 @@ async function renderAuthorResourcePanel(id,parent,state){
    panel.append(node('p',`${latest.repository} · ${latest.commit} · 已获取 ${latest.files.length} 个文件；原件${latest.source_complete?'完整':'尚未完整'}。`,'form-note'));
    if(latest.failures?.length){const detail=node('details');detail.append(node('summary','查看资料缺项与获取诊断'));const pre=node('pre');pre.textContent=JSON.stringify(latest.failures,null,2);detail.append(pre);panel.append(detail);}
    const detail=node('details');detail.append(node('summary','查看已获取文件、大小与 SHA-256'));for(const row of latest.files||[])detail.append(node('p',`${row.path} · ${row.size} B · ${row.sha256}`));panel.append(detail);
+   if(latest.inspection){
+    const inspection=latest.inspection,report=inspection.report;
+    panel.append(node('p',inspection.message||'原获取清单核对记录已保留；未重新下载。','form-note'));
+    if(report?.state==='inspected'){
+     const counts=report.summary?.counts||{};panel.append(node('p',`缓存清单共 ${report.entries.length} 项；普通文件 ${counts.supported_blob||0} 项，目录 ${counts.directory||0} 项。仅核对元数据，尚未确认源码完整或运行就绪。`,'form-note'));
+     const labels={supported_blob:'普通文件（仅元数据支持）',oversized_blob:'超过单文件读取上限',directory:'目录',nonregular_member:'链接或子模块等非普通成员',invalid_metadata:'元数据无效',unsafe_path:'路径不符合安全规则'};
+     const members=node('details');members.append(node('summary','查看原获取清单的具体成员与限制'));
+     for(const row of report.entries||[])members.append(node('p',`${row.path} · ${labels[row.status]||row.status} · ${row.size==null?'大小未提供':row.size+' B'} · 类型 ${row.type??'未提供'} · 模式 ${row.mode??'未提供'}`));
+     const raw=node('pre');raw.textContent=JSON.stringify(report,null,2);const evidence=node('details');evidence.append(node('summary','查看清单核对出处与摘要'),raw);members.append(evidence);panel.append(members);
+    }else panel.append(node('p','原缓存清单尚未核对成功；原获取状态保留，可使用同一原请求再次核对。','form-note'));
+   }
   }
-  const feedback=node('p',state.resourceError||data.disabled_reason||state.resourceRead?.message||(state.resourcePending?'正在获取原件，保留原请求，请勿重复点击。':'获取原件后，可单独读取补充文本，再修订同一作者方案。'),'form-note');feedback.setAttribute('role','status');panel.append(feedback);
-  const acquire=node('button',state.resourcePending?'正在获取原件…':latest?.recoverable?'核对原资料获取请求':'获取固定作者仓库到 HPC','quiet');acquire.disabled=Boolean(state.resourcePending)||!data.enabled||Boolean(latest?.source_complete);
+  const feedback=node('p',state.resourceError||data.disabled_reason||state.resourceRead?.message||(state.resourceInspectionPending?'正在核对原缓存清单，不重新下载。':state.resourcePending?'正在获取原件，保留原请求，请勿重复点击。':'获取原件后，可单独读取补充文本，再修订同一作者方案。'),'form-note');feedback.setAttribute('role','status');panel.append(feedback);
+  if(latest?.can_inspect_tree){
+   const inspect=node('button',state.resourceInspectionPending?'正在核对原获取清单…':'核对原有获取记录具体缺项（不重新下载）','quiet');inspect.disabled=Boolean(state.resourceInspectionPending)||Boolean(state.resourcePending)||Boolean(state.sourceReadPending)||!data.enabled;
+   inspect.onclick=async()=>{
+    if(!alive()||state.resourceInspectionPending||state.resourcePending||state.sourceReadPending)return;
+    state.resourceInspectionPending=latest.request_id;inspect.disabled=true;feedback.textContent='正在通过原保存连接核对缓存成员；不重新下载、不读取源码、不调用模型。';
+    try{await api(`/api/tasks/${id}/author-resources/inspect-tree`,{request_id:latest.request_id});state.resourceError='';}
+    catch(error){state.resourceError=error.message;}
+    finally{state.resourceInspectionPending=null;if(alive())await renderAuthorResourcePanel(id,parent,state);}
+   };panel.append(inspect);
+  }
+  const acquire=node('button',state.resourcePending?'正在获取原件…':latest?.recoverable?'核对原资料获取请求':'获取固定作者仓库到 HPC','quiet');acquire.disabled=Boolean(state.resourcePending)||Boolean(state.resourceInspectionPending)||Boolean(state.sourceReadPending)||!data.enabled||Boolean(latest?.source_complete);
   acquire.onclick=async()=>{
-   if(!alive()||state.resourcePending)return;
+   if(!alive()||state.resourcePending||state.resourceInspectionPending||state.sourceReadPending)return;
    const request=latest?.recoverable?latest.request_id:crypto.randomUUID().replaceAll('-','');state.resourcePending=request;acquire.disabled=true;feedback.textContent='正在通过保存的 HPC 连接获取原件；不会消耗方案轮次。';
    try{await api(`/api/tasks/${id}/author-resources`,{request_id:request});state.resourceError='';}
    catch(error){state.resourceError=error.message;}
    finally{state.resourcePending=null;if(alive())await renderAuthorResourcePanel(id,parent,state);}
   };panel.append(acquire);
   if(latest?.source_complete){
-   const read=node('button',state.sourceReadPending?'正在读取补充原件…':'读取补充作者原件（不调用模型）','quiet');read.disabled=Boolean(state.sourceReadPending)||Boolean(state.resourcePending)||!data.enabled;
+   const read=node('button',state.sourceReadPending?'正在读取补充原件…':'读取补充作者原件（不调用模型）','quiet');read.disabled=Boolean(state.sourceReadPending)||Boolean(state.resourcePending)||Boolean(state.resourceInspectionPending)||!data.enabled;
    read.onclick=async()=>{
-    if(!alive()||state.sourceReadPending||state.resourcePending)return;
+    if(!alive()||state.sourceReadPending||state.resourcePending||state.resourceInspectionPending)return;
     state.sourceReadPending=true;read.disabled=true;feedback.textContent='正在核验并读取补充原件，保留原文件与读取证明。';
     try{state.resourceRead=await api(`/api/tasks/${id}/author-resources/read`,{});state.resourceError='';}
     catch(error){state.resourceError=error.message;}

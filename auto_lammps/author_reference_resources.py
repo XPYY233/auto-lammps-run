@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import PurePosixPath
 import re
+import uuid
 
 from .manifest import canonical, private_directory, sha256
 from .remote_resources import RemoteResources, tool_bundle
@@ -39,7 +40,11 @@ class AuthorReferenceResources:
                        'id TEXT NOT NULL REFERENCES author_resource_requests(id), '
                        'sequence INTEGER NOT NULL, document TEXT NOT NULL, sha256 TEXT NOT NULL, '
                        'PRIMARY KEY(id,sequence))')
-            for table in ('author_resource_requests', 'author_resource_events'):
+            db.execute('CREATE TABLE IF NOT EXISTS author_resource_inspections ('
+                       'id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES author_resource_requests(id), '
+                       'task_id TEXT NOT NULL REFERENCES tasks(id), document TEXT NOT NULL, '
+                       'sha256 TEXT NOT NULL, at TEXT NOT NULL)')
+            for table in ('author_resource_requests', 'author_resource_events', 'author_resource_inspections'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} '
                                f'BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT,'
@@ -78,7 +83,25 @@ class AuthorReferenceResources:
                     if sha256(canonical(document)) != item['sha256']:
                         raise TaskError('作者资料历史摘要不一致；保留原记录。')
                     events.append(document)
-                result.append(dict(id=row['id'], context=context, events=events))
+                inspections=[]
+                for item in db.execute('SELECT * FROM author_resource_inspections WHERE request_id=? '
+                                       'ORDER BY rowid',(row['id'],)):
+                    document=json.loads(item['document'])
+                    if (item['task_id']!=identifier or sha256(canonical(document))!=item['sha256']
+                            or any(document.get(key)!=value or type(document.get(key)) is not type(value)
+                                   for key,value in dict(version=1,**FLAGS).items())
+                            or document.get('task_id')!=identifier or document.get('request_id')!=row['id']
+                            or document.get('inspection_id')!=item['id']
+                            or document.get('source_context')!=context
+                            or not re.fullmatch('[a-f0-9]{64}',str(document.get('inspector_bundle_sha256','')))):
+                        raise TaskError('作者资料清单核对记录摘要或原身份不一致；保留原获取记录。')
+                    request=self._inspection_request(context,row['id'],document.get('acquisition_receipt'))
+                    if (document.get('request')!=request
+                            or not any(event.get('report')==document.get('acquisition_receipt') for event in events)):
+                        raise TaskError('作者资料清单核对请求摘要不一致；未重取原件。')
+                    self._inspection_report(request,document.get('report'))
+                    inspections.append(document)
+                result.append(dict(id=row['id'], context=context, events=events, inspections=inspections))
         return result
 
     def _event(self, request, state, *, report=None, message=''):
@@ -134,25 +157,120 @@ class AuthorReferenceResources:
     def _summary(row):
         latest = row['events'][-1] if row['events'] else dict(state='unknown',report=None,message='')
         report = latest.get('report') or {}
+        inspections=[dict(inspection_id=item['inspection_id'],at=item['at'],state=item['report']['state'],
+                          message=item['message'],report=deepcopy(item['report']))
+                     for item in row.get('inspections',[])]
         return dict(request_id=row['id'], state=latest['state'], message=latest.get('message',''),
             repository=row['context']['repository'], commit=row['context']['commit'],
             files=[{k:f[k] for k in ('path','size','sha256')} for f in report.get('files',[])],
             source_complete=report.get('source_complete') is True,
             potential_state=(report.get('potential_acquisition') or {}).get('state'),
             failures=deepcopy(report.get('failures',[])),
-            recoverable=latest['state'] in {'started','unknown'})
+            recoverable=latest['state'] in {'started','unknown'},
+            can_inspect_tree=(latest['state'] in {'finished','partial'}
+                              and bool(re.fullmatch('[a-f0-9]{40}',str(report.get('tree_sha1',''))))),
+            inspection=inspections[-1] if inspections else None,inspections=inspections)
 
     def status(self, identifier):
         self.tasks.get(identifier)
-        history = [self._summary(row) for row in self._rows(identifier)]
+        rows=self._rows(identifier)
+        history = [self._summary(row) for row in rows]
         enabled,reason = True,''
-        try:self._binding(identifier)
+        try:
+            context,_=self._binding(identifier)
+            for row,summary in zip(rows,history):
+                summary['can_inspect_tree'] &= self._same_binding(row['context'],context)
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied):
             enabled,reason=False,'固定作者来源、许可或保存的 HPC 连接尚未通过核验。'
+            for summary in history:summary['can_inspect_tree']=False
         latest = history[-1] if history else None
         return dict(version=1, **FLAGS, task_id=identifier, enabled=enabled,
                     disabled_reason=reason, latest=latest, history=history,
                     calls_model=False, submits_HPC=False)
+
+    @staticmethod
+    def _same_binding(previous,current):
+        # The old acquisition tool identity is immutable. A new diagnostic
+        # bundle may inspect that old cache without acquiring the repository.
+        return ({key:value for key,value in previous.items() if key!='tool_bundle_sha256'}
+                == {key:value for key,value in current.items() if key!='tool_bundle_sha256'})
+
+    @classmethod
+    def _inspection_request(cls,context,request,receipt):
+        receipt=cls._report(context,request,receipt)
+        if (receipt['state'] not in {'finished','partial'}
+                or not re.fullmatch('[a-f0-9]{40}',str(receipt.get('tree_sha1','')))):
+            raise TaskError('原获取尚无已核验的固定树记录；请先核对原请求。')
+        original=dict(id=request,repository=context['repository'],commit=context['commit'],
+                      directory=context['remote_directory'],storage_bytes=context['storage_bytes'],
+                      bundle_sha256=context['tool_bundle_sha256'])
+        return dict(version=1,acquisition_request=original,
+                    receipt_sha256=sha256(canonical(receipt)),tree_sha1=receipt['tree_sha1'])
+
+    @staticmethod
+    def _inspection_report(request,report):
+        if isinstance(report,dict) and report.get('state')=='inspected':
+            return RemoteResources.validate_tree_report(request,report)
+        expected=dict(version=1,state='unknown',**FLAGS,
+            request_sha256=sha256(canonical(request)),acquisition_id=request['acquisition_request']['id'],
+            repository=request['acquisition_request']['repository'],commit=request['acquisition_request']['commit'],
+            receipt_sha256=request['receipt_sha256'],tree_sha1=request['tree_sha1'],entries=[],summary=None)
+        if (not isinstance(report,dict) or set(report) not in (set(expected),set(expected)|{'observation_failure'})
+                or any(report.get(key)!=value or type(report.get(key)) is not type(value)
+                       for key,value in expected.items())
+                or ('observation_failure' in report and not re.fullmatch('[A-Za-z0-9_-]{1,100}',
+                                                                        str(report['observation_failure'])))):
+            raise TaskError('作者资料清单核对返回身份或边界不符；未改变原获取状态。')
+        return report
+
+    def inspect_tree(self,identifier,request):
+        """Inspect one original cache identity; never acquire or read source."""
+        task_id(identifier);task_id(request)
+        with self._lease(identifier):
+            with self.tasks.transaction() as db:
+                owner=db.execute('SELECT task_id FROM author_resource_requests WHERE id=?',(request,)).fetchone()
+            if owner is None or owner[0]!=identifier:
+                raise TaskError('没有属于本任务的原获取标识；未借用其他任务或新建获取。')
+            context,transport=self._binding(identifier)
+            saved=next(row for row in self._rows(identifier) if row['id']==request)
+            if not self._same_binding(saved['context'],context):
+                raise TaskError('原获取的来源、许可或保存连接变化；不能迁移原清单核对。')
+            latest=saved['events'][-1] if saved['events'] else {}
+            receipt=latest.get('report')
+            inspection_request=self._inspection_request(saved['context'],request,receipt)
+            for previous in reversed(saved['inspections']):
+                if previous['request']==inspection_request and previous['report']['state']=='inspected':
+                    return self.status(identifier)
+            if len(saved['inspections'])>=32:
+                raise TaskError('原请求清单核对记录已达容量；所有原记录保留。')
+            policy={key:saved['context'][key] for key in ('host_alias','remote_directory','storage_bytes')}
+            policy['operation_id']=request
+            report=dict(version=1,state='unknown',**FLAGS,
+                request_sha256=sha256(canonical(inspection_request)),acquisition_id=request,
+                repository=context['repository'],commit=context['commit'],
+                receipt_sha256=inspection_request['receipt_sha256'],tree_sha1=receipt['tree_sha1'],
+                entries=[],summary=None)
+            try:
+                observed=self.factory(self.audit,policy,transport=transport).inspect_tree(receipt)
+                self._inspection_report(inspection_request,observed)
+                # Revalidate the saved connection after the read as well.
+                after,_=self._binding(identifier)
+                if not self._same_binding(saved['context'],after):
+                    raise TaskError('原获取固定连接变化。')
+                report=observed
+            except (ValueError,KeyError,TypeError,OSError,ExecutionDenied):
+                report['observation_failure']='cached_tree_inspection_unverified'
+            document=dict(version=1,**FLAGS,inspection_id=uuid.uuid4().hex,request_id=request,
+                task_id=identifier,source_context=deepcopy(saved['context']),request=inspection_request,
+                acquisition_receipt=deepcopy(receipt),inspector_bundle_sha256=context['tool_bundle_sha256'],
+                report=deepcopy(report),at=datetime.now(timezone.utc).isoformat(),
+                message=('已核对原缓存成员元数据；未重新下载、读取源码或确认可执行。'
+                         if report['state']=='inspected' else '缓存清单尚未核对；原获取状态和请求保留。'))
+            data=canonical(document)
+            with self.tasks.transaction() as db:
+                db.execute('INSERT INTO author_resource_inspections VALUES(?,?,?,?,?,?)',
+                    (document['inspection_id'],request,identifier,data.decode(),sha256(data),document['at']))
+            return self.status(identifier)
 
     @contextmanager
     def _lease(self, identifier):

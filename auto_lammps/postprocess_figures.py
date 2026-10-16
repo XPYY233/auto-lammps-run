@@ -15,7 +15,7 @@ import threading
 import unicodedata
 
 from .manifest import canonical, sha256
-from .postprocess_tables import MAX_BINS, MAX_OUTPUT_BYTES, MAX_ROWS
+from .postprocess_tables import MAX_BINS, MAX_OUTPUT_BYTES, MAX_ROWS, TABLE_METHODS
 
 
 VERSION = 1
@@ -291,7 +291,7 @@ def render_figures(report, *, role, job_id):
             description = _operation(result, operations, tables)
             if description is not None:
                 descriptions.append(description); selected.append(result)
-        if seen != {key for key, value in operations.items() if value['method'] != 'derive'}:
+        if seen != {key for key, value in operations.items() if value['method'] not in TABLE_METHODS}:
             raise FigureError('postprocess_figure_incomplete_results')
         if len(selected) > MAX_FIGURES:
             raise FigureError('postprocess_figure_count_limit')

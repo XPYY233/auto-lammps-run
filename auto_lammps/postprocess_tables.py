@@ -5,6 +5,7 @@ success inferred. The calling service authenticates raw provenance and scalar
 evidence; this tool preserves both while checking formats and arithmetic.
 """
 import csv
+from decimal import Decimal
 import io
 import math
 import operator
@@ -31,6 +32,8 @@ _NUMBER = re.compile(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
 _UNIT = re.compile(r'[A-Za-z0-9_/.^*()+% -]{1,64}')
 _ARITHMETIC = {'add': operator.add, 'subtract': operator.sub,
                'multiply': operator.mul, 'divide': operator.truediv}
+TABLE_METHODS = frozenset({'derive', 'aggregate', 'join'})
+_REDUCERS = ('count', 'mean', 'sum', 'std', 'min', 'max', 'median')
 
 
 class PostprocessError(ValueError):
@@ -99,8 +102,84 @@ def _expression(expression, tables, budget, depth=0):
             | _expression(expression['right'], tables, budget, depth + 1))
 
 
-def validate_plan(plan, files):
-    """Check exact JSON fields; files are flat logical names mapped to bytes."""
+def _declared_column(tables, table, column):
+    if type(table) is not str or table not in tables:
+        raise PostprocessError('postprocess_undeclared_table')
+    if type(column) is not str or column not in tables[table]:
+        raise PostprocessError('postprocess_undeclared_column')
+    return tables[table][column]
+
+
+def _aggregate_columns(operation, tables):
+    table = operation['table']
+    if type(table) is not str or table not in tables:
+        raise PostprocessError('postprocess_undeclared_table')
+    keys = operation['group_by']
+    if type(keys) is not list or len(keys) > MAX_COLUMNS:
+        raise PostprocessError('postprocess_invalid_group_keys')
+    output = {}
+    for key in keys:
+        unit = _declared_column(tables, table, key)
+        if key in output:
+            raise PostprocessError('postprocess_duplicate_group_key')
+        output[key] = unit
+    columns = operation['columns']
+    if type(columns) is not list or not 1 <= len(columns) <= MAX_COLUMNS:
+        raise PostprocessError('postprocess_column_limit')
+    for column in columns:
+        _fields(column, {'name', 'column', 'reducer', 'unit'})
+        _columns([dict(name=column['name'], unit=column['unit'])])
+        unit = _declared_column(tables, table, column['column'])
+        if type(column['reducer']) is not str or column['reducer'] not in _REDUCERS:
+            raise PostprocessError('postprocess_unsupported_reducer')
+        if column['unit'] != ('1' if column['reducer'] == 'count' else unit):
+            raise PostprocessError('postprocess_unit_mismatch')
+        if column['name'] in output:
+            raise PostprocessError('postprocess_invalid_or_duplicate_column')
+        output[column['name']] = column['unit']
+    if len(output) > MAX_COLUMNS:
+        raise PostprocessError('postprocess_column_limit')
+    return output
+
+
+def _join_columns(operation, tables):
+    left, right = operation['left'], operation['right']
+    for table in (left, right):
+        if type(table) is not str or table not in tables:
+            raise PostprocessError('postprocess_undeclared_table')
+    keys = operation['on']
+    if type(keys) is not list or not 1 <= len(keys) <= MAX_COLUMNS:
+        raise PostprocessError('postprocess_explicit_join_keys_required')
+    seen_left, seen_right = set(), set()
+    for key in keys:
+        _fields(key, {'left', 'right'})
+        left_unit = _declared_column(tables, left, key['left'])
+        right_unit = _declared_column(tables, right, key['right'])
+        if key['left'] in seen_left or key['right'] in seen_right:
+            raise PostprocessError('postprocess_duplicate_join_key')
+        seen_left.add(key['left'])
+        seen_right.add(key['right'])
+        if left_unit != right_unit:
+            raise PostprocessError('postprocess_unit_mismatch')
+    columns = operation['columns']
+    if type(columns) is not list or not 1 <= len(columns) <= MAX_COLUMNS:
+        raise PostprocessError('postprocess_column_limit')
+    output = {}
+    for column in columns:
+        _fields(column, {'name', 'side', 'column', 'unit'})
+        _columns([dict(name=column['name'], unit=column['unit'])])
+        if type(column['side']) is not str or column['side'] not in ('left', 'right'):
+            raise PostprocessError('postprocess_invalid_join_side')
+        unit = _declared_column(tables, operation[column['side']], column['column'])
+        if unit != column['unit']:
+            raise PostprocessError('postprocess_unit_mismatch')
+        if column['name'] in output:
+            raise PostprocessError('postprocess_invalid_or_duplicate_column')
+        output[column['name']] = unit
+    return output
+
+
+def _validate_plan(plan, files):
     _fields(plan, {'version', 'tables', 'operations'})
     if type(plan['version']) is not int or plan['version'] != VERSION:
         raise PostprocessError('postprocess_unsupported_version')
@@ -125,7 +204,8 @@ def validate_plan(plan, files):
                 or type(table['format']) is not str or table['format'] not in {'whitespace', 'csv'}
                 or type(table['header_lines']) is not int or not 0 <= table['header_lines'] <= 1024):
             raise PostprocessError('postprocess_invalid_parser_declaration')
-        tables[name] = _columns(table['columns'])
+        _columns(table['columns'])
+        tables[name] = {column['name']: column['unit'] for column in table['columns']}
         used_files.add(file)
     if used_files != set(files):
         raise PostprocessError('postprocess_undeclared_input')
@@ -139,6 +219,10 @@ def validate_plan(plan, files):
         method = operation.get('method')
         if method == 'derive':
             _fields(operation, {'id', 'method', 'alignment', 'columns'})
+        elif method == 'aggregate':
+            _fields(operation, {'id', 'method', 'table', 'group_by', 'columns'})
+        elif method == 'join':
+            _fields(operation, {'id', 'method', 'left', 'right', 'on', 'columns'})
         elif method == 'summary':
             _fields(operation, {'id', 'method', 'table', 'column'})
         elif method == 'histogram':
@@ -152,7 +236,7 @@ def validate_plan(plan, files):
             raise PostprocessError('postprocess_duplicate_operation')
         ids.add(name)
         if method == 'derive':
-            columns = _columns(operation['columns'], derived=True)
+            _columns(operation['columns'], derived=True)
             if operation['alignment'] != 'row_index':
                 raise PostprocessError('postprocess_explicit_alignment_required')
             sources = set()
@@ -160,9 +244,11 @@ def validate_plan(plan, files):
                 sources |= _expression(column['expression'], tables, budget)
             if not sources:
                 raise PostprocessError('postprocess_numeric_source_required')
-            if len(tables) >= MAX_TABLES:
-                raise PostprocessError('postprocess_table_limit')
-            tables[name] = columns
+            columns = {column['name']: column['unit'] for column in operation['columns']}
+        elif method == 'aggregate':
+            columns = _aggregate_columns(operation, tables)
+        elif method == 'join':
+            columns = _join_columns(operation, tables)
         else:
             table = operation['table']
             if type(table) is not str or table not in tables:
@@ -178,9 +264,30 @@ def validate_plan(plan, files):
                 low, high = _finite(bounds[0]), _finite(bounds[1])
                 if low >= high or not math.isfinite(high - low):
                     raise PostprocessError('postprocess_invalid_histogram_range')
+        if method in TABLE_METHODS:
+            if len(tables) >= MAX_TABLES:
+                raise PostprocessError('postprocess_table_limit')
+            tables[name] = columns
     if len(canonical(plan)) > MAX_PLAN_BYTES:
         raise PostprocessError('postprocess_plan_limit')
+    return tables
+
+
+def validate_plan(plan, files):
+    """Check exact JSON fields; files are flat logical names mapped to bytes."""
+    _validate_plan(plan, files)
     return plan
+
+
+def column_units(plan, files):
+    """Return {(table_id, column_name): declared_unit} for every numeric table.
+
+    This uses the same ordered schema validation as execution, including new
+    table operations. It does not parse data or attest physical unit correctness;
+    execute_plan separately checks the supplied bytes against their declared SHA.
+    """
+    return {(table, column): unit for table, columns in _validate_plan(plan, files).items()
+            for column, unit in columns.items()}
 
 
 def parse_table(data, table):
@@ -323,6 +430,125 @@ def _summary(values):
         raise PostprocessError('postprocess_undefined_statistics') from None
 
 
+def _table_record(operation, tables, columns, rows, references, row_sources, alignment):
+    """Retain an explicit relational operation and its complete source-row map."""
+    if not rows:
+        raise PostprocessError('postprocess_empty_group_or_table')
+    if len(rows) > MAX_ROWS or len(rows) * len(columns) > MAX_CELLS:
+        raise PostprocessError('postprocess_derived_cell_limit')
+    output = io.StringIO(newline='')
+    writer = csv.writer(output, lineterminator='\n')
+    writer.writerow(column['name'] for column in columns)
+    for row in rows:
+        writer.writerow(format(_finite(value), '.17g') for value in row)
+    text, provenance = output.getvalue(), []
+    for name, column in sorted(references):
+        source = tables[name]
+        entry = dict(table=name, column=column, row=None, selection='column')
+        if 'line_numbers' in source:
+            entry.update(input_sha256=source['sha256'], source_lines=source['line_numbers'])
+        else:
+            entry.update(derivation_id=name, derived_csv_sha256=source['csv_sha256'])
+        provenance.append(entry)
+    return dict(id=operation['id'], method=operation['method'], columns=columns, rows=rows,
+                operation=operation, alignment=alignment,
+                source_tables=sorted({name for name, _ in references}), references=provenance,
+                row_sources=row_sources, source_row_numbering='one_based_table_row',
+                units_origin='declared_not_inferred', csv=text, csv_sha256=sha256(text.encode('ascii')))
+
+
+def _consume_work(budget, cells):
+    budget[0] += cells
+    if budget[0] > MAX_EVALUATED_CELLS:
+        raise PostprocessError('postprocess_arithmetic_work_limit')
+
+
+def _key_rows(table, columns):
+    positions = {column['name']: index for index, column in enumerate(table['columns'])}
+    indices = [positions[name] for name in columns]
+    for index, row in enumerate(table['rows'], 1):
+        if indices and 'line_numbers' in table:
+            # Numeric tables use binary floats. A raw identifier that changes
+            # even its shortest decimal value on conversion must not silently
+            # match a different original identifier after that conversion.
+            line = table['raw_lines'][table['line_numbers'][index - 1] - 1]
+            tokens = line.split() if table['format'] == 'whitespace' else next(csv.reader([line], strict=True))
+            if any(Decimal(tokens[position].strip()) != Decimal(str(row[position])) for position in indices):
+                raise PostprocessError('postprocess_key_precision_loss')
+        yield index, tuple(row[position] for position in indices)
+
+
+def _reduce(values, reducer):
+    if not values:
+        raise PostprocessError('postprocess_empty_group_or_table')
+    if reducer == 'count':
+        return len(values)
+    if reducer == 'sum':
+        try:
+            return _finite(math.fsum(values))
+        except (OverflowError, ValueError):
+            raise PostprocessError('postprocess_undefined_statistics') from None
+    value = _summary(values)['sample_std' if reducer == 'std' else reducer]
+    if value is None:
+        raise PostprocessError('postprocess_insufficient_group_samples')
+    return _finite(value)
+
+
+def _aggregate(operation, tables, budget):
+    source = tables[operation['table']]
+    positions = {column['name']: index for index, column in enumerate(source['columns'])}
+    keys, declarations = operation['group_by'], operation['columns']
+    _consume_work(budget, len(source['rows']) * (len(keys) + len(declarations)))
+    groups = {}
+    for index, key in _key_rows(source, keys):
+        groups.setdefault(key, []).append(index)
+    columns = [dict(name=name, unit=source['columns'][positions[name]]['unit']) for name in keys]
+    columns += [dict(name=column['name'], unit=column['unit']) for column in declarations]
+    if len(groups) * len(columns) > MAX_CELLS:
+        raise PostprocessError('postprocess_derived_cell_limit')
+    rows, row_sources = [], []
+    for key, members in groups.items():
+        values = [_reduce([source['rows'][row - 1][positions[column['column']]] for row in members],
+                          column['reducer']) for column in declarations]
+        rows.append(list(key) + values)
+        row_sources.append([dict(table=source['id'], rows=members)])
+    references = {(source['id'], name) for name in keys}
+    references |= {(source['id'], column['column']) for column in declarations}
+    return _table_record(operation, tables, columns, rows, references, row_sources,
+                         'explicit_group_keys_first_seen_order')
+
+
+def _join(operation, tables, budget):
+    left, right = tables[operation['left']], tables[operation['right']]
+    positions = {side: {column['name']: index for index, column in enumerate(source['columns'])}
+                 for side, source in (('left', left), ('right', right))}
+    _consume_work(budget, (len(left['rows']) + len(right['rows'])) * len(operation['on'])
+                  + len(left['rows']) * len(operation['columns']))
+    indices = {}
+    for side, source in (('left', left), ('right', right)):
+        mapping = {}
+        for index, key in _key_rows(source, [pair[side] for pair in operation['on']]):
+            if key in mapping:
+                raise PostprocessError('postprocess_join_key_not_unique')
+            mapping[key] = index
+        indices[side] = mapping
+    if indices['left'].keys() != indices['right'].keys():
+        raise PostprocessError('postprocess_join_missing_pair')
+    columns = [dict(name=column['name'], unit=column['unit']) for column in operation['columns']]
+    if len(left['rows']) * len(columns) > MAX_CELLS:
+        raise PostprocessError('postprocess_derived_cell_limit')
+    rows, row_sources = [], []
+    for key, left_row in indices['left'].items():
+        selected = dict(left=left_row, right=indices['right'][key])
+        rows.append([tables[operation[column['side']]]['rows'][selected[column['side']] - 1]
+                     [positions[column['side']][column['column']]] for column in operation['columns']])
+        row_sources.append([dict(table=operation[side], rows=[selected[side]]) for side in ('left', 'right')])
+    references = {(operation[side], pair[side]) for pair in operation['on'] for side in ('left', 'right')}
+    references |= {(operation[column['side']], column['column']) for column in operation['columns']}
+    return _table_record(operation, tables, columns, rows, references, row_sources,
+                         'explicit_one_to_one_keys_left_order')
+
+
 def _histogram(values, operation):
     try:
         import numpy as np
@@ -394,6 +620,15 @@ def tool_context():
                      header_lines=dict(type='integer', minimum=0, maximum=1024), columns=array(column)))
     derive = obj(dict(id=name, method=dict(const='derive'), alignment=dict(const='row_index'),
                       columns=array(derived_column)))
+    aggregate_column = obj(dict(name=name, column=name, reducer=dict(enum=list(_REDUCERS)),
+                                unit=column['properties']['unit']))
+    aggregate = obj(dict(id=name, method=dict(const='aggregate'), table=name,
+                         group_by=array(name, 0), columns=array(aggregate_column)))
+    join_key = obj(dict(left=name, right=name))
+    join_column = obj(dict(name=name, side=dict(enum=['left', 'right']), column=name,
+                          unit=column['properties']['unit']))
+    join = obj(dict(id=name, method=dict(const='join'), left=name, right=name,
+                   on=array(join_key), columns=array(join_column)))
     summary = obj(dict(id=name, method=dict(const='summary'), table=name, column=name))
     histogram = obj(dict(id=name, method=dict(const='histogram'), table=name, column=name,
                          bins=dict(type='integer', minimum=1, maximum=MAX_BINS),
@@ -401,7 +636,7 @@ def tool_context():
     plot = obj(dict(id=name, method=dict(enum=['line', 'scatter']), table=name, x=name, y=name))
     schema = obj(dict(version=dict(type='integer', const=VERSION),
                       tables=array(table, 1, MAX_TABLES),
-                      operations=array(dict(oneOf=[derive, summary, histogram, plot]), 1, MAX_OPERATIONS)))
+                      operations=array(dict(oneOf=[derive, aggregate, join, summary, histogram, plot]), 1, MAX_OPERATIONS)))
     schema['$schema'] = 'https://json-schema.org/draft/2020-12/schema'
     schema['$defs'] = dict(expression=dict(oneOf=[ref, scalar, literal, arithmetic]))
     example = dict(version=VERSION, tables=[dict(id='samples', file='source1', sha256=sha256(b'1\n2\n'),
@@ -424,16 +659,21 @@ def tool_context():
                     'Literal evidence IDs must be authenticated by the calling service; this tool only checks their bounded syntax.',
                     'Full columns require equal row counts. Only an explicit one-based row selector broadcasts an observed scalar.',
                     'Arithmetic is elementwise only. No code, expression strings, interpolation, fit or physical evaluation is executed.',
+                    'aggregate creates a reusable table: explicit group_by keys (or [] for all rows), first-seen group order, and named count/mean/sum/std/min/max/median columns. std is sample standard deviation and requires at least two rows per group.',
+                    'aggregate count has unit 1; other reducers retain the source unit exactly. Group keys retain their source names and units. No rows are silently omitted.',
+                    'join creates a reusable table using explicit numeric keys with exactly equal declared units. Both sides must have unique keys and complete pairs; no row-index, tolerance, inner-join or Cartesian fallback is permitted. Output follows left-table order.',
+                    'join output columns explicitly select a side and source column with an unchanged declared unit. Composite keys are supported; grouping and matching use exact finite numeric equality, not inferred physical state equivalence.',
+                    'Raw grouping/join keys must retain their numeric value in the shortest decimal float representation; keys that lose decimal precision during parsing are rejected rather than matched after rounding. Derived keys use their explicitly computed float values.',
                     'Histograms require integer bins and an increasing finite range; all outside-range samples are counted separately.',
                     'All source values, original lines, source line numbers, expressions, references and complete derived CSV are retained.',
-                    'Derived references form a retained DAG; an explicit selected derived row resolves through its expressions to original lines.'
+                    'Derived references form a retained DAG; relational tables retain their exact operation plus one-based source-row lists for every output row, including all group members and both join sides.'
                 ],
                 minimal_example=example, synthetic_example_files_ascii={'source1': '1\n2\n'},
                 scalar_ast_example=dict(table='samples', column='value', row=1),
                 return_fields=dict(version='integer', scientific_status='not_evaluated', adapter_identity='tool and analysis SHA',
                                    plan='exact validated plan', plan_sha256='canonical plan SHA',
                                    sources='raw table records: SHA, size, parser, columns, rows, line_numbers, raw_lines',
-                                   derived_tables='records: columns with AST, rows, alignment, references, CSV text and SHA',
+                                   derived_tables='derive/aggregate/join records: columns, rows, alignment, references, CSV text and SHA; derive columns include AST; aggregate/join include operation and row_sources (one-based source table rows)',
                                    results='summary/histogram or full ordered line/scatter points with units and row selection',
                                    limitations='explicit scientific interpretation limits'))
 
@@ -469,8 +709,9 @@ def execute_plan(plan, files):
         raise PostprocessError('postprocess_output_limit')
     budget = [0]
     for operation in plan['operations']:
-        if operation['method'] == 'derive':
-            table = _derive(operation, tables, budget)
+        if operation['method'] in TABLE_METHODS:
+            function = {'derive': _derive, 'aggregate': _aggregate, 'join': _join}[operation['method']]
+            table = function(operation, tables, budget)
             cells += len(table['rows']) * len(table['columns'])
             if cells > MAX_CELLS:
                 raise PostprocessError('postprocess_derived_cell_limit')

@@ -1379,6 +1379,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             message=str(error) if isinstance(error,TaskError) else '作者原件读取未完成；已有证据保留，未发起模型或计算。'
             return JSONResponse(dict(detail=message),status_code=422)
 
+    @app.post('/api/tasks/{identifier}/author-resources/inspect-tree')
+    def author_resource_inspect_tree(identifier: str,data: AuthorResourceInput):
+        try:return author_workspace.resources.inspect_tree(identifier,data.request_id)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '原获取清单尚未通过核验；未重新下载或执行。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
     @app.post('/api/tasks/{identifier}/author-plan')
     def author_plan_prepare(identifier: str,data: AuthorPlanInput):
         try:return author_workspace.prepare(identifier,data.request_id,revision_note=data.revision_note)

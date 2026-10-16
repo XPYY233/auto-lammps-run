@@ -108,9 +108,7 @@ def _validate_output(evidence,value,files):
         if table.get('sha256',digest)!=digest:raise TaskError('模型不能改变原始文件摘要。')
         table['sha256']=digest
     tables.validate_plan(plan,files)
-    expected={(t['id'],c['name']):c['unit'] for t in plan['tables'] for c in t['columns']}
-    expected.update({(op['id'],c['name']):c['unit'] for op in plan['operations']
-        if op['method']=='derive' for c in op['columns']})
+    expected=tables.column_units(plan,files)
     seen=set()
     if not isinstance(value['column_evidence'],list):raise TaskError('每列分析数据都需要说明与出处。')
     for row in value['column_evidence']:
