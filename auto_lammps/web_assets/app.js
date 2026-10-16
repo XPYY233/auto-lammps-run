@@ -3095,6 +3095,7 @@ function renderAuthorEvidence(box,report){
  const state=paperWorkflowState(),identity=authorEvidenceIdentity(report),generation=renderAuthorEvidence.generation=(renderAuthorEvidence.generation||0)+1;
  const focused=identity&&state.identity===identity&&state.input&&document.activeElement===state.input?{start:state.input.selectionStart,end:state.input.selectionEnd}:null;
  box.replaceChildren(node('h2','作者参考 A · 原代码运行结果'));
+ if(current?.id)void renderAuthorRawOutputs(box,current.id,generation);
  if(!identity){box.append(node('p','尚无可核验的作者 A 图表报告。作业状态与已有失败记录见作者参考历史；没有报告不表示未提交。','form-note'));return;}
  box.append(node('h3',report.title),node('p',report.scope||'', 'subtle'));
  box.append(node('p',report.output_status==='complete'&&report.output_valid===true?'登记输出已完整回收；科学复现尚未核验。':'部分输出或输出待核对；不能标为完整复现。','reference-output-status'));
@@ -3131,6 +3132,39 @@ function renderAuthorEvidence(box,report){
  for(const file of report.files||[]){const row=node('div'),link=node('a',file.label||file.name);link.href=`/api/tasks/${report.task_id}/reference-evidence/files/${encodeURIComponent(file.name)}?source_sha256=${report.source_sha256}`;link.target='_blank';link.rel='noopener';row.append(link);if(Number.isInteger(file.size)&&file.size>=0)row.append(node('small',file.size+' 字节'));downloads.append(row);}box.append(downloads);
  renderAuthorDiscussion(box,report,identity);
  if(focused){state.input.focus({preventScroll:true});state.input.setSelectionRange(focused.start,focused.end);}
+}
+async function renderAuthorRawOutputs(box,id,generation){
+ const panel=node('section',undefined,'reference-raw-outputs');box.append(panel);
+ const alive=()=>current?.id===id&&generation===renderAuthorEvidence.generation&&panel.isConnected;
+ const pending=renderAuthorRawOutputs.pending||(renderAuthorRawOutputs.pending=new Set());
+ try{
+  const data=await api(`/api/tasks/${id}/reference-outputs`);if(!alive())return;
+  if(data.task_id!==id||!data.configured){panel.remove();return;}
+  panel.append(node('h3','作者 A 原始输出'),node('p','回收已核对清单中的原始字节，供下载和后续分析；不提交计算，也不把部分输出标成整篇复现。','form-note'));
+  for(const run of data.runs||[]){
+   const row=node('article'),key=id+':'+run.request_id;
+   row.append(node('p','作业 '+run.job_id+' · '+run.files.length+' 个文件 · '+fileSize(run.total_bytes)));
+   const detail=node('details');detail.append(node('summary','查看本次可回收的原始文件清单'));
+   for(const file of run.files)detail.append(node('p',file.name+' · '+fileSize(file.size)));row.append(detail);
+   if(run.state==='retained_unavailable'){
+    row.append(node('p','原始文件已登记，但本地字节缺失或发生变化；下载已停止，原来源和记录保留，请先恢复原文件。','form-note'));
+   }else if(run.state==='retained'){
+    row.append(node('p','原始输出已回收并保留；分析尚未因此完成。','form-note'));
+    const show=node('button','查看原始文件下载');show.type='button';show.onclick=()=>$('#task-files')?.scrollIntoView({behavior:'smooth',block:'start'});row.append(show);
+   }else{
+    const collect=node('button',pending.has(key)?'正在回收作者 A 输出…':'回收作者 A 原始输出');collect.type='button';collect.disabled=pending.has(key);
+    const status=node('p',undefined,'form-note');status.setAttribute('role','status');
+    collect.onclick=async()=>{
+     if(pending.has(key))return;pending.add(key);collect.disabled=true;collect.textContent='正在回收作者 A 输出…';
+     try{
+      await api(`/api/tasks/${id}/reference-outputs`,{request_id:run.request_id});
+      if(!alive())return;status.textContent='原始字节回收完成，正在刷新下载列表。';await refreshWorkspace();
+     }catch(error){if(alive())status.textContent=error.message;}
+     finally{pending.delete(key);if(alive()){collect.disabled=false;collect.textContent='回收作者 A 原始输出';}}
+    };row.append(collect,status);
+   }panel.append(row);
+  }
+ }catch(error){if(alive())panel.append(node('p','作者原始输出入口暂不可核验：'+error.message,'form-note'));}
 }
 async function refreshAuthorDiscussion(id,identity){
  const generation=refreshAuthorDiscussion.generation=(refreshAuthorDiscussion.generation||0)+1;

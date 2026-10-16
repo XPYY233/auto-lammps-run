@@ -285,6 +285,10 @@ class ReferenceTargetAnalysisInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class ReferenceOutputInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
 class ReferenceScopePreview(Input):
     target_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     selected_ids: list[str] = Field(min_length=1, max_length=512)
@@ -299,7 +303,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -339,6 +343,13 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     raw_outputs = RawOutputs(store,papers,
         collections=results_reader.collections if results_reader else collections_directory,
         ledger=results_reader.ledger if results_reader else None)
+    if reference_output_config is not None:
+        if reference_outputs_service is not None:
+            raise ValueError('Use one explicit author-output service configuration')
+        from .reference_outputs import load_reference_outputs
+        reference_outputs_service=load_reference_outputs(raw_outputs,reference_output_config,hpc)
+    if reference_outputs_service is not None and reference_outputs_service.raw.tasks.path!=store.path:
+        raise ValueError('Author outputs must share the current task store')
     from .closeout import CloseoutViews
     closeouts = CloseoutViews(reference_views, raw_outputs) if reference_views else None
     from .discovery_library import DiscoveryLibrary
@@ -677,6 +688,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return raw_outputs.listing(identifier)
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'原始输出记录暂不可核验。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/reference-outputs')
+    def reference_outputs_status(identifier: str):
+        store.get(identifier)
+        if reference_outputs_service is None:
+            return dict(task_id=identifier,configured=False,runs=[])
+        try:return reference_outputs_service.status(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'作者原始输出清单暂不可核验。'},status_code=409)
+
+    @app.post('/api/tasks/{identifier}/reference-outputs')
+    def collect_reference_outputs(identifier: str,data: ReferenceOutputInput):
+        if reference_outputs_service is None:
+            raise TaskError('尚未接入该作者原始输出清单。')
+        try:return reference_outputs_service.collect(identifier,data.request_id)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'作者输出回收未完成或来源核验失败；原记录保留。'},status_code=409)
 
     @app.get('/api/tasks/{identifier}/raw-files/{file_id}')
     def raw_file(identifier: str,file_id: str):
@@ -1855,6 +1883,7 @@ def main():
     parser.add_argument('--candidate-config', help='Private administrator resource configuration; no browser configuration')
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
+    parser.add_argument('--reference-output-config',type=Path,help='Private pinned legacy author-output inventory; retrieval only, never physics')
     parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
@@ -1932,6 +1961,7 @@ def main():
                           model_connections=connections,
                           workbench_bridge=workbench_bridge,workbench_bindings=workbench_bindings,
                           result_assistant_enabled=True if args.enable_result_assistant else None,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
+                          reference_output_config=args.reference_output_config,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

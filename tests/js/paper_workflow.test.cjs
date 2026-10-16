@@ -28,7 +28,7 @@ function setup(){
   $:selector=>constants.get(selector)||descendants(main).find(node=>node.id===selector.slice(1))||null,node:element,
   researchContent:(value,className)=>element('div',value,className),evidenceSourceHeading:role=>element('span',role),
   action:fn=>fn(),notice(){},afterChange:async()=>{},renderWorkspaceResults(){},resultTab:'overview',
-  api:(path,data)=>{calls.push({path,data});return new Promise((resolve,reject)=>pending.push({path,data,resolve,reject}));},
+  api:(path,data)=>{if(path.endsWith('/reference-outputs'))return Promise.resolve({configured:false,runs:[]});calls.push({path,data});return new Promise((resolve,reject)=>pending.push({path,data,resolve,reject}));},
   setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout(){},
   document:{createElement:tag=>element(tag)}});
  vm.runInContext(source.slice(source.indexOf('function paperWorkflowState(){'),source.indexOf('let targetPreviewGeneration=0;')),c);
