@@ -155,6 +155,18 @@ CREATE TRIGGER IF NOT EXISTS immutable_task_limits_update BEFORE UPDATE ON task_
  BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_task_limits_delete BEFORE DELETE ON task_resource_limits
  BEGIN SELECT RAISE(ABORT, 'task resource limits are immutable'); END;
+CREATE TABLE IF NOT EXISTS formal_b_resource_limits (
+ campaign TEXT NOT NULL REFERENCES campaigns(id), task_sha256 TEXT NOT NULL,
+ evaluation TEXT NOT NULL REFERENCES evaluations(id),
+ reference_evaluation TEXT NOT NULL REFERENCES evaluations(id), reference_requests TEXT NOT NULL,
+ reference_core_seconds INTEGER NOT NULL, scope_sha256 TEXT NOT NULL, evidence_sha256 TEXT NOT NULL,
+ core_seconds INTEGER NOT NULL, approval_sha256 TEXT NOT NULL,
+ PRIMARY KEY(campaign,task_sha256)
+);
+CREATE TRIGGER IF NOT EXISTS immutable_formal_b_limits_update BEFORE UPDATE ON formal_b_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'formal B resource limits are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_formal_b_limits_delete BEFORE DELETE ON formal_b_resource_limits
+ BEGIN SELECT RAISE(ABORT, 'formal B resource limits are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_update BEFORE UPDATE ON reference_continuations
  BEGIN SELECT RAISE(ABORT, 'reference continuation is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS immutable_reference_continuation_delete BEFORE DELETE ON reference_continuations
@@ -436,20 +448,83 @@ class Ledger:
             self._event(db, None, 'task_resource_limit_approved', dict(campaign=campaign,
                 core_seconds=core_seconds, approval_sha256=approval_sha256, gpu_allowed=False))
 
+    def approve_reference_derived_b_limit(self, evaluation, reference_evaluation, reference_requests,
+                                        *, scope_sha256, evidence_sha256, approval_sha256):
+        """Controller-only pairing of a formal B with verified full author A.
+
+        The caller must verify full scientific-scope/output coverage and retain
+        its proof; scheduler completion alone cannot establish a complete A.
+        This method verifies accounting/roles, derives an exact conservative
+        32*b+b^2 ceiling, and preserves all existing overrun and attempt history.
+        It authorizes no execution and never cancels a running request.
+        """
+        from fractions import Fraction
+        for value in (scope_sha256, evidence_sha256, approval_sha256):
+            _digest(value)
+        if (not isinstance(reference_requests, list) or not reference_requests
+                or len(reference_requests) > 128
+                or any(not isinstance(value, str) for value in reference_requests)
+                or len(set(reference_requests)) != len(reference_requests)):
+            raise LedgerError('Explicit complete author-reference requests required')
+        with self._transaction() as db:
+            ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+            author = db.execute('SELECT * FROM evaluations WHERE id=?', (reference_evaluation,)).fetchone()
+            if (ev is None or author is None or json.loads(ev['identity'])['role'] != 'agent'
+                    or json.loads(author['identity'])['role'] != 'reference'):
+                raise Conflict('Formal B must pair an agent evaluation with author reference A')
+            source = [self._request(db, value) for value in sorted(reference_requests)]
+            if any(row['evaluation'] != reference_evaluation or row['state'] != 'completed'
+                   or not row['accounted'] or row['actual_core_seconds'] is None
+                   or row['actual_core_seconds'] <= 0
+                   or Resources(**json.loads(row['resources'])).cores != 32 for row in source):
+                raise Conflict('A must be completed, accounted and run on 32 cores')
+            actual = sum(row['actual_core_seconds'] for row in source)
+            hours = Fraction(actual, 32 * 3600)
+            allowed = (32 * hours + hours * hours) * 3600
+            seconds = allowed.numerator // allowed.denominator
+            document = dict(campaign=ev['campaign'], task_sha256=json.loads(ev['identity'])['task'],
+                evaluation=evaluation, reference_evaluation=reference_evaluation,
+                reference_requests=_json(sorted(reference_requests)), reference_core_seconds=actual,
+                scope_sha256=scope_sha256, evidence_sha256=evidence_sha256, core_seconds=seconds,
+                approval_sha256=approval_sha256)
+            old = db.execute('SELECT * FROM formal_b_resource_limits WHERE campaign=? AND task_sha256=?',
+                             (document['campaign'], document['task_sha256'])).fetchone()
+            if old:
+                if dict(old) != document:
+                    raise Conflict('Formal B budget already paired; explicit amendment required')
+                return dict(old)
+            db.execute('INSERT INTO formal_b_resource_limits VALUES (?,?,?,?,?,?,?,?,?,?)',
+                       tuple(document.values()))
+            self._event(db, None, 'formal_b_resource_limit_approved', document)
+            return document
+
     @staticmethod
     def _task_resource_status(db, evaluation):
         ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
         limit = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (ev['campaign'],)).fetchone()
-        if limit is None:
-            return None
-        task = json.loads(ev['identity'])['task']
+        identity = json.loads(ev['identity'])
+        task = identity['task']
         # Repetitions, roles or system versions cannot reset one task's budget.
         rows = db.execute('SELECT e.identity,r.charge_core_seconds FROM requests r '
                           'JOIN evaluations e ON e.id=r.evaluation WHERE e.campaign=?', (ev['campaign'],))
-        charged = sum(r['charge_core_seconds'] for r in rows if json.loads(r['identity'])['task'] == task)
-        return dict(limit_core_seconds=limit['core_seconds'], charged_or_reserved_core_seconds=charged,
-                    remaining_core_seconds=max(0, limit['core_seconds']-charged), gpu_allowed=False,
-                    approval_sha256=limit['approval_sha256'])
+        rows = list(rows)
+        limits = []
+        if limit is not None:
+            charged = sum(r['charge_core_seconds'] for r in rows if json.loads(r['identity'])['task'] == task)
+            limits.append(dict(limit_core_seconds=limit['core_seconds'], charged_or_reserved_core_seconds=charged,
+                remaining_core_seconds=max(0, limit['core_seconds']-charged), gpu_allowed=False,
+                approval_sha256=limit['approval_sha256']))
+        # Ordinary research has no implicit A dependency. Only explicitly paired
+        # formal B tasks use this cap; another system/repetition cannot reset it.
+        paired = db.execute('SELECT * FROM formal_b_resource_limits WHERE campaign=? AND task_sha256=?',
+                            (ev['campaign'], task)).fetchone() if identity['role'] == 'agent' else None
+        if paired is not None:
+            charged = sum(r['charge_core_seconds'] for r in rows
+                if json.loads(r['identity'])['task'] == task and json.loads(r['identity'])['role'] == 'agent')
+            limits.append(dict(limit_core_seconds=paired['core_seconds'], charged_or_reserved_core_seconds=charged,
+                remaining_core_seconds=max(0, paired['core_seconds']-charged), gpu_allowed=False,
+                approval_sha256=paired['approval_sha256'], formal_b_budget=dict(paired)))
+        return min(limits, key=lambda item: (item['remaining_core_seconds'], item['limit_core_seconds'])) if limits else None
 
     @staticmethod
     def _attempt_allowance(db, evaluation):
