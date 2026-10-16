@@ -32,6 +32,33 @@ MAX_ROUNDS=3
 MAX_QUESTIONS=16
 
 
+def _pdf_layout_quote(source,quote):
+    """Match PDF line wrapping only, retaining the exact original span.
+
+    No case folding, word substitution, formula repair or numeric normalization.
+    The receipt labels this match explicitly rather than claiming verbatim text.
+    """
+    def view(value):
+        omitted=set()
+        for match in re.finditer(r'(?<=[A-Za-z])-[ \t]*\r?\n[ \t]*(?=[a-z])',value):
+            omitted.update(range(match.start(),match.end()))
+        chars=[];positions=[]
+        for index,char in enumerate(value):
+            if index in omitted:continue
+            if char.isspace():
+                if chars and chars[-1]!=' ':chars.append(' ');positions.append(index)
+            else:chars.append(char);positions.append(index)
+        while chars and chars[-1]==' ':chars.pop();positions.pop()
+        return ''.join(chars),positions
+    normalized,positions=view(source);selected,_=view(quote)
+    start=normalized.find(selected) if selected else -1
+    if start<0:return None
+    first,last=positions[start],positions[start+len(selected)-1]+1
+    if last-first>12000:return None
+    return dict(match='pdf_layout_normalized',source_quote=source[first:last],
+                source_character_range=[first,last],normalization='whitespace_and_line_end_word_hyphen_only')
+
+
 def _publish_bytes(path,data):
     """An incomplete write never acquires a final artifact name."""
     path=Path(path)
@@ -68,7 +95,7 @@ def selection_context(evidence):
         model_plan_schema=model_schema,synthetic_model_plan_example=example,
         output_fields=dict(status='ready or needs_evidence',summary='brief rationale, not observed results',
             limitations='list of explicit limitations',plan='model_plan_schema, or null if needs_evidence',
-            citations='objects {id,source_id,quote}; exact nonempty source quotes',
+            citations='objects {id,source_id,quote}; exact nonempty quotes; PDF whitespace/line-end word wrapping may match with original span retained, never word/formula/number substitutions',
             column_evidence='objects {table,column,meaning,unit,citations:[citation ids]}; every raw and derived column'),
         assembly='file uses supplied logical source id; sha256 is bound by the service, omit it in model output',
         interpretation='meanings and units are model declarations supported by exact quotes, not semantic proof',
@@ -91,9 +118,14 @@ def _validate_output(evidence,value,files):
         if not isinstance(row,dict) or set(row)!={'id','source_id','quote'}:
             raise TaskError('分析出处需要来源标识和逐字原文。')
         key=text(row['id'],80);source=allowed.get(row['source_id']);quote=text(row['quote'],6000)
-        if key in citations or source is None or quote not in source['text']:
-            raise TaskError('分析出处未逐字匹配允许来源，未自动修写引用。')
-        citations[key]=dict(row,source_sha256=sha256(canonical(source)),locator=source['locator'])
+        if key in citations or source is None:
+            raise TaskError('分析出处标识重复或不属于允许来源，未自动修写引用。')
+        layout=None
+        if quote not in source['text']:
+            if source['origin']=='paper':layout=_pdf_layout_quote(source['text'],quote)
+            if layout is None:
+                raise TaskError(f'分析出处 {key} 未逐字匹配允许来源 {row["source_id"]}；PDF排版之外的改写不能通过。')
+        citations[key]=dict(row,source_sha256=sha256(canonical(source)),locator=source['locator'],**(layout or {}))
     if value['status']=='needs_evidence':
         if value['plan'] is not None or value['column_evidence']!=[]:
             raise TaskError('缺少依据时不能同时执行分析方案。')

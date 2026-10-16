@@ -106,6 +106,22 @@ class OutputAnalysisTests(unittest.TestCase):
         answer=self.post().json();self.assertEqual(answer['state'],'invalid_output',answer)
         self.assertIsNone(answer['result'])
 
+    def test_PDF_line_wrap_keeps_the_exact_original_span(self):
+        self.reference.return_value['sources'][0]['text']='Synthetic dimension-\nless\nvalues; no physical result.'
+        answer=self.post().json();self.assertEqual(answer['state'],'completed',answer)
+        citation=answer['result']['citations'][0]
+        self.assertEqual(citation['match'],'pdf_layout_normalized')
+        self.assertEqual(citation['source_quote'],'dimension-\nless\nvalues')
+        start,stop=citation['source_character_range']
+        self.assertEqual(self.reference.return_value['sources'][0]['text'][start:stop],citation['source_quote'])
+
+    def test_PDF_layout_does_not_repair_words_numbers_or_formula_characters(self):
+        from auto_lammps.output_analysis import _pdf_layout_quote
+        for original,quote in [('energy 1.2 eV','energy 12 eV'),('energy X + Y','energy X - Y'),
+                               ('dimensionless values','dimensional values'),('Energy','energy'),
+                               ('energy 1-\n2','energy 12')]:
+            with self.subTest(original=original):self.assertIsNone(_pdf_layout_quote(original,quote))
+
     def test_unknown_request_blocks_new_ID_and_keeps_original(self):
         self.transport.side_effect=TimeoutError('SENSITIVE_UPSTREAM_CANARY')
         answer=self.post();self.assertEqual(answer.json()['state'],'unknown',answer.text)
