@@ -8,7 +8,7 @@ import sys
 from .author_source_worker import (
     AuthorSourceError, MAX_FILES, MAX_FILE_BYTES, MAX_LINES, MAX_RECEIPT_BYTES,
     MAX_TEXT_BYTES, _absolute_root, _directory, _read_regular, _relative_path,
-    _root_descriptor, canonical, digest,
+    _root_descriptor, _source_subdirectory, canonical, digest,
 )
 
 VERSION = 1
@@ -169,7 +169,7 @@ def read_pinned_text(request, intent):
             try:
                 parts = selection['path'].split('/')
                 for part in parts[:-1]:
-                    child = _directory(part, parent, private=True)
+                    child = _source_subdirectory(part, parent)
                     os.close(parent)
                     parent = child
                 data = _read_regular(parent, parts[-1], MAX_FILE_BYTES, selection['size'])

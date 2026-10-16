@@ -161,6 +161,24 @@ def _root_descriptor(path):
         raise
 
 
+def _source_subdirectory(name, parent):
+    """Descend only inside an already opened private source root, without writes.
+
+    Historical mkdir(parents=True) directories can be 0755. Their owner must
+    still match, and no group/other writer may replace a pinned child entry.
+    The enclosing source root and final files retain their private checks.
+    """
+    descriptor = _directory(name, parent)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise AuthorSourceError('owned_nonwritable_source_subdirectory_required')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _read_regular(parent, name, maximum, expected_size=None):
     # Opening relative to already pinned descriptors prevents a path being
     # swapped to an out-of-tree directory between validation and use.
@@ -223,7 +241,7 @@ def read_pinned_text(request):
             try:
                 components = selection['path'].split('/')
                 for component in components[:-1]:
-                    next_fd = _directory(component, parent, private=True)
+                    next_fd = _source_subdirectory(component, parent)
                     os.close(parent)
                     parent = next_fd
                 data = _read_regular(parent, components[-1], MAX_FILE_BYTES, selection['size'])

@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import shlex
+import stat
 import sys
 import unittest
 
@@ -21,12 +22,28 @@ class AuthorSourceBootstrapTests(unittest.TestCase):
             self.addCleanup(fx.doCleanups)
             yield kind, fx
 
-    def read(self, kind, fx, capture):
+    def read(self, kind, fx, capture, selections=None):
         reader = fx.service(capture=capture)
+        chosen = selections or [dict(path='README.md', start_line=1, end_line=2)]
         if kind == 'legacy':
-            return fx.read(service=reader)
-        return reader.read(fx.receipt, [dict(path='README.md', start_line=1, end_line=2)],
-                           purpose='author_reference')
+            return fx.read(service=reader, selections=chosen)
+        return reader.read(fx.receipt, chosen, purpose='author_reference')
+
+    def nested_source(self, kind, fx):
+        previous = next(name for name in fx.texts if name.startswith('workflow/'))
+        data = fx.texts.pop(previous)
+        nested = fx.source/'workflow/nested'
+        nested.mkdir(mode=0o755)
+        name = 'workflow/nested/'+previous.split('/')[-1]
+        (fx.source/previous).rename(fx.source/name)
+        fx.texts[name] = data
+        if kind == 'legacy':
+            fx.refresh()
+        else:
+            fx._bind_receipt()
+        (fx.source/'workflow').chmod(0o755)
+        nested.chmod(0o755)
+        return nested, name, [dict(path=name, start_line=1, end_line=20)]
 
     def local_capture(self, *, prefix='', transform=None, results=None):
         def capture(command, **options):
@@ -83,6 +100,86 @@ os.open=_readonly_directory
             with self.subTest(reader=kind):
                 report = self.read(kind, fx, self.local_capture(prefix=prefix))
                 self.assertEqual(report['state'], 'read', report)
+
+    def test_owned_755_nested_directories_inside_private_source_are_read_without_changes(self):
+        for kind, fx in self.fixtures():
+            with self.subTest(reader=kind):
+                nested, name, chosen = self.nested_source(kind, fx)
+                before = {path: (path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+                          for path in fx.source.rglob('*')}
+                results = []
+                report = self.read(kind, fx, self.local_capture(results=results), chosen)
+                self.assertEqual(results[0]['returncode'], 0)
+                self.assertEqual(report['state'], 'read', report)
+                self.assertEqual(report['files'][0]['text'].encode(), fx.texts[name])
+                self.assertFalse(report['files'][0]['truncated'])
+                self.assertEqual(stat.S_IMODE(nested.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(fx.source.stat().st_mode), 0o700)
+                for path, expected in before.items():
+                    self.assertEqual((path.stat().st_mode, path.read_bytes() if path.is_file() else None), expected)
+
+    def test_group_or_world_writable_nested_directories_are_rejected(self):
+        for kind, fx in self.fixtures():
+            nested, _, chosen = self.nested_source(kind, fx)
+            for mode in (0o775, 0o777):
+                with self.subTest(reader=kind, mode=oct(mode)):
+                    nested.chmod(mode)
+                    report = self.read(kind, fx, self.local_capture(), chosen)
+                    self.assertEqual(report['state'], 'rejected')
+                    self.assertEqual(report['rejection_reason'], 'owned_nonwritable_source_subdirectory_required')
+                    self.assertEqual(report['files'], [])
+                    self.assertEqual(stat.S_IMODE(nested.stat().st_mode), mode)
+
+    def test_unowned_nested_directory_is_rejected_without_changing_ownership(self):
+        for kind, fx in self.fixtures():
+            with self.subTest(reader=kind):
+                nested, _, chosen = self.nested_source(kind, fx)
+                original = nested.stat()
+                prefix = '''
+_native_fstat=os.fstat
+def _different_owner(fd):
+ info=_native_fstat(fd)
+ if (info.st_dev,info.st_ino)==TARGET_INODE:
+  fields=list(info);fields[4]=info.st_uid+1
+  return os.stat_result(fields)
+ return info
+os.fstat=_different_owner
+'''.replace('TARGET_INODE', repr((original.st_dev, original.st_ino)))
+                report = self.read(kind, fx, self.local_capture(prefix=prefix), chosen)
+                self.assertEqual(report['state'], 'rejected')
+                self.assertEqual(report['rejection_reason'], 'owned_nonwritable_source_subdirectory_required')
+                self.assertEqual(nested.stat().st_uid, original.st_uid)
+
+    def test_nested_symlinks_remain_rejected(self):
+        for kind, fx in self.fixtures():
+            with self.subTest(reader=kind):
+                nested, _, chosen = self.nested_source(kind, fx)
+                moved = nested.with_name('original-nested')
+                nested.rename(moved)
+                nested.symlink_to(moved, target_is_directory=True)
+                report = self.read(kind, fx, self.local_capture(), chosen)
+                self.assertEqual(report['state'], 'rejected')
+                self.assertEqual(report['files'], [])
+                self.assertTrue(nested.is_symlink())
+
+    def test_source_root_and_final_file_still_require_private_permissions(self):
+        for kind, fx in self.fixtures():
+            nested, name, chosen = self.nested_source(kind, fx)
+            with self.subTest(reader=kind, object='source root'):
+                fx.source.chmod(0o755)
+                report = self.read(kind, fx, self.local_capture(), chosen)
+                self.assertEqual(report['state'], 'rejected')
+                self.assertEqual(report['rejection_reason'], 'private_owned_source_directory_required')
+                self.assertEqual(stat.S_IMODE(fx.source.stat().st_mode), 0o755)
+            fx.source.chmod(0o700)
+            with self.subTest(reader=kind, object='final file'):
+                (fx.source/name).chmod(0o644)
+                report = self.read(kind, fx, self.local_capture(), chosen)
+                self.assertEqual(report['state'], 'rejected')
+                self.assertEqual(report['rejection_reason'], 'source_file_type_owner_or_size_mismatch')
+                self.assertEqual(report['files'], [])
+                self.assertEqual(stat.S_IMODE((fx.source/name).stat().st_mode), 0o644)
+                self.assertEqual(stat.S_IMODE(nested.stat().st_mode), 0o755)
 
     def test_actual_process_root_open_failure_has_finite_safe_diagnostic_and_no_traceback(self):
         for kind, fx in self.fixtures():
