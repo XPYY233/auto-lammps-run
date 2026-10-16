@@ -200,7 +200,12 @@ class LegacyAuthorSourceReader:
             except (ValueError, KeyError, TypeError, UnicodeError):
                 report['observation_failure'] = 'invalid_legacy_source_read_receipt'
         else:
-            report['observation_failure'] = failure or 'source_read_transport_failed'
+            diagnostic = author_source_reader.bootstrap_diagnostic(transport)
+            if diagnostic:
+                report['bootstrap_failure'] = diagnostic
+                report['observation_failure'] = diagnostic['code']
+            else:
+                report['observation_failure'] = failure or 'source_read_transport_failed'
         audit = deepcopy(report)
         for item in audit['files']:
             item.pop('text', None)

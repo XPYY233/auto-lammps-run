@@ -131,8 +131,9 @@ def validate_receipt(receipt, request):
     return files
 
 
-def _directory(name, parent=None, *, private=False):
-    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+def _directory(name, parent=None, *, private=False, traverse_only=False):
+    access = getattr(os, 'O_PATH', os.O_RDONLY) if traverse_only else os.O_RDONLY
+    descriptor = os.open(name, access | os.O_DIRECTORY | os.O_NOFOLLOW,
                          **({'dir_fd': parent} if parent is not None else {}))
     try:
         info = os.fstat(descriptor)
@@ -146,11 +147,12 @@ def _directory(name, parent=None, *, private=False):
 
 
 def _root_descriptor(path):
-    current = _directory('/')
+    current = _directory('/', traverse_only=True)
     try:
         parts = PurePosixPath(path).parts[1:]
         for index, part in enumerate(parts):
-            next_fd = _directory(part, current, private=index == len(parts) - 1)
+            last = index == len(parts) - 1
+            next_fd = _directory(part, current, private=last, traverse_only=not last)
             os.close(current)
             current = next_fd
         return current

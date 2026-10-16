@@ -28,41 +28,95 @@ _POLICY = {'host_alias', 'remote_directory', 'reference_task_id', 'repository', 
            'acquisition_id', 'receipt_sha256', 'inventory_sha256',
            'license_approved', 'license_approval_sha256'}
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_BOOTSTRAP_STAGES = ('host_check', 'envelope_read', 'envelope_decode', 'bundle_validate',
+    'root_validate', 'root_open', 'root_permissions', 'bundle_install', 'bundle_open',
+    'bundle_verify', 'worker_import', 'worker_read', 'response_encode')
+_BOOTSTRAP_ERRORS = ('PermissionError', 'FileNotFoundError', 'NotADirectoryError',
+    'IsADirectoryError', 'FileExistsError', 'ValueError', 'TypeError', 'KeyError',
+    'UnicodeError', 'UnicodeDecodeError', 'JSONDecodeError', 'Error', 'ImportError',
+    'ModuleNotFoundError', 'BadZipFile', 'RuntimeError', 'OSError', 'MemoryError',
+    'OverflowError', 'Exception')
 # Only the application's reviewed helper is imported. No repository path is
 # added to sys.path; it is data read by the helper, never a Python module.
 BOOTSTRAP = '''import sys,os,json,base64,hashlib,stat
 from pathlib import PurePosixPath
-if sys.platform!='linux' or not os.environ.get('SSH_CONNECTION'):raise ValueError('HPC SSH required')
-raw=sys.stdin.buffer.read(2097153)
-if len(raw)>2097152:raise ValueError('Envelope limit')
-envelope=json.loads(raw);request=envelope['request'];data=base64.b64decode(envelope['bundle'],validate=True)
-from_hash=hashlib.sha256(data).hexdigest()
-if from_hash!=envelope['bundle_sha256']:raise ValueError('Tool bundle mismatch')
-root=PurePosixPath(request['remote_root'])
-if not root.is_absolute() or '..' in root.parts or str(root)!=request['remote_root']:raise ValueError('Invalid directory')
-root_fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-for part in root.parts[1:]:
- next_fd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root_fd)
- os.close(root_fd);root_fd=next_fd
-info=os.fstat(root_fd)
-if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)&0o077:raise ValueError('Private directory required')
-name='reader-tools-'+from_hash+'.zip'
+stage='host_check';root_fd=None;bundle_fd=None
 try:
- created=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400,dir_fd=root_fd)
- with os.fdopen(created,'wb') as f:
-  os.fchmod(f.fileno(),0o400);f.write(data);f.flush();os.fsync(f.fileno())
-except FileExistsError:
- pass
-bundle_fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=root_fd)
-info=os.fstat(bundle_fd)
-if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o400 or info.st_size!=len(data):raise ValueError('Saved tool bundle type mismatch')
-with os.fdopen(os.dup(bundle_fd),'rb') as saved:
- if hashlib.sha256(saved.read(len(data)+1)).hexdigest()!=from_hash:raise ValueError('Saved tool bundle mismatch')
-os.close(root_fd)
-sys.path.insert(0,'/proc/self/fd/'+str(bundle_fd))
-from auto_lammps.author_source_worker import read_source_report
-print(json.dumps(read_source_report(request),ensure_ascii=True))
+ if sys.platform!='linux' or not os.environ.get('SSH_CONNECTION'):raise ValueError('HPC SSH required')
+ stage='envelope_read'
+ raw=sys.stdin.buffer.read(2097153)
+ if len(raw)>2097152:raise ValueError('Envelope limit')
+ stage='envelope_decode'
+ envelope=json.loads(raw);request=envelope['request'];data=base64.b64decode(envelope['bundle'],validate=True)
+ stage='bundle_validate'
+ from_hash=hashlib.sha256(data).hexdigest()
+ if from_hash!=envelope['bundle_sha256']:raise ValueError('Tool bundle mismatch')
+ stage='root_validate'
+ root=PurePosixPath(request['remote_root'])
+ if not root.is_absolute() or root==PurePosixPath('/') or '..' in root.parts or str(root)!=request['remote_root']:raise ValueError('Invalid directory')
+ stage='root_open'
+ root_fd=os.open('/',getattr(os,'O_PATH',os.O_RDONLY)|os.O_DIRECTORY|os.O_NOFOLLOW)
+ parts=root.parts[1:]
+ for index,part in enumerate(parts):
+  access=os.O_RDONLY if index==len(parts)-1 else getattr(os,'O_PATH',os.O_RDONLY)
+  next_fd=os.open(part,access|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root_fd)
+  os.close(root_fd);root_fd=next_fd
+ stage='root_permissions'
+ info=os.fstat(root_fd)
+ if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)&0o077:raise ValueError('Private directory required')
+ stage='bundle_install'
+ name='reader-tools-'+from_hash+'.zip'
+ try:
+  created=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400,dir_fd=root_fd)
+  with os.fdopen(created,'wb') as f:
+   os.fchmod(f.fileno(),0o400);f.write(data);f.flush();os.fsync(f.fileno())
+ except FileExistsError:
+  pass
+ stage='bundle_open'
+ bundle_fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=root_fd)
+ stage='bundle_verify'
+ info=os.fstat(bundle_fd)
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o400 or info.st_size!=len(data):raise ValueError('Saved tool bundle type mismatch')
+ with os.fdopen(os.dup(bundle_fd),'rb') as saved:
+  if hashlib.sha256(saved.read(len(data)+1)).hexdigest()!=from_hash:raise ValueError('Saved tool bundle mismatch')
+ os.close(root_fd);root_fd=None
+ stage='worker_import'
+ sys.path.insert(0,'/dev/fd/'+str(bundle_fd))
+ from auto_lammps.author_source_worker import read_source_report
+ stage='worker_read'
+ response=read_source_report(request)
+ stage='response_encode'
+ print(json.dumps(response,ensure_ascii=True))
+except Exception as error:
+ kind=type(error).__name__
+ if kind not in BOOTSTRAP_ALLOWED_ERRORS:kind='Exception'
+ sys.stderr.write('ALAMMPS_SOURCE_BOOTSTRAP_V1|'+stage+'|'+kind+'\\n')
+ sys.exit(1)
+finally:
+ if root_fd is not None:os.close(root_fd)
+ if bundle_fd is not None:os.close(bundle_fd)
 '''
+BOOTSTRAP = BOOTSTRAP.replace('BOOTSTRAP_ALLOWED_ERRORS', repr(_BOOTSTRAP_ERRORS))
+
+
+def bootstrap_diagnostic(transport):
+    """Accept only our finite diagnostic marker; never retain raw stderr."""
+    if transport.get('returncode') != 1 or transport.get('failure') not in ('', 'command_failed'):
+        return None
+    encoded = transport.get('stderr')
+    if not isinstance(encoded, str) or len(encoded) > 512:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True).decode('ascii')
+    except (ValueError, UnicodeError):
+        return None
+    fields = raw.rstrip('\n').split('|')
+    if (len(fields) != 3 or raw != '|'.join(fields)+'\n'
+            or fields[0] != 'ALAMMPS_SOURCE_BOOTSTRAP_V1'
+            or fields[1] not in _BOOTSTRAP_STAGES or fields[2] not in _BOOTSTRAP_ERRORS):
+        return None
+    return dict(stage=fields[1], exception_type=fields[2],
+                code='source_bootstrap_'+fields[1]+'_'+fields[2])
 
 
 def reader_tool_bundle():
@@ -213,7 +267,12 @@ class AuthorSourceReader:
             except (ValueError, KeyError, TypeError, UnicodeError):
                 report['observation_failure'] = 'invalid_source_read_receipt'
         else:
-            report['observation_failure'] = failure or 'source_read_transport_failed'
+            diagnostic = bootstrap_diagnostic(transport)
+            if diagnostic:
+                report['bootstrap_failure'] = diagnostic
+                report['observation_failure'] = diagnostic['code']
+            else:
+                report['observation_failure'] = failure or 'source_read_transport_failed'
         # Never persist the transport stdout/stderr or returned source text.
         audit = deepcopy(report)
         for item in audit['files']:
