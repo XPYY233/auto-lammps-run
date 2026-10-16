@@ -20,7 +20,7 @@ from . import author_source_reader, author_source_worker
 from .author_source_reader import AuthorSourceReader
 from .author_source_worker import AuthorSourceError, response_identity, validate_receipt, validate_request
 from .condition_generation import source_bundle
-from .deepseek import DeepSeekClient, request_body
+from .deepseek import DeepSeekClient, ModelError, request_body
 from .manifest import canonical, private_directory, sha256
 from .potential_acquisition import safe_path
 from .reference_scope import ReferenceScopeService
@@ -81,6 +81,9 @@ def author_source_inputs(value, identifier):
     """Validate retained reader data, without doing another remote read."""
     if value is None:
         return dict(capability=None, sources=[], files=[], reads=[], invocation_paths=[])
+    if isinstance(value,dict) and (value.get('capability') or {}).get('adapter')=='pinned_legacy_author_source_reader':
+        from .legacy_author_source_reader import validated_inputs
+        return validated_inputs(value,identifier)
     if (not isinstance(value, dict) or set(value) != {'capability', 'acquisition_receipt', 'reads'}
             or not isinstance(value['reads'], list) or len(value['reads']) > 16):
         raise TaskError('作者源码读取回执字段不完整。')
@@ -563,12 +566,16 @@ class AuthorReferencePlan:
         if saved is None:
             return None
         row, context, receipt, events = saved
+        with self._lease(identifier) as available:
+            recoverable=receipt is None and available
         return dict(**FLAGS, task_id=identifier, request_id=request, round=row['round'], max_rounds=MAX_ROUNDS,
             state=receipt['state'] if receipt else events[-1]['state'], at=row['at'], events=events,
             context_sha256=row['document_sha256'], input_sha256=sha256(canonical(context['input'])),
             scientific_adapter=context['scientific_adapter'], model_binding=context['model_binding'],
-            revision=context.get('revision'), receipt=receipt, report=receipt.get('report') if receipt else None,
-            can_submit=False, can_approve=False, history_only_no_source_or_connection_check=True)
+            revision=context.get('revision'), revision_note=context['revision_note'],
+            receipt=receipt, report=receipt.get('report') if receipt else None,
+            can_submit=False, can_approve=False, recoverable=recoverable,
+            history_only_no_source_or_connection_check=True)
 
     def history(self, identifier):
         with self.tasks.transaction() as db:
@@ -719,10 +726,13 @@ class AuthorReferencePlan:
                         if self._context(identifier, request, client, connection_revision, credential_generation, note) != context:
                             raise TaskError('context changed')
                     except Exception:
-                        return self._finish(identifier, request, 'paused', model_receipt=receipt, code='author_context_changed',
-                            message='模型已返回，但原 P 范围、来源或配置变化；原完整答复保留，未重发。')
+                        with self.tasks.transaction() as db:
+                            self._event(db,request,'preparation_paused','完整答复已保留；原来源或配置暂不可核验，恢复原请求不重发。')
+                        return self.get(identifier,request)
                     return self._accept(identifier, request, context, call)
             else:
+                if client.calls.status()['remaining_requests']==0:
+                    raise TaskError('模型额度未允许新调用；未创建作者方案版本或发送请求。')
                 with self.tasks.transaction() as db:
                     self._task(db, identifier, active=True)
                     if db.execute('SELECT 1 FROM author_plan_intents i LEFT JOIN author_plan_receipts r ON r.id=i.id '
@@ -742,14 +752,19 @@ class AuthorReferencePlan:
                     raise TaskError('context changed')
                 validate_prepared_messages(STAGE, context['messages'], context['input'])
             except Exception:
-                return self._finish(identifier, request, 'paused', code='author_context_changed',
-                    message='发送前原 P 范围、源码、连接或主动工具变化；未调用模型。')
+                with self.tasks.transaction() as db:
+                    self._event(db,request,'preparation_paused','发送前来源或工具暂不可核验；原请求可恢复，未调用模型。')
+                return self.get(identifier,request)
             with self.tasks.transaction() as db:
                 self._event(db, request, 'dispatching')
             try:
-                client.complete_json(request, context['messages'])
-            except Exception:
+                client.complete_json(request, context['messages'],expected_request_sha256=context['request_sha256'])
+            except Exception as error:
                 call = client.calls.lookup(request)
+                if call is None and isinstance(error,ModelError) and str(error) in {'model_budget_exhausted','model_request_changed','input_too_large'}:
+                    with self.tasks.transaction() as db:
+                        self._event(db,request,'preparation_paused','冻结正文或模型预算检查阻止发送；原请求可恢复，未消耗新稿。')
+                    return self.get(identifier,request)
                 receipt = (call or {}).get('receipt') or {}
                 state = 'unknown' if call and (not receipt or receipt.get('state') == 'unknown') else 'failed'
                 return self._finish(identifier, request, state, model_receipt=receipt, code='model_request_requires_attention',
@@ -759,6 +774,7 @@ class AuthorReferencePlan:
                 if self._context(identifier, request, client, connection_revision, credential_generation, note) != context:
                     raise TaskError('context changed')
             except Exception:
-                return self._finish(identifier, request, 'paused', model_receipt=(call or {}).get('receipt'),
-                    code='author_context_changed', message='答复返回期间参考来源或连接变化；原完整答复保留，未发布或重发。')
+                with self.tasks.transaction() as db:
+                    self._event(db,request,'preparation_paused','完整答复已保留；参考来源或连接暂不可核验，恢复原请求不重发。')
+                return self.get(identifier,request)
             return self._accept(identifier, request, context, call or {})

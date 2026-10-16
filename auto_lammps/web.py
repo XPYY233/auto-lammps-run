@@ -242,6 +242,11 @@ class OutputAnalysisInput(Input):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class AuthorPlanInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    revision_note: str = Field(default='', max_length=4000)
+
+
 class ScientificReviewInput(Input):
     analysis_id: str = Field(min_length=64, max_length=64)
 
@@ -309,7 +314,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -508,6 +513,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     if output_analyses.tasks.path!=store.path:raise ValueError('Output analysis must share the task store')
     from .reference_scope import ReferenceScopeService
     reference_scopes = ReferenceScopeService(store, papers, reference_targets)
+    from .author_reference_workspace import AuthorReferenceWorkspace,load_author_workspace
+    if author_reference_config is not None:
+        if author_workspace_service is not None:raise ValueError('Use one author-reference workspace configuration')
+        author_workspace_service=load_author_workspace(store,papers,reference_scopes,author_reference_config,hpc,
+            model_provider=workbench_context,connection_provider=reference_target_connection,
+            model_calls=model_client.calls if model_client else None)
+    author_workspace=author_workspace_service or AuthorReferenceWorkspace(store,papers,reference_scopes,{},
+        model_provider=workbench_context,connection_provider=reference_target_connection,
+        model_calls=model_client.calls if model_client else None)
+    if author_workspace.tasks.path!=store.path:raise ValueError('Author workspace must share the current task store')
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
         source_discovery=source_discovery, reference_views=reference_evidence_views,
@@ -1334,7 +1349,21 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             if ready:
                 for item in report['actions']:
                     if item['id']=='analyze_A':item.update(enabled=True,disabled_reason='',method='GET',endpoint='/api/tasks/'+identifier+'/output-analyses')
+            report['actions'].insert(7,dict(id='prepare_A_plan',label='查看与准备作者运行方案',enabled=True,
+                disabled_reason='',method='GET',endpoint='/api/tasks/'+identifier+'/author-plan'))
         return report
+
+    @app.get('/api/tasks/{identifier}/author-plan')
+    def author_plan_status(identifier: str):
+        return author_workspace.status(identifier)
+
+    @app.post('/api/tasks/{identifier}/author-plan')
+    def author_plan_prepare(identifier: str,data: AuthorPlanInput):
+        try:return author_workspace.prepare(identifier,data.request_id,revision_note=data.revision_note)
+        except TaskError as error:
+            try:recorded=author_workspace.planner.get(identifier,data.request_id) is not None
+            except (ValueError,TypeError,KeyError,OSError):recorded=True
+            return JSONResponse(dict(detail=str(error),request_recorded=recorded),status_code=422)
 
     @app.post('/api/tasks/{identifier}/paper-workflow/resources')
     def human_paper_resources(identifier: str, data: Revision):
@@ -1939,6 +1968,7 @@ def main():
     parser.add_argument('--collections-directory',help='Existing private output collection directory for read-only results')
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
     parser.add_argument('--reference-output-config',type=Path,help='Private pinned legacy author-output inventory; retrieval only, never physics')
+    parser.add_argument('--author-reference-config',type=Path,help='Private reference-only source, license and deployment bindings; plan preparation is not submission')
     parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
@@ -2017,6 +2047,7 @@ def main():
                           workbench_bridge=workbench_bridge,workbench_bindings=workbench_bindings,
                           result_assistant_enabled=True if args.enable_result_assistant else None,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           reference_output_config=args.reference_output_config,
+                          author_reference_config=args.author_reference_config,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

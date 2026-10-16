@@ -385,7 +385,8 @@ class AuthorReferencePlanTests(unittest.TestCase):
             return result
         self.client.transport=change
         result=self.prepare()
-        self.assertEqual(result['state'],'paused')
+        self.assertEqual(result['state'],'preparation_paused')
+        self.assertIsNone(result['receipt'])
         self.assertIsNone(result['report'])
         self.assertEqual(self.calls.lookup('4'*32)['receipt']['structured_output'],self.value)
         self.assertEqual(len(self.sent),1)

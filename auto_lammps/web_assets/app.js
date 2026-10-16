@@ -3070,7 +3070,7 @@ function appendWorkbenchTargetInventory(container,id,parentActive){
 }
 function paperWorkflowAction(item,status){
  const row=node('div',undefined,'workflow-action'),id=current.id,generation=refreshPaperWorkflow.generation;
- const expected={check_resources:['POST','paper-workflow/resources'],search_github:['POST','paper-workflow/search'],view_P:['GET','paper-evidence'],extract_P:['GET','workbench'],import_targets:['POST','paper-evidence/import-targets'],select_targets:['POST','targets'],freeze_targets:['POST','freeze'],view_A:['GET','reference-result'],analyze_A:['GET','output-analyses'],preview_B_draft:['GET','paper-workflow/b-draft'],compare:['GET','reference-result']}[item.id];
+ const expected={check_resources:['POST','paper-workflow/resources'],search_github:['POST','paper-workflow/search'],view_P:['GET','paper-evidence'],extract_P:['GET','workbench'],import_targets:['POST','paper-evidence/import-targets'],select_targets:['POST','targets'],freeze_targets:['POST','freeze'],view_A:['GET','reference-result'],prepare_A_plan:['GET','author-plan'],analyze_A:['GET','output-analyses'],preview_B_draft:['GET','paper-workflow/b-draft'],compare:['GET','reference-result']}[item.id];
  const enabled=item.enabled===true&&expected&&item.method===expected[0]&&item.endpoint===`/api/tasks/${id}/${expected[1]}`;
  row.append(node('strong',item.label));
  if(!enabled){row.append(node('p',item.disabled_reason||'此步骤尚未接入完整的安全执行服务。','form-note'));return row;}
@@ -3079,6 +3079,7 @@ function paperWorkflowAction(item,status){
   if(item.id==='extract_P'){const entry=$('#workbench-entry');if(entry){entry.open=true;entry.scrollIntoView({block:'start'});await entry.loadWorkbench();}return;}
   if(['view_P','select_targets'].includes(item.id)){$('#target-planning').scrollIntoView({block:'start'});return;}
   if(item.id==='view_A'){$('#author-reference').scrollIntoView({block:'start'});return;}
+  if(item.id==='prepare_A_plan'){await renderAuthorPlanPanel(id);$('#author-plan-panel')?.scrollIntoView({block:'start'});return;}
   if(item.id==='analyze_A'){await renderOutputAnalysisPanel(id);$('#output-analysis-panel')?.scrollIntoView({block:'start'});return;}
   if(item.id==='compare'){resultTab='targets';renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});return;}
   if(item.id==='preview_B_draft'){
@@ -3168,6 +3169,42 @@ async function renderAuthorRawOutputs(box,id,generation){
    }panel.append(row);
   }
  }catch(error){if(alive())panel.append(node('p','作者原始输出入口暂不可核验：'+error.message,'form-note'));}
+}
+const authorPlanStates=new Map();
+async function renderAuthorPlanPanel(id){
+ const anchor=$('#author-reference');if(!anchor||current?.id!==id)return;
+ let panel=$('#author-plan-panel');if(!panel){panel=node('section');panel.id='author-plan-panel';anchor.append(panel);}
+ if(panel.dataset.task!==id){panel.replaceChildren();panel.dataset.task=id;}
+ const state=authorPlanStates.get(id)||{note:'',pending:null};authorPlanStates.set(id,state);
+ const sequence=state.sequence=(state.sequence||0)+1;
+ const alive=()=>current?.id===id&&panel.dataset.task===id&&!$('#task-view').hidden;
+ try{
+  const data=await api(`/api/tasks/${id}/author-plan`);if(!alive()||state.sequence!==sequence)return;
+  if(state.pending){const saved=data.history.find(row=>row.request_id===state.pending);if(saved&&(saved.receipt||saved.recoverable))state.pending=null;}
+  panel.replaceChildren(node('h3','作者运行方案：原文件、目标覆盖与缺项'),node('p','应用 AI 依据已保存 P 范围和固定作者文件准备运行方案。此步骤不会提交计算；原作者文件不改写，未核验的环境或调用参数会明确列出。','form-note'));
+  const note=node('textarea');note.setAttribute('aria-label','作者方案修订要求');note.rows=3;note.value=state.note;note.placeholder='如需修订，说明对上一版的要求；完整上一版和具体检查反馈会一起保留。';note.oninput=()=>{state.note=note.value;};
+  const status=node('p',state.error||data.disabled_reason||`已用 ${data.used_rounds}/${data.max_rounds} 版；准备不等于批准或运行。`,'form-note');
+  async function send(request,revision){
+   if(state.pending||!alive())return;state.pending=request;status.textContent='应用 AI 正在核对原作者调用；保留同一请求，请勿重复发送。';
+   try{await api(`/api/tasks/${id}/author-plan`,{request_id:request,revision_note:revision});state.error='';}
+   catch(error){if(error.requestRecorded===false)state.pending=null;state.error=error.message;}
+   finally{if(alive())await renderAuthorPlanPanel(id);}
+  }
+  const button=node('button',state.pending?'正在准备作者方案…':data.used_rounds?'基于上一版修订作者方案':'让应用 AI 准备作者运行方案','quiet');button.disabled=Boolean(state.pending)||!data.can_prepare;
+  button.onclick=()=>send(crypto.randomUUID().replaceAll('-',''),note.value);
+  const refresh=node('button','刷新作者方案记录','quiet');refresh.onclick=()=>renderAuthorPlanPanel(id);panel.append(note,button,refresh,status);
+  for(const item of data.history){
+   const article=node('article',undefined,'result-widget');article.append(node('h4',`作者运行方案 · 第 ${item.round}/${item.max_rounds} 版`),node('p',item.receipt?.message||item.events.at(-1)?.document?.message||item.state,'form-note'));
+   if(item.recoverable){const resume=node('button','恢复原作者方案请求','quiet');resume.disabled=Boolean(state.pending);resume.onclick=()=>send(item.request_id,item.revision_note||'');article.append(resume);}
+   if(item.report){article.append(researchContent(item.report.summary));
+    for(const question of item.report.questions||[])article.append(node('p',question));
+    for(const invocation of item.report.invocations||[]){const details=node('details');details.append(node('summary','查看原入口、参数、所需文件与输出：'+invocation.id));const pre=node('pre');pre.textContent=JSON.stringify(invocation,null,2);details.append(pre);article.append(details);}
+    const details=node('details');details.append(node('summary','查看完整目标覆盖、来源和分析缺项'));const pre=node('pre');pre.textContent=JSON.stringify(item.report,null,2);details.append(pre);article.append(details);
+   }
+   if(item.proposal){const raw=node('details');raw.append(node('summary','查看 AI 原始完整答复（保留未通过的方案）'));const pre=node('pre');pre.textContent=JSON.stringify(item.proposal,null,2);raw.append(pre);article.append(raw);}
+   article.append(node('p',`状态 ${item.state} · 请求 ${item.request_id} · 模型用量 ${item.receipt?.usage?.total_tokens??'待核对'}；未批准或提交计算。`,'form-note'));panel.append(article);
+  }
+ }catch(error){if(alive())panel.replaceChildren(node('p','作者运行方案暂不可核验：'+error.message,'form-note'));}
 }
 const outputAnalysisStates=new Map();
 async function renderOutputAnalysisPanel(id){
