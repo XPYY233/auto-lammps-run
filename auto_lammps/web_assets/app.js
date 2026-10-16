@@ -3259,6 +3259,8 @@ async function renderAuthorResourcePanel(id,parent,state){
      const members=node('details');members.append(node('summary','查看原获取清单的具体成员与限制'));
      for(const row of report.entries||[])members.append(node('p',`${row.path} · ${labels[row.status]||row.status} · ${row.size==null?'大小未提供':row.size+' B'} · 类型 ${row.type??'未提供'} · 模式 ${row.mode??'未提供'}`));
      const raw=node('pre');raw.textContent=JSON.stringify(report,null,2);const evidence=node('details');evidence.append(node('summary','查看清单核对出处与摘要'),raw);members.append(evidence);panel.append(members);
+     const select=node('button','查看应用 AI 原件选择与获取','quiet');
+     select.onclick=async()=>{if(alive())await renderAuthorResourceSelections(id,panel,state);};panel.append(select);
     }else panel.append(node('p','原缓存清单尚未核对成功；原获取状态保留，可使用同一原请求再次核对。','form-note'));
    }
   }
@@ -3296,6 +3298,61 @@ async function renderAuthorResourcePanel(id,parent,state){
    for(const [label,names] of [['未读文件（未冒称已检查）',read.unread_files],['截断文件（仅保留有界片段）',read.truncated_files]])if(names?.length){const detail=node('details');detail.append(node('summary',label));for(const name of names)detail.append(node('p',name));panel.append(detail);}
   }
  }catch(error){if(alive())panel.replaceChildren(node('p','作者资料入口暂不可核验：'+error.message,'form-note'));}
+}
+async function renderAuthorResourceSelections(id,parent,state){
+ if(current?.id!==id||parent.dataset.task!==id)return;
+ let panel=$('#author-resource-selections');
+ if(!panel){panel=node('section',undefined,'result-widget');panel.id='author-resource-selections';parent.append(panel);}
+ panel.dataset.task=id;
+ const sequence=state.selectionSequence=(state.selectionSequence||0)+1;
+ const alive=()=>current?.id===id&&parent.dataset.task===id&&panel.dataset.task===id&&!$('#task-view').hidden&&state.selectionSequence===sequence;
+ try{
+  const data=await api(`/api/tasks/${id}/author-resources/selections`);if(!alive())return;
+  panel.replaceChildren(node('h4','应用 AI 选择缺少的作者原件'),node('p','AI 根据原 P 范围、作者方案缺项和已核验的固定 Git 树选择具体文件；保留已有原件，不默认下载整仓。选取与取件不代表科学验证，不提交计算。','form-note'));
+  panel.append(node('p',`原件选择 ${data.used_rounds}/${data.max_rounds} 版；作者运行方案轮次另行保留。`,'form-note'));
+  for(const row of data.history||[]){
+   const detail=node('details');detail.append(node('summary',`第 ${row.round} 版 · ${row.state} · 查看文件、理由与缺项`));
+   detail.append(node('p',row.receipt?.message||''));
+   if(row.report){detail.append(node('p',row.report.summary));for(const item of row.report.selections||[])detail.append(node('p',`${item.path} · ${item.size} B · ${item.reason}`));
+    for(const item of [...(row.report.missing||[]),...(row.report.limitations||[])])detail.append(node('p',item,'form-note'));}
+   const pre=node('pre');pre.textContent=JSON.stringify(row,null,2);const record=node('details');record.append(node('summary','查看完整选择、版本与模型用量记录'),pre);detail.append(record);panel.append(detail);
+  }
+  const feedback=node('p',state.selectionError||data.disabled_reason||data.latest?.receipt?.message||'尚未调用模型。','form-note');feedback.setAttribute('role','status');panel.append(feedback);
+  const revise=node('textarea');revise.setAttribute('aria-label','原件选择修订要求');revise.placeholder='可选：指出上一版具体需要修正的地方；应用会携带完整前稿。';revise.value=state.selectionNote||'';revise.oninput=()=>state.selectionNote=revise.value;panel.append(revise);
+  const pending=data.latest?.recoverable?data.latest:null;
+  const prepare=node('button',state.selectionPending?'AI 正在选择原件…':pending?'核对原件选择原请求':'让应用 AI 选择需补齐的原件','quiet');
+  prepare.disabled=Boolean(state.selectionPending)||(!pending&&!data.can_prepare);
+  prepare.onclick=async()=>{
+   if(!alive()||state.selectionPending)return;
+   const request=pending?.request_id||state.selectionRequest||crypto.randomUUID().replaceAll('-','');
+   state.selectionPending=request;state.selectionRequest=request;prepare.disabled=true;feedback.textContent='应用 AI 正在使用固定树与完整前稿选择原件，实际调用与费用会保存。';
+   try{const result=await api(`/api/tasks/${id}/author-resources/selections`,{request_id:request,revision_note:pending?(pending.revision_note||''):(state.selectionNote||'')});state.selectionError='';if(result.receipt)state.selectionRequest=null;}
+   catch(error){state.selectionError=error.message;}
+   finally{state.selectionPending=null;if(alive())await renderAuthorResourceSelections(id,parent,state);}
+  };panel.append(prepare);
+  const refresh=node('button','刷新原件选择记录','quiet');refresh.onclick=async()=>{if(alive())await renderAuthorResourceSelections(id,parent,state);};panel.append(refresh);
+  const acquired=data.acquisitions?.latest;
+  for(const item of data.acquisitions?.history||[]){
+   const detail=node('details');detail.append(node('summary',`所选原件获取 · ${item.state} · ${item.report?.files?.length||0} 个文件`));
+   detail.append(node('p',item.message||''),node('p','完整性仅限本次所选文件，不代表整仓完整、运行就绪或科学通过。','form-note'));
+   for(const file of item.report?.files||[])detail.append(node('p',`${file.path} · ${file.size} B · SHA-256 ${file.sha256}`));
+   for(const error of item.report?.failures||[])detail.append(node('p',error.reason,'form-note'));panel.append(detail);
+  }
+  const selected=data.latest?.state==='selected'?data.latest:null;
+  if(selected||acquired?.recoverable){
+   const fetch=node('button',state.selectedFetchPending?'正在获取所选原件…':acquired?.recoverable?'只核对原所选原件获取请求':'把 AI 所选原件获取到 HPC','quiet');
+   fetch.disabled=Boolean(state.selectionPending)||Boolean(state.selectedFetchPending)||(!acquired?.recoverable&&data.acquisitions?.history?.some(item=>item.selection_request_id===selected?.request_id));
+   fetch.onclick=async()=>{
+    if(!alive()||state.selectedFetchPending)return;
+    const operation=acquired?.recoverable?acquired.operation_id:state.selectedFetchRequest||crypto.randomUUID().replaceAll('-','');
+    state.selectedFetchPending=operation;state.selectedFetchRequest=operation;fetch.disabled=true;
+    feedback.textContent='正在通过原保存连接获取所选原件；不执行源码或提交计算，状态未知时只核对原请求。';
+    try{await api(`/api/tasks/${id}/author-resources/selected-files`,{request_id:operation,selection_request_id:acquired?.recoverable?acquired.selection_request_id:selected.request_id});state.selectionError='';state.selectedFetchRequest=null;}
+    catch(error){state.selectionError=error.message;}
+    finally{state.selectedFetchPending=null;if(alive())await renderAuthorResourceSelections(id,parent,state);}
+   };panel.append(fetch);
+  }
+ }catch(error){if(alive())panel.replaceChildren(node('p','原件选择尚不可用：'+error.message,'form-note'));}
 }
 const outputAnalysisStates=new Map();
 async function renderOutputAnalysisPanel(id){

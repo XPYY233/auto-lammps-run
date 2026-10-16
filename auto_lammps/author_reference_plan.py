@@ -86,6 +86,9 @@ def author_source_inputs(value, identifier):
         return dict(capability=None, sources=[], files=[], reads=[], invocation_paths=[])
     if isinstance(value, dict) and 'source_packages' in value:
         return _source_packages(value, identifier)
+    if isinstance(value, dict) and (value.get('capability') or {}).get('adapter') == 'pinned_selected_author_source_reader':
+        from .selected_author_source_reader import validated_inputs
+        return validated_inputs(value, identifier)
     if isinstance(value,dict) and (value.get('capability') or {}).get('adapter')=='pinned_legacy_author_source_reader':
         from .legacy_author_source_reader import validated_inputs
         return validated_inputs(value,identifier)
@@ -155,8 +158,10 @@ def _source_packages(value, identifier):
     for package in packages:
         if (not isinstance(package, dict) or 'source_packages' in package
                 or not isinstance(package.get('capability'), dict)
-                or not isinstance(package.get('reads'), list) or not package['reads']):
+                or not isinstance(package.get('reads'), list)):
             raise TaskError('每个作者来源包必须保留独立能力与原请求、回执，不能嵌套或省略读取。')
+        if not package['reads'] and package['capability'].get('adapter')!='pinned_selected_author_source_reader':
+            raise TaskError('原完整或历史作者来源包不能省略独立读取证明。')
         # Both formats retain their existing task, receipt, file and text checks.
         checked = author_source_inputs(package, identifier)
         capability = checked['capability']

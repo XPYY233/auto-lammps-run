@@ -251,6 +251,10 @@ class AuthorResourceInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class AuthorSelectedResourceInput(AuthorResourceInput):
+    selection_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
 class AuthorExecutionInput(Input):
     package_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
@@ -1411,6 +1415,24 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/author-resources')
     def author_resource_status(identifier: str):
         return author_workspace.resources.status(identifier)
+
+    @app.get('/api/tasks/{identifier}/author-resources/selections')
+    def author_resource_selection_status(identifier: str):
+        return author_workspace.resource_selection_status(identifier)
+
+    @app.post('/api/tasks/{identifier}/author-resources/selections')
+    def author_resource_selection_prepare(identifier: str,data: AuthorPlanInput):
+        try:return author_workspace.prepare_resource_selection(identifier,data.request_id,revision_note=data.revision_note)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '作者原件选择未通过固定范围、来源或调用账本核验；保留原请求。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-resources/selected-files')
+    def author_resource_selected_acquire(identifier: str,data: AuthorSelectedResourceInput):
+        try:return author_workspace.selected_resources.acquire(identifier,data.request_id,data.selection_request_id)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '所选原件尚未通过固定选择、来源或回执核验；保留原请求，不自动重取。'
+            return JSONResponse(dict(detail=message),status_code=422)
 
     @app.post('/api/tasks/{identifier}/author-resources')
     def author_resource_acquire(identifier: str,data: AuthorResourceInput):

@@ -35,6 +35,53 @@ class AuthorReferenceWorkspace:
                 db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_author_source_evidence_{action} BEFORE {action} ON author_source_evidence BEGIN SELECT RAISE(ABORT,"immutable author source evidence"); END')
         from .author_reference_resources import AuthorReferenceResources
         self.resources=AuthorReferenceResources(self)
+        from .author_resource_selection import AuthorResourceSelection
+        self.resource_selections=AuthorResourceSelection(self.planner,self._resource_selection_input,
+                                                        connection_provider=connection_provider)
+        from .author_selected_resource_workspace import AuthorSelectedResourceWorkspace
+        self.selected_resources=AuthorSelectedResourceWorkspace(self)
+
+    def _resource_selection_input(self,identifier):
+        """Read only pinned retained metadata; no source fetch or model on GET."""
+        binding,_,receipt,_=self._metadata(identifier)
+        context,_=self.resources._binding(identifier)
+        for row in reversed(self.resources._rows(identifier)):
+            if not self.resources._same_binding(row['context'],context):continue
+            for inspection in reversed(row.get('inspections',[])):
+                if inspection['report']['state']!='inspected':continue
+                history=self.planner.history(identifier)
+                if not history:raise TaskError('请先保留作者原调用方案及具体原件缺项。')
+                return dict(task_id=identifier,scope='reference_only',role='author_reference_human_only',
+                    B_input=False,author_plan_request_id=history[-1]['request_id'],
+                    tree_request=deepcopy(inspection['request']),tree_report=deepcopy(inspection['report']),
+                    acquisition_receipt=deepcopy(inspection['acquisition_receipt']),
+                    existing_files=[{key:item[key] for key in ('path','size','sha256')} for item in receipt['files']],
+                    binding={key:context[key] for key in ('transport_identity_sha256','license_approval_sha256')})
+        raise TaskError('请先核对原有获取记录具体清单；没有固定缓存树时不调用模型选原件。')
+
+    def resource_selection_status(self,identifier):
+        result=self.resource_selections.status(identifier)
+        ready=False;reason=''
+        try:
+            self.resource_selections._input(identifier)
+            if not self.model_provider(identifier)['enabled']:raise TaskError('请先连接本项目运行模型。')
+            ready=True
+        except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
+            reason=str(error) if isinstance(error,TaskError) else '原件选择的固定来源或连接尚未核验。'
+        result.update(enabled=ready,can_prepare=ready and result['remaining_rounds']>0
+                      and not result['pending_reconciliation'],disabled_reason=reason,
+                      calls_model_on_GET=False,submits_HPC=False,
+                      acquisitions=self.selected_resources.status(identifier))
+        return result
+
+    def prepare_resource_selection(self,identifier,request,*,revision_note=''):
+        task_id(identifier);task_id(request)
+        model=self.model_provider(identifier)
+        if not model['enabled']:raise TaskError('请先连接本项目运行模型。')
+        with self.resources._lease(identifier):
+            return self.resource_selections.prepare(identifier,request,model['client'],
+                connection_revision=model['connection_revision'],credential_generation=model['credential_generation'],
+                revision_note=revision_note)
 
     def _metadata(self,identifier,*,require_scope=True):
         task=self.tasks.get(identifier)
@@ -76,11 +123,12 @@ class AuthorReferenceWorkspace:
 
     def _source(self,identifier,binding,receipt):
         reader=binding['reader'];legacy=binding['format']=='legacy_selected_resource_v3'
+        selected=binding['format']=='selected_acquisition_v1'
         intent=binding['load_intent']() if legacy else None
         capability=(reader.capability(receipt,intent,purpose='author_reference') if legacy
                     else reader.capability(receipt,purpose='author_reference'))
         selections=binding['selections']
-        if not isinstance(selections,list) or not 1<=len(selections)<=128:
+        if not isinstance(selections,list) or not (0 if selected else 1)<=len(selections)<=128:
             raise TaskError('作者读取选择须明确且有界，不能默默删减源码。')
         requests=[]
         for index in range(0,len(selections),8):
@@ -107,6 +155,7 @@ class AuthorReferenceWorkspace:
             reads.append(dict(request=request,response=report))
         value=dict(capability=capability,acquisition_receipt=receipt,reads=reads)
         if legacy:value['legacy_staging_intent']=intent
+        if selected:value=reader.retained(receipt,reads)
         author_source_inputs(value,identifier)
         data=canonical(value)
         with self.tasks.transaction() as db:
@@ -123,24 +172,41 @@ class AuthorReferenceWorkspace:
         inventory and are never interpreted as fully inspected source.
         """
         original=self._source(identifier,binding,receipt)
+        packages=[original]
         completed=self.resources.completed(identifier) if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport) else None
-        if completed is None:return original
-        report,context=completed
         previous={row['path'] for row in receipt['files']}
         text_extensions={'.py','.sh','.in','.lmp','.lammps','.md','.txt','.json','.yaml','.yml','.toml','.cfg'}
-        selections=[dict(path=row['path'],start_line=1,end_line=400) for row in report['files']
-            if row['path'] not in previous and row['size']<=256*1024
-            and (PurePosixPath(row['path']).suffix.lower() in text_extensions
-                 or PurePosixPath(row['path']).name.lower() in {'readme','license','makefile'})]
-        if not selections:return original
-        policy=dict(host_alias=context['host_alias'],remote_directory=context['remote_directory'],
-            reference_task_id=identifier,repository=context['repository'],commit=context['commit'],
-            acquisition_id=report['id'],receipt_sha256=sha256(canonical(report)),
-            inventory_sha256=report['inventory_sha256'],license_approved=True,
-            license_approval_sha256=context['license_approval_sha256'])
-        reader=AuthorSourceReader(self.resources.audit/'source-reads',policy,transport=binding['reader'].transport)
-        supplement=self._source(identifier,dict(reader=reader,format='acquisition_v1',selections=selections),report)
-        combined=dict(source_packages=[original,supplement])
+        def choices(report):
+            return [dict(path=row['path'],start_line=1,end_line=400) for row in report['files']
+                if row['path'] not in previous and row['size']<=256*1024
+                and (PurePosixPath(row['path']).suffix.lower() in text_extensions
+                     or PurePosixPath(row['path']).name.lower() in {'readme','license','makefile'})]
+        if completed is not None:
+            report,context=completed;selections=choices(report)
+            if selections:
+                policy=dict(host_alias=context['host_alias'],remote_directory=context['remote_directory'],
+                    reference_task_id=identifier,repository=context['repository'],commit=context['commit'],
+                    acquisition_id=report['id'],receipt_sha256=sha256(canonical(report)),
+                    inventory_sha256=report['inventory_sha256'],license_approved=True,
+                    license_approval_sha256=context['license_approval_sha256'])
+                reader=AuthorSourceReader(self.resources.audit/'source-reads',policy,transport=binding['reader'].transport)
+                packages.append(self._source(identifier,dict(reader=reader,format='acquisition_v1',selections=selections),report))
+                previous.update(row['path'] for row in report['files'])
+        if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport):
+            from .selected_author_source_reader import SelectedAuthorSourceReader
+            for report,context in self.selected_resources.completed(identifier):
+                source=context['source_context']
+                policy=dict(host_alias=source['host_alias'],remote_directory=source['remote_directory'],
+                    reference_task_id=identifier,repository=source['repository'],commit=source['commit'],
+                    license_approved=True,license_approval_sha256=source['license_approval_sha256'],
+                    selection_request_sha256=sha256(canonical(context['request'])),receipt_sha256=sha256(canonical(report)))
+                reader=SelectedAuthorSourceReader(self.resources.audit/'selected-source-reads',policy,
+                    selection_request=context['request'],tree_inventory=context['inventory'],
+                    original_receipt=context['acquisition_receipt'],transport=binding['reader'].transport)
+                packages.append(self._source(identifier,dict(reader=reader,format='selected_acquisition_v1',selections=choices(report)),report))
+                previous.update(row['path'] for row in report['files'])
+        if len(packages)==1:return original
+        combined=dict(source_packages=packages)
         author_source_inputs(combined,identifier)
         return combined
 
