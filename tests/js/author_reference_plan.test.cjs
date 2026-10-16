@@ -11,8 +11,10 @@ function production(from,to){
  return source.slice(start,end);
 }
 const code=[
+ production('function authorEvidenceIdentity(', 'function paperWorkflowCurrent('),
  production('function paperWorkflowCurrent(', 'async function refreshPaperWorkflow('),
  production('function paperWorkflowAction(', 'function renderAuthorEvidence('),
+ production('function renderAuthorEvidence(', 'async function renderAuthorRawOutputs('),
  production('const authorPlanStates=', 'const outputAnalysisStates=')
 ].join('\n');
 
@@ -39,6 +41,7 @@ function setup(){
   $:selector=>selector==='#task-view'?taskView:find(root,item=>item.id===selector.slice(1)),
   api:(path,body)=>new Promise((resolve,reject)=>calls.push({path,body,resolve,reject})),
   action:fn=>fn(),researchContent:value=>element('div',value),
+  paperWorkflowState:()=>({identity:null}),document:{activeElement:null},renderAuthorRawOutputs:async()=>{},
   refreshPaperWorkflow:Object.assign(async()=>{throw new Error('Unexpected workflow mutation');},{generation:1}),
   crypto:{randomUUID:()=>{uuidCalls++;return 'dddddddd-dddd-dddd-dddd-dddddddddddd';}}});
  vm.runInContext(code,c);
@@ -131,4 +134,41 @@ test('an older same-task history read cannot replace a newer completed read',asy
  s.calls[1].resolve(available({history:[saved({report:{summary:'NEWER_SAVED_HISTORY'}})]}));await newer;
  const before=text(s.panel());s.calls[0].resolve(available({history:[saved({report:{summary:'OLDER_SAVED_HISTORY'}})]}));await old;
  assert.equal(text(s.panel()),before);assert.match(before,/NEWER_SAVED_HISTORY/);assert.doesNotMatch(before,/OLDER_SAVED_HISTORY/);
+});
+
+test('periodic author evidence redraw keeps the existing same-task plan controls and edited note',async()=>{
+ const s=setup();await open(s);const panel=s.panel(),note=find(panel,item=>item.tag==='textarea');
+ const prepare=button(s,'让应用 AI 准备作者运行方案');note.value='Keep this exact unfinished revision note.';note.oninput();
+ for(let i=0;i<3;i++)s.c.renderAuthorEvidence(s.anchor,null);
+ assert.equal(s.panel(),panel);assert.equal(find(s.panel(),item=>item.tag==='textarea'),note);
+ assert.equal(button(s,'让应用 AI 准备作者运行方案'),prepare);assert.equal(prepare.disabled,false);
+ assert.equal(note.value,'Keep this exact unfinished revision note.');assert.equal(s.calls.length,1);
+ assert.equal(s.calls.filter(call=>call.body!==undefined).length,0);
+});
+
+test('parent evidence redraw preserves an in-flight plan and its pending-request guard',async()=>{
+ const s=setup();await open(s);const panel=s.panel(),note=find(panel,item=>item.tag==='textarea');
+ note.value='Exact note for the single pending request';note.oninput();
+ const prepare=button(s,'让应用 AI 准备作者运行方案'),posting=prepare.onclick();
+ const originalPost=plain(s.calls[1].body);
+ for(let i=0;i<3;i++)s.c.renderAuthorEvidence(s.anchor,null);
+ assert.equal(s.panel(),panel);assert.equal(find(panel,item=>item.tag==='textarea'),note);
+ assert.equal(note.value,originalPost.revision_note);await prepare.onclick();
+ assert.equal(s.calls.length,2);assert.equal(s.calls.filter(call=>call.body!==undefined).length,1);
+ assert.deepEqual(plain(s.calls[1].body),originalPost);
+ await finishPost(s,posting,available({can_prepare:false,used_rounds:1,
+  history:[saved({request_id:originalPost.request_id,state:'unknown',recoverable:false})]}));
+ const pending=button(s,'正在准备作者方案…');s.c.renderAuthorEvidence(s.anchor,null);
+ assert.equal(s.panel(),panel);assert.equal(button(s,'正在准备作者方案…'),pending);assert.equal(pending.disabled,true);
+ assert.equal(find(panel,item=>item.tag==='textarea').value,originalPost.revision_note);
+ assert.equal(s.calls.filter(call=>call.body!==undefined).length,1);
+});
+
+test('author evidence redraw removes a different-task plan without creating a model action',async()=>{
+ const s=setup();await open(s);const old=s.panel(),prepare=button(s,'让应用 AI 准备作者运行方案');
+ s.c.current.id=OTHER;s.c.renderAuthorEvidence(s.anchor,null);
+ assert.equal(s.panel(),undefined);assert.equal(s.anchor.children.includes(old),false);
+ assert.equal(find(s.anchor,item=>item.tag==='textarea'),undefined);
+ await prepare.onclick();assert.equal(s.calls.length,1);
+ assert.equal(s.calls.filter(call=>call.body!==undefined).length,0);
 });

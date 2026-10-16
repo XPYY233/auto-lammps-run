@@ -3097,7 +3097,8 @@ function paperWorkflowAction(item,status){
 function renderAuthorEvidence(box,report){
  const state=paperWorkflowState(),identity=authorEvidenceIdentity(report),generation=renderAuthorEvidence.generation=(renderAuthorEvidence.generation||0)+1;
  const focused=identity&&state.identity===identity&&state.input&&document.activeElement===state.input?{start:state.input.selectionStart,end:state.input.selectionEnd}:null;
- box.replaceChildren(node('h2','作者参考 A · 原代码运行结果'));
+ const authorPanel=$('#author-plan-panel'),retained=authorPanel?.dataset.task===current?.id?authorPanel:null;
+ box.replaceChildren(node('h2','作者参考 A · 原代码运行结果'),...(retained?[retained]:[]));
  if(current?.id)void renderAuthorRawOutputs(box,current.id,generation);
  if(!identity){box.append(node('p','尚无可核验的作者 A 图表报告。作业状态与已有失败记录见作者参考历史；没有报告不表示未提交。','form-note'));return;}
  box.append(node('h3',report.title),node('p',report.scope||'', 'subtle'));
