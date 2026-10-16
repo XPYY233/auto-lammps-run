@@ -771,11 +771,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             return JSONResponse({'detail':'原始输出或分析契约未通过检查；原记录保留。'},status_code=409)
 
     @app.get('/api/tasks/{identifier}/output-analyses/{request_id}/files/{name}')
-    def output_analysis_file(identifier: str,request_id: str,name: str):
+    def output_analysis_file(identifier: str,request_id: str,name: str,download: bool=False):
         data=output_analyses.download(identifier,request_id,name)
         media={'.png':'image/png','.csv':'text/csv; charset=utf-8','.json':'application/json'}
         return Response(data,media_type=media.get(Path(name).suffix,'application/octet-stream'),
-            headers={'Content-Disposition':'inline; filename="'+name+'"','Cache-Control':'no-store'})
+            headers={'Content-Disposition':('attachment' if download else 'inline')+'; filename="'+name+'"','Cache-Control':'no-store'})
 
     @app.post('/api/tasks/{identifier}/reference-outputs')
     def collect_reference_outputs(identifier: str,data: ReferenceOutputInput):

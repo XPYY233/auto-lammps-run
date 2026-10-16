@@ -52,6 +52,8 @@ test('completed numerical results expose real figures and full downloads without
  const r=setup(async()=>data);await r.context.renderOutputAnalysisPanel('task');
  const img=r.all().find(el=>el.tag==='img');assert.match(img.src,/output-analyses\/b+\/files\/plot-hist.png$/);
  assert.match(img.alt,/作者 A 作业 123/);assert.ok(r.all().some(el=>el.tag==='a'&&el.textContent==='numeric-report.json'));
+ const download=r.all().find(el=>el.tag==='a'&&el.textContent==='numeric-report.json');
+ assert.equal(download.download,'numeric-report.json');assert.match(download.href,/\?download=true$/);
  assert.match(r.all().map(n=>n.textContent).join('\n'),/科学复现仍待/);
 });
 test('technical recovery reuses the original request and question instead of creating a paid revision',async()=>{

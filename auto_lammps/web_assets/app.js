@@ -3355,7 +3355,7 @@ async function renderOutputAnalysisPanel(id){
     if(summaries.length){const table=node('table',undefined,'result-table'),head=node('tr');for(const title of ['数据','单位','样本数','均值','最小值','最大值'])head.append(node('th',title));table.append(head);
      for(const op of summaries){const row=node('tr');for(const value of [op.table+'.'+op.column,op.value_unit,op.values.count,op.values.mean,op.values.min,op.values.max])row.append(node('td',typeof value==='number'?String(Number(value.toPrecision(8))):String(value)));table.append(row);}article.append(table);}
     const downloads=node('details');downloads.append(node('summary','下载完整派生数据、图与分析来源记录'));
-    for(const file of result.files){const a=node('a',file.name);a.href=`/api/tasks/${id}/output-analyses/${item.request_id}/files/${encodeURIComponent(file.name)}`;a.target='_blank';a.rel='noopener';downloads.append(a,node('br'));}article.append(downloads);
+    for(const file of result.files){const a=node('a',file.name);a.href=`/api/tasks/${id}/output-analyses/${item.request_id}/files/${encodeURIComponent(file.name)}?download=true`;a.download=file.name;downloads.append(a,node('br'));}article.append(downloads);
    }
    const details=node('details');details.append(node('summary','查看完整分析方案、逐字出处、局限和模型用量'));
    if(item.proposal){details.append(researchContent(item.proposal.summary||''));for(const limitation of item.proposal.limitations||[])details.append(node('p',limitation));const pre=node('pre');pre.textContent=JSON.stringify(item.proposal,null,2);details.append(pre);}
