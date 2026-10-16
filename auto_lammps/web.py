@@ -251,6 +251,15 @@ class AuthorResourceInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class AuthorExecutionInput(Input):
+    package_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class AuthorExecutionApproval(AuthorExecutionInput):
+    revision: StrictInt = Field(ge=1)
+    note: str = Field(default='',max_length=1000)
+
+
 class ScientificReviewInput(Input):
     analysis_id: str = Field(min_length=64, max_length=64)
 
@@ -318,7 +327,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None, author_execution_config=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -527,6 +536,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         model_provider=workbench_context,connection_provider=reference_target_connection,
         model_calls=model_client.calls if model_client else None)
     if author_workspace.tasks.path!=store.path:raise ValueError('Author workspace must share the current task store')
+    if author_execution_config is not None:
+        if author_workspace.execution is not None:raise ValueError('Use one author execution configuration')
+        from .author_dispatch_config import load_author_dispatch
+        author_workspace.execution=load_author_dispatch(author_workspace,author_execution_config,hpc)
+        if raw_outputs.collections!=author_workspace.execution.collections:
+            raise ValueError('Author execution needs its ordinary verified raw output collection directory')
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
         discovery_library=discoveries, paper_evidence_views=paper_evidence_views,
         source_discovery=source_discovery, reference_views=reference_evidence_views,
@@ -1355,11 +1370,43 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                     if item['id']=='analyze_A':item.update(enabled=True,disabled_reason='',method='GET',endpoint='/api/tasks/'+identifier+'/output-analyses')
             report['actions'].insert(7,dict(id='prepare_A_plan',label='查看与准备作者运行方案',enabled=True,
                 disabled_reason='',method='GET',endpoint='/api/tasks/'+identifier+'/author-plan'))
+            execution=author_workspace.execution_status(identifier)
+            for item in report['actions']:
+                if item['id']=='approve_A':item.update(label='查看并批准作者 A 原调用方案',
+                    enabled=bool(execution['configured'] or execution['history']),
+                    disabled_reason=execution.get('disabled_reason',''),method='GET',
+                    endpoint='/api/tasks/'+identifier+'/author-execution')
         return report
 
     @app.get('/api/tasks/{identifier}/author-plan')
     def author_plan_status(identifier: str):
         return author_workspace.status(identifier)
+
+    @app.get('/api/tasks/{identifier}/author-execution')
+    def author_execution_status(identifier: str):
+        return author_workspace.execution_status(identifier)
+
+    def author_execution_action(action):
+        try:return action()
+        except (ValueError,KeyError,TypeError,OSError,RuntimeError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '作者执行未通过来源、部署、账本或回执核验；保留原请求，不自动重交。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-execution/prepare')
+    def author_execution_prepare(identifier: str,data: Input):
+        return author_execution_action(lambda:author_workspace.prepare_execution(identifier))
+
+    @app.post('/api/tasks/{identifier}/author-execution/approve')
+    def author_execution_approve(identifier: str,data: AuthorExecutionApproval):
+        return author_execution_action(lambda:author_workspace.approve_execution(identifier,data.revision,data.package_sha256,note=data.note))
+
+    @app.post('/api/tasks/{identifier}/author-execution/submit')
+    def author_execution_submit(identifier: str,data: AuthorExecutionInput):
+        return author_execution_action(lambda:author_workspace.submit_execution(identifier,data.package_sha256))
+
+    @app.post('/api/tasks/{identifier}/author-execution/follow')
+    def author_execution_follow(identifier: str,data: Input):
+        return author_execution_action(lambda:author_workspace.follow_execution(identifier))
 
     @app.get('/api/tasks/{identifier}/author-resources')
     def author_resource_status(identifier: str):
@@ -1998,6 +2045,7 @@ def main():
     parser.add_argument('--reference-reports-directory',help='Private controller reference reports for the human operator only')
     parser.add_argument('--reference-output-config',type=Path,help='Private pinned legacy author-output inventory; retrieval only, never physics')
     parser.add_argument('--author-reference-config',type=Path,help='Private reference-only source, license and deployment bindings; plan preparation is not submission')
+    parser.add_argument('--author-execution-config',type=Path,help='Explicit private author A accounted execution deployment; user approval remains required')
     parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
@@ -2077,6 +2125,7 @@ def main():
                           result_assistant_enabled=True if args.enable_result_assistant else None,collections_directory=args.collections_directory,execution_jobs=execution_jobs,
                           reference_output_config=args.reference_output_config,
                           author_reference_config=args.author_reference_config,
+                          author_execution_config=args.author_execution_config,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

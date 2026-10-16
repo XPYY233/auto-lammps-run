@@ -170,6 +170,11 @@ class AutomaticAuthorization:
         private_bytes_once(self.directory/(identifier+'.sh'),batch.script)
         private_bytes_once(self.directory/(identifier+'.json'),canonical(bundle['envelope']))
         grant_sha256=self.verify(submission,snapshot,batch)
+        return self._deliver(submission,snapshot,batch,bundle,grant_sha256)
+
+    def _deliver(self,submission,snapshot,batch,bundle,grant_sha256,*,author_reference=False):
+        """Shared immutable grant delivery; distinct roles keep distinct checks."""
+        identifier=submission.request_id
         expected=dict(state='authorization_installed',request_id=identifier,manifest_sha256=snapshot.digest,
                       grant_sha256=grant_sha256,batch_sha256=batch.sha256,profile_sha256=self.pins['profile_sha256'])
         with self.ledger._transaction() as db:
@@ -186,6 +191,7 @@ class AutomaticAuthorization:
                 policy_sha256=self.policy_sha256))
         remote=[self.endpoint.python_path,'-I','-c',BOOTSTRAP,self.endpoint.helper_path,self.endpoint.helper_sha256,
                 '--root',self.endpoint.root_path,'--request-id',identifier,'--manifest-sha256',snapshot.digest,'--install-authorization']
+        if author_reference:remote.append('--author-reference')
         command=['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10',
                  '-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-o','ForwardX11=no','-o','PermitLocalCommand=no',
                  self.endpoint.host_alias,shlex.join(remote)]

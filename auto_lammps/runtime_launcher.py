@@ -46,6 +46,11 @@ def hash_value(value):
     return value
 
 
+def grant_envelope_limit(*, author_reference=False):
+    """Reference metadata capacity does not relax the agent grant boundary."""
+    return 1024 * 1024 if author_reference else 16384
+
+
 def relative(value):
     if (not isinstance(value, str) or len(value) > 240 or not value or len(value.split('/')) > 8
             or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', x) for x in value.split('/'))):
@@ -105,9 +110,9 @@ def read_regular(path, limit, *, private=False):
         os.close(parent)
 
 
-def write_once(path, value):
+def write_once(path, value, *, max_bytes=16384):
     data = canonical(value)
-    if len(data) > 16384:
+    if len(data) > max_bytes:
         raise ExecutionDenied('Receipt is too large')
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
     try:
@@ -769,7 +774,7 @@ def deployment_parallelism(profile, cores):
     return native
 
 
-def native_command(native, *, entrypoint, cores):
+def _native_environment_command(native, command):
     # Trusted deployment paths/modules are positional arguments, never shell source.
     # Native MPI uses the scheduler bootstrap; never copy isolated fork/loopback flags.
     script = ('set -eo pipefail\nsource "$1"\nshift\nmodule purge\n'
@@ -777,8 +782,188 @@ def native_command(native, *, entrypoint, cores):
               'export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 SLURM_EXPORT_ENV=ALL I_MPI_HYDRA_BOOTSTRAP=slurm\n'
               'exec "$@"\n')
     return [native['shell_path'], '--noprofile', '--norc', '-c', script, 'auto-lammps-native',
-            native['bootstrap_path'], str(len(native['modules'])), *native['modules'], native['mpi_path'],
-            '-np', str(cores), native['engine_path'], '-in', relative(entrypoint), '-log', 'log.lammps', '-screen', 'none']
+            native['bootstrap_path'], str(len(native['modules'])), *native['modules'], *command]
+
+
+def native_command(native, *, entrypoint, cores):
+    return _native_environment_command(native, [native['mpi_path'], '-np', str(cores),
+        native['engine_path'], '-in', relative(entrypoint), '-log', 'log.lammps', '-screen', 'none'])
+
+
+def validate_author_argv(kind, argv, *, working_directory, entrypoint):
+    """Resolve the actual original file operand, never merely any matching token.
+
+    Interpreter flags are parsed only before the script. Literal parameters
+    after the pinned script belong to that author program, not the interpreter.
+    Module/eval/stdin modes require a different reviewed capability and cannot
+    masquerade as fixed-file execution.
+    """
+    if (kind not in {'python', 'shell', 'lammps', 'author_binary'}
+            or not isinstance(argv, list) or not 1 <= len(argv) <= 128
+            or any(not isinstance(arg, str) or not arg or len(arg) > 2000
+                or any(ord(char) < 32 or ord(char) == 127 or char in ';|&`$<>' for char in arg) for arg in argv)):
+        raise ExecutionDenied('Author argv must remain a complete literal token list')
+    if working_directory != '.': relative(working_directory)
+    relative(entrypoint)
+    def matches(argument):
+        return (not argument.startswith(('-', '/')) and '..' not in PurePosixPath(argument).parts
+                and str(PurePosixPath(working_directory)/argument) == entrypoint)
+    if kind in {'python', 'shell'}:
+        allowed = ({'-u','-B','-I','-E','-s','-S','-O','-OO','-q','-v','-b','-bb'} if kind == 'python'
+                   else {'-e','-u','-x','-v','--noprofile','--norc'})
+        index = 0
+        while index < len(argv) and argv[index] in allowed:
+            index += 1
+        if index < len(argv) and argv[index] == '--':
+            index += 1
+        if index >= len(argv) or not matches(argv[index]):
+            raise ExecutionDenied('Interpreter must execute the pinned original script operand; inline/module/stdin modes are forbidden')
+        return index
+    if kind == 'lammps':
+        positions = [index for index, value in enumerate(argv) if value in {'-in','-i'}]
+        if (len(positions) != 1 or positions[0]+1 >= len(argv) or not matches(argv[positions[0]+1])
+                or any(value.startswith('-in') and value != '-in' for value in argv)
+                or any(value in {'-c','--command','--eval','-e'} for value in argv)):
+            raise ExecutionDenied('LAMMPS must select exactly one pinned original input operand')
+        return positions[0]+1
+    if not matches(argv[0]):
+        raise ExecutionDenied('Reviewed author binary must receive its pinned original file as the first operand')
+    return 0
+
+
+def author_reference_commands(profile, package, *, package_sha256, profile_sha256, work_root, resources):
+    """Resolve pinned author actions within an already checked native allocation.
+
+    This pure interface is shared with the reference execution adapter. It does
+    not stage, authorize, submit or launch a process. The caller must first run
+    the same signed-grant/allocation/cgroup guards as ``execute`` and must verify
+    the original file bytes. A Python driver exists here only when the trusted
+    profile explicitly registers its path, SHA, original entrypoint and reviewed
+    same-allocation child policy. Neither model IDs nor PATH select a program.
+    """
+    hash_value(package_sha256); hash_value(profile_sha256)
+    if digest(canonical(package)) != package_sha256:
+        raise ExecutionDenied('Author execution package changed')
+    if (not isinstance(package, dict) or package.get('schema_version') != 1
+            or package.get('kind') != 'original_author_execution'
+            or package.get('role') != 'author_reference' or package.get('scope') != 'reference_only'
+            or package.get('B_input') is not False or package.get('original_files_rewritten') is not False):
+        raise ExecutionDenied('An author-reference package cannot be an agent candidate')
+    if (not isinstance(resources, dict)
+            or set(resources) != {'cores', 'wall_seconds', 'memory_bytes', 'storage_bytes'}
+            or any(type(value) is not int or value <= 0 for value in resources.values())
+            or package.get('resources') != resources or resources['cores'] > 32
+            or resources['memory_bytes'] > 8 * 1024**3 or resources['wall_seconds'] > 7 * 86400):
+        raise ExecutionDenied('Author actions must retain the exact CPU-only allocation')
+    native = deployment_parallelism(profile, resources['cores'])
+    registered = profile.get('author_reference')
+    if (not isinstance(registered, dict) or 'profile_sha256' in registered
+            or registered.get('role') != 'author_reference' or registered.get('gpu_allowed') is not False
+            or registered.get('execution_mode') != 'native_slurm' or registered.get('formal_isolation') is not False
+            or canonical(package.get('deployment')) != canonical(dict(registered, profile_sha256=profile_sha256))):
+        raise ExecutionDenied('Author deployment is absent or differs from the trusted runtime profile')
+    maximum = registered.get('resources')
+    if (not isinstance(maximum, dict) or set(maximum) != set(resources)
+            or any(type(maximum[key]) is not int or resources[key] > maximum[key] for key in resources)):
+        raise ExecutionDenied('Author allocation exceeds the registered deployment bounds')
+    environments = registered.get('environments')
+    if not isinstance(environments, list) or not 1 <= len(environments) <= 32:
+        raise ExecutionDenied('No trusted author interpreter or engine mapping')
+    work = absolute(str(work_root))
+    files = package.get('files')
+    if not isinstance(files, list) or not 1 <= len(files) <= 128:
+        raise ExecutionDenied('Author original-file inventory is incomplete')
+    inputs = {}
+    for row in files:
+        if (not isinstance(row, dict) or set(row) != {'path', 'size', 'sha256', 'binding_sha256', 'source_path'}
+                or type(row['size']) is not int or row['size'] < 0):
+            raise ExecutionDenied('Invalid author original-file inventory')
+        name = relative(row['path']); relative(row['source_path'])
+        hash_value(row['sha256']); hash_value(row['binding_sha256'])
+        if name in inputs or any(name.startswith(old + '/') or old.startswith(name + '/') for old in inputs):
+            raise ExecutionDenied('Duplicated or overlapping original-file inventory')
+        inputs[name] = row
+    calls = package.get('invocations')
+    if not isinstance(calls, list) or not 1 <= len(calls) <= 128:
+        raise ExecutionDenied('An explicit bounded original author action list is required')
+    actions, identifiers, signatures, outputs = [], set(), set(), {}
+    for call in calls:
+        fields = {'id', 'entrypoint', 'argv', 'working_directory', 'environment_id',
+                  'executable_id', 'executable_sha256', 'dependency_ids', 'required_files', 'output_files'}
+        if not isinstance(call, dict) or set(call) != fields:
+            raise ExecutionDenied('Malformed original author action')
+        identifier = call['id']
+        if (not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', identifier)
+                or identifier in identifiers):
+            raise ExecutionDenied('Duplicate or invalid author action identity')
+        identifiers.add(identifier)
+        selected = [item for item in environments if isinstance(item, dict) and item.get('id') == call['environment_id']]
+        if len(selected) != 1 or not isinstance(selected[0].get('executables'), list):
+            raise ExecutionDenied('Author environment is not uniquely registered')
+        programs = [item for item in selected[0]['executables'] if isinstance(item, dict) and item.get('id') == call['executable_id']]
+        if len(programs) != 1:
+            raise ExecutionDenied('Author interpreter or engine is not registered')
+        program = programs[0]
+        if (set(program) != {'id', 'sha256', 'kind', 'path', 'launch_mode', 'entrypoints',
+                'child_process_policy', 'review_sha256'}
+                or program['kind'] not in {'lammps', 'python', 'shell', 'author_binary'}
+                or program['sha256'] != call['executable_sha256']
+                or program['launch_mode'] not in {'direct', 'mpi'}
+                or program['child_process_policy'] not in {'no_children', 'reviewed_same_allocation'}
+                or (program['kind'] != 'lammps' and program['child_process_policy'] != 'reviewed_same_allocation')):
+            raise ExecutionDenied('Author interpreter or child-process policy is unreviewed')
+        hash_value(program['review_sha256']); executable = str(absolute(program['path']))
+        if native['files'].get(executable) != hash_value(program['sha256']):
+            raise ExecutionDenied('Author executable is absent from the native byte-verified inventory')
+        entry = call['entrypoint']
+        if (not isinstance(entry, dict) or set(entry) != {'path', 'sha256'}
+                or entry not in program['entrypoints'] or entry.get('path') not in inputs
+                or inputs[entry['path']]['sha256'] != entry['sha256']):
+            raise ExecutionDenied('Author entrypoint differs from the reviewed original bytes')
+        relative(entry['path']); hash_value(entry['sha256'])
+        cwd = call['working_directory']
+        if cwd != '.': relative(cwd)
+        if cwd != '.' and not any(name.startswith(cwd + '/') for name in inputs):
+            raise ExecutionDenied('Author working directory is outside the original file tree')
+        arguments = call['argv']
+        validate_author_argv(program['kind'], arguments, working_directory=cwd, entrypoint=entry['path'])
+        required = call['required_files']
+        if (not isinstance(required, list) or not 1 <= len(required) <= 128 or entry not in required
+                or any(not isinstance(row, dict) or set(row) != {'path', 'sha256'}
+                    or row['path'] not in inputs or inputs[row['path']]['sha256'] != row['sha256'] for row in required)
+                or len({row['path'] for row in required}) != len(required)):
+            raise ExecutionDenied('Required author original bytes are not completely fixed')
+        signature = digest(canonical(dict(path=executable, argv=arguments, cwd=cwd)))
+        if signature in signatures:
+            raise ExecutionDenied('Repeated original actions cannot create hidden duplicate evaluations')
+        signatures.add(signature)
+        command = [executable, *arguments]
+        if program['launch_mode'] == 'mpi': command = [native['mpi_path'], '-np', str(resources['cores']), *command]
+        produced = call['output_files']
+        if not isinstance(produced, list) or not 1 <= len(produced) <= 128:
+            raise ExecutionDenied('Declare concrete original author outputs')
+        names = set()
+        for row in produced:
+            if (not isinstance(row, dict) or set(row) != {'path', 'kind'}
+                    or row['kind'] not in {'numeric_table', 'trajectory', 'log', 'other'}):
+                raise ExecutionDenied('Invalid author output declaration')
+            name = relative(row['path'])
+            if name in names or (cwd != '.' and not name.startswith(cwd + '/')):
+                raise ExecutionDenied('Author output is duplicated or outside its declared working directory')
+            names.add(name)
+            if any(name == old or name.startswith(old + '/') or old.startswith(name + '/') for old in inputs):
+                raise ExecutionDenied('Author output would overwrite immutable original input')
+            if name in outputs and outputs[name] != row:
+                raise ExecutionDenied('Conflicting shared author output declarations')
+            outputs[name] = dict(row)
+        actions.append(dict(id=identifier, argv=_native_environment_command(native, command),
+            original_argv=list(arguments), cwd=str(work / cwd), outputs=[dict(row) for row in produced]))
+    if sorted(outputs.values(), key=lambda row: row['path']) != package.get('outputs'):
+        raise ExecutionDenied('Collected author outputs differ from their original actions')
+    return dict(schema_version=1, role='author_reference', package_sha256=package_sha256,
+        profile_sha256=profile_sha256, resources=dict(resources), work_root=str(work), actions=actions,
+        outputs=[dict(row, absolute_path=str(work / row['path'])) for row in package['outputs']],
+        execution_authorized=False, formal_isolation=False)
 
 
 def execute_native(profile, profile_data, case, manifest, grant, *, request_id, manifest_sha256,
@@ -847,7 +1032,102 @@ def execute_native(profile, profile_data, case, manifest, grant, *, request_id, 
     return result
 
 
-def execute(profile_path, request_id, manifest_sha256):
+def validate_author_outputs(outputs, package, *, input_bytes):
+    expected = {'stdout.txt', 'stderr.txt'} | {row['path'] for row in package['outputs']}
+    if (not isinstance(outputs, list) or not 2 <= len(outputs) <= 4096
+            or len(set(outputs)) != len(outputs) or set(outputs) != expected):
+        raise ExecutionDenied('Author grant must declare exactly the original outputs and two process streams')
+    for name in outputs:
+        relative(name)
+        if any(name == row['path'] or name.startswith(row['path'] + '/') or row['path'].startswith(name + '/')
+               for row in package['files']):
+            raise ExecutionDenied('Author process stream or output collides with original inputs')
+    if package['resources']['storage_bytes'] - input_bytes - 262144 <= 0:
+        raise ExecutionDenied('Insufficient author output storage reservation')
+
+
+def execute_author_native(profile, profile_data, case, package, grant, *, request_id,
+                          manifest_sha256, job_id, cpus, elapsed, query_start):
+    """Run the fixed original actions once after the common allocation guards."""
+    if (grant.get('role') != 'author_reference' or grant.get('author_package_sha256') != manifest_sha256
+            or grant.get('execution_scope') != 'trusted_research' or grant.get('formal_isolation') is not False):
+        raise ExecutionDenied('Original author execution needs a separately bound reference grant')
+    if grant.get('approval_sha256') != package['deployment']['approval_sha256']:
+        raise ExecutionDenied('Author grant belongs to another deployment approval')
+    hash_value(grant.get('user_plan_approval_sha256'))
+    resources = package['resources']; native = deployment_parallelism(profile, resources['cores'])
+    plan = author_reference_commands(profile, package, package_sha256=manifest_sha256,
+        profile_sha256=digest(profile_data), work_root=case/'output', resources=resources)
+    staged = json.loads(read_regular(case/'author-stage.json', grant_envelope_limit(author_reference=True)))
+    if (staged.get('role') != 'author_reference' or staged.get('package_sha256') != manifest_sha256
+            or staged.get('profile_sha256') != digest(profile_data)
+            or staged.get('command_plan_sha256') != digest(canonical(plan))):
+        raise ExecutionDenied('Author stage receipt differs from its fixed deployment and command plan')
+    for path, checksum in native['files'].items():
+        if digest(read_regular(path, 1024*1024*1024)) != checksum:
+            raise ExecutionDenied('Native author environment file changed: '+Path(path).name)
+    validate_author_outputs(grant['outputs'], package, input_bytes=0)
+    write_once(case/'execution-intent.json', dict(request_id=request_id, job_id=job_id,
+        manifest_sha256=manifest_sha256, author_package_sha256=manifest_sha256, role='author_reference',
+        profile_sha256=digest(profile_data), grant_sha256=digest(canonical(grant)),
+        argv_sha256=digest(canonical(plan['actions'])), outputs=grant['outputs'],
+        ranks=resources['cores'], cpu_ids=sorted(cpus), output_storage=None,
+        execution_mode='native_slurm', formal_isolation=False, storage_enforcement='collection_bound_only',
+        at=datetime.now(timezone.utc).isoformat()),max_bytes=grant_envelope_limit(author_reference=True))
+    output = case/'output'; output.mkdir(mode=0o700, exist_ok=False)
+    action_root = case/'author-actions'; action_root.mkdir(mode=0o700, exist_ok=False)
+    for item in package['files']:
+        path = output/relative(item['path']); path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data = read_regular(case/item['path'], item['size'])
+        if len(data) != item['size'] or digest(data) != item['sha256']:
+            raise ExecutionDenied('Author original changed before working-copy creation')
+        fd = os.open(path, os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, 'wb') as target:
+            target.write(data); target.flush(); os.fsync(target.fileno())
+    environment = {key:value for key,value in os.environ.items() if key.startswith('SLURM_')}
+    environment.update(PATH='/usr/bin:/bin', LC_ALL='C')
+    started = time.monotonic(); code = 0; timed_out = False; completed = 0
+    with (output/'stdout.txt').open('xb') as stdout, (output/'stderr.txt').open('xb') as stderr:
+        for call, action in zip(package['invocations'], plan['actions']):
+            remaining = resources['wall_seconds'] - elapsed - (time.monotonic()-query_start)
+            if remaining <= 0:
+                code, timed_out = 1, True
+                break
+            for required in call['required_files']:
+                item = next(row for row in package['files'] if row['path'] == required['path'])
+                data = read_regular(output/item['path'], item['size'])
+                if len(data) != item['size'] or digest(data) != item['sha256']:
+                    raise ExecutionDenied('A previous original action modified a later pinned input')
+            folder = action_root/action['id']; folder.mkdir(mode=0o700, exist_ok=False)
+            write_once(folder/'intent.json', dict(request_id=request_id, job_id=job_id, id=action['id'],
+                package_sha256=manifest_sha256, argv_sha256=digest(canonical(action['argv'])),
+                working_directory=call['working_directory']),max_bytes=grant_envelope_limit(author_reference=True))
+            process = subprocess.Popen(action['argv'], cwd=action['cwd'], stdin=subprocess.DEVNULL,
+                stdout=stdout, stderr=stderr, close_fds=True, start_new_session=True, env=environment,
+                preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+            action_started = time.monotonic()
+            try:
+                code = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True; os.killpg(process.pid,signal.SIGKILL); code = process.wait()
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid,signal.SIGKILL); process.wait()
+            write_once(folder/'result.json', dict(request_id=request_id, job_id=job_id, id=action['id'],
+                returncode=code, timed_out=timed_out, elapsed_seconds=time.monotonic()-action_started,
+                scientific_status='not_evaluated'),max_bytes=grant_envelope_limit(author_reference=True))
+            completed += 1
+            if code != 0 or timed_out:
+                break
+    result = dict(request_id=request_id, job_id=job_id, returncode=code, timed_out=timed_out,
+        elapsed_seconds=time.monotonic()-started, scientific_status='not_evaluated',
+        role='author_reference', execution_mode='native_slurm', formal_isolation=False,
+        action_count=len(plan['actions']), completed_action_count=completed)
+    write_once(case/'execution-result.json', result,max_bytes=grant_envelope_limit(author_reference=True))
+    return result
+
+
+def execute(profile_path, request_id, manifest_sha256, *, author_reference=False):
     if sys.platform != 'linux':
         raise ExecutionDenied('Only the approved Linux compute-node runtime may execute')
     if threading.active_count() != 1:
@@ -868,13 +1148,22 @@ def execute(profile_path, request_id, manifest_sha256):
     fd = directory(control,private=True)
     os.close(fd)
     key = read_regular(control/'grant.key',32,private=True)
-    grant = verify_grant(json.loads(read_regular(control/(request_id+'.json'),16384,private=True)),key,
+    grant = verify_grant(json.loads(read_regular(control/(request_id+'.json'),
+                         grant_envelope_limit(author_reference=author_reference),private=True)),key,
                          request_id=request_id,manifest_sha256=manifest_sha256,
                          profile_sha256=digest(profile_data),now=time.time())
-    manifest_data = read_regular(case/'manifest.json',1000000)
+    if not author_reference and grant.get('role') == 'author_reference':
+        raise ExecutionDenied('A reference grant cannot execute an agent candidate')
+    manifest_data = read_regular(case/('author-package.json' if author_reference else 'manifest.json'),1000000)
     if digest(manifest_data) != manifest_sha256:
         raise ExecutionDenied('Staged manifest changed')
     manifest = json.loads(manifest_data)
+    if author_reference:
+        if (execution_mode(profile) != 'native_slurm' or grant.get('role') != 'author_reference'
+                or grant.get('author_package_sha256') != manifest_sha256):
+            raise ExecutionDenied('Author reference must use its own signed native role')
+    elif grant.get('role') == 'author_reference':
+        raise ExecutionDenied('A reference grant cannot execute an agent candidate')
     resources = manifest['resources']
     if (set(resources) != {'cores','wall_seconds','memory_bytes','storage_bytes'}
             or any(type(value) is not int or value <= 0 for value in resources.values())):
@@ -898,7 +1187,8 @@ def execute(profile_path, request_id, manifest_sha256):
     elapsed = parse_allocation(query.stdout.decode('utf-8'),request_id=request_id,manifest_sha256=manifest_sha256,
                                job_id=job_id,uid=os.getuid(),host=socket.gethostname(),resources=resources)
     if execution_mode(profile) == 'isolated': verify_runtime_tree(profile)
-    staged = json.loads(read_regular(case/'stage.json',16384))
+    staged = json.loads(read_regular(case/('author-stage.json' if author_reference else 'stage.json'),
+        grant_envelope_limit(author_reference=author_reference)))
     if staged.get('state') != 'staged' or staged.get('manifest_sha256') != manifest_sha256 or staged.get('request_id') != request_id:
         raise ExecutionDenied('Missing complete upload receipt')
     input_bytes = len(manifest_data)
@@ -913,6 +1203,13 @@ def execute(profile_path, request_id, manifest_sha256):
     if (case/'job.sh').exists():
         input_bytes += len(read_regular(case/'job.sh',1000000))
     outputs = grant['outputs']
+    if author_reference:
+        validate_author_outputs(outputs, manifest, input_bytes=input_bytes)
+        if profile.get('output_volume') is not None:
+            raise ExecutionDenied('Native author reference does not use isolated output volumes')
+        return execute_author_native(profile, profile_data, case, manifest, grant,
+            request_id=request_id, manifest_sha256=manifest_sha256, job_id=job_id,
+            cpus=cpus, elapsed=elapsed, query_start=query_start)
     per_file = validate_outputs(outputs,storage_bytes=resources['storage_bytes'],input_bytes=input_bytes)
     if execution_mode(profile) == 'native_slurm':
         if profile.get('output_volume') is not None:
@@ -965,7 +1262,7 @@ def execute(profile_path, request_id, manifest_sha256):
     return result
 
 
-def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream):
+def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream, *, author_reference=False):
     """Read-only framed export for the trusted controller after final accounting.
 
     Never executes inputs, invokes a scheduler, or reads the private grant key.
@@ -982,7 +1279,7 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
     case = absolute(root_path)/request_id
     fd = directory(case, private=True)
     os.close(fd)
-    manifest_data = read_regular(case/'manifest.json', 1000000)
+    manifest_data = read_regular(case/('author-package.json' if author_reference else 'manifest.json'), 1000000)
     if digest(manifest_data) != manifest_sha256:
         raise ExecutionDenied('Collection belongs to another input')
     budget = json.loads(manifest_data)['resources']['storage_bytes']
@@ -991,7 +1288,8 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
     controls = {}
     for name in ('execution-intent.json', 'execution-result.json', 'scheduler-result.json'):
         try:
-            controls[name] = read_regular(case/name, 200000 if name == 'scheduler-result.json' else 16384)
+            controls[name] = read_regular(case/name, 200000 if name == 'scheduler-result.json'
+                else grant_envelope_limit(author_reference=author_reference))
         except FileNotFoundError:
             pass
     intent = json.loads(controls.get('execution-intent.json', b'null'))
@@ -1003,7 +1301,15 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
             raise ExecutionDenied('Wrong execution intent')
         outputs = intent.get('outputs')
         # This also rejects legacy intents without a declared output list.
-        validate_outputs(outputs, storage_bytes=budget, input_bytes=0)
+        if author_reference:
+            package = json.loads(manifest_data)
+            if intent.get('role') != 'author_reference' or intent.get('author_package_sha256') != manifest_sha256:
+                raise ExecutionDenied('Reference output collection needs its original role and package identity')
+            validate_author_outputs(outputs, package, input_bytes=0)
+        else:
+            if intent.get('role') == 'author_reference':
+                raise ExecutionDenied('Reference outputs cannot be collected as an agent candidate')
+            validate_outputs(outputs, storage_bytes=budget, input_bytes=0)
     else:
         if (not isinstance(accepted, dict) or accepted.get('state') != 'accepted'
                 or accepted.get('request_id') != request_id or accepted.get('job_id') != job_id
@@ -1073,7 +1379,7 @@ def collect(profile_path, request_id, manifest_sha256, job_id, root_path, stream
             header['files'].append(dict(path=name, size=before.st_size, sha256=checksum.hexdigest()))
             opened.append((handle, before))
         data = canonical(header)
-        if len(data) > 65536:
+        if len(data) > (1000000 if author_reference else 65536):
             raise ExecutionDenied('Collection header too large')
         stream.write(struct.pack('!I', len(data))+data)
         for (handle, before), item in zip(opened, header['files']):
@@ -1101,6 +1407,7 @@ def main():
     parser.add_argument('--request-id',required=True)
     parser.add_argument('--manifest-sha256',required=True)
     parser.add_argument('--collect', action='store_true', help='Read existing outputs only; never execute')
+    parser.add_argument('--author-reference', action='store_true', help='Use a separately pinned original-author package')
     parser.add_argument('--job-id')
     parser.add_argument('--root')
     args=parser.parse_args()
@@ -1110,7 +1417,8 @@ def main():
         signal.alarm(60)
         try:
             collect(Path(__file__).resolve().parent/'runtime.json', args.request_id,
-                    args.manifest_sha256, args.job_id, args.root, sys.stdout.buffer)
+                    args.manifest_sha256, args.job_id, args.root, sys.stdout.buffer,
+                    **({'author_reference': True} if args.author_reference else {}))
         except Exception as exc:
             print(json.dumps({'state':'collection_failed','error_type':type(exc).__name__}), file=sys.stderr)
             return 1
@@ -1120,7 +1428,8 @@ def main():
     if args.job_id or args.root:
         parser.error('Collection arguments cannot be used for execution')
     try:
-        result=execute(Path(__file__).resolve().parent/'runtime.json',args.request_id,args.manifest_sha256)
+        result=execute(Path(__file__).resolve().parent/'runtime.json',args.request_id,args.manifest_sha256,
+                       **({'author_reference': True} if args.author_reference else {}))
     except Exception as exc:
         print(json.dumps({'state':'execution_denied','error_type':type(exc).__name__,
                           'reason':str(exc) if isinstance(exc,ExecutionDenied) else 'Runtime setup or I/O failed'}))

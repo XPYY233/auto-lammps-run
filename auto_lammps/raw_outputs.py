@@ -130,7 +130,7 @@ class RawOutputs:
             if not isinstance(ticket,str) or not re.fullmatch('[a-f0-9]{32}',ticket):
                 raise TaskError('回收记录标识无效。')
             folder=self.collections/ticket
-            raw=read_regular(folder/'receipt.json',262144,private=True)
+            raw=read_regular(folder/'receipt.json',2*1024**2,private=True)
             if sha256(raw)!=saved['evidence_sha256']:raise TaskError('回收记录摘要不符。')
             receipt=json.loads(raw);context=receipt['context']
             reservations=[json.loads(e['payload']) for e in events if e['kind']=='output_fetch_started']
@@ -138,7 +138,16 @@ class RawOutputs:
                     or context['request_id']!=request or context['job_id']!=row['job_id']
                     or context['manifest_sha256']!=row['manifest_sha256'] or context['scheduler_state']!=row['state']):
                 raise TaskError('回收记录与当前计算不匹配。')
-            header=validate_header(receipt['header'],context)
+            if receipt.get('role')=='author_reference':
+                identity=self.ledger.evaluation_snapshot(row['evaluation'])['identity']
+                if identity.get('role')!='reference':
+                    raise TaskError('作者原始输出只属于参考账本，不能接入独立研究或 B。')
+                from .author_dispatch import validate_author_header
+                header=validate_author_header(receipt['header'],context)
+            else:
+                # Keep the original protocol and its receipt capacity unchanged.
+                if len(raw)>262144:raise TaskError('原始输出回收记录超过原协议容量。')
+                header=validate_header(receipt['header'],context)
             for item in header['files']:
                 # Control receipts and staging/authorization data are never downloads.
                 if not item['path'].startswith('output/'):continue

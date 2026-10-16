@@ -3070,7 +3070,7 @@ function appendWorkbenchTargetInventory(container,id,parentActive){
 }
 function paperWorkflowAction(item,status){
  const row=node('div',undefined,'workflow-action'),id=current.id,generation=refreshPaperWorkflow.generation;
- const expected={check_resources:['POST','paper-workflow/resources'],search_github:['POST','paper-workflow/search'],view_P:['GET','paper-evidence'],extract_P:['GET','workbench'],import_targets:['POST','paper-evidence/import-targets'],select_targets:['POST','targets'],freeze_targets:['POST','freeze'],view_A:['GET','reference-result'],prepare_A_plan:['GET','author-plan'],analyze_A:['GET','output-analyses'],preview_B_draft:['GET','paper-workflow/b-draft'],compare:['GET','reference-result']}[item.id];
+ const expected={check_resources:['POST','paper-workflow/resources'],search_github:['POST','paper-workflow/search'],view_P:['GET','paper-evidence'],extract_P:['GET','workbench'],import_targets:['POST','paper-evidence/import-targets'],select_targets:['POST','targets'],freeze_targets:['POST','freeze'],view_A:['GET','reference-result'],prepare_A_plan:['GET','author-plan'],approve_A:['GET','author-execution'],analyze_A:['GET','output-analyses'],preview_B_draft:['GET','paper-workflow/b-draft'],compare:['GET','reference-result']}[item.id];
  const enabled=item.enabled===true&&expected&&item.method===expected[0]&&item.endpoint===`/api/tasks/${id}/${expected[1]}`;
  row.append(node('strong',item.label));
  if(!enabled){row.append(node('p',item.disabled_reason||'此步骤尚未接入完整的安全执行服务。','form-note'));return row;}
@@ -3079,7 +3079,7 @@ function paperWorkflowAction(item,status){
   if(item.id==='extract_P'){const entry=$('#workbench-entry');if(entry){entry.open=true;entry.scrollIntoView({block:'start'});await entry.loadWorkbench();}return;}
   if(['view_P','select_targets'].includes(item.id)){$('#target-planning').scrollIntoView({block:'start'});return;}
   if(item.id==='view_A'){$('#author-reference').scrollIntoView({block:'start'});return;}
-  if(item.id==='prepare_A_plan'){await renderAuthorPlanPanel(id);$('#author-plan-panel')?.scrollIntoView({block:'start'});return;}
+  if(item.id==='prepare_A_plan'||item.id==='approve_A'){await renderAuthorPlanPanel(id);$('#author-plan-panel')?.scrollIntoView({block:'start'});return;}
   if(item.id==='analyze_A'){await renderOutputAnalysisPanel(id);$('#output-analysis-panel')?.scrollIntoView({block:'start'});return;}
   if(item.id==='compare'){resultTab='targets';renderWorkspaceResults();$('#research-results').scrollIntoView({block:'start'});return;}
   if(item.id==='preview_B_draft'){
@@ -3206,8 +3206,35 @@ async function renderAuthorPlanPanel(id){
    if(item.proposal){const raw=node('details');raw.append(node('summary','查看 AI 原始完整答复（保留未通过的方案）'));const pre=node('pre');pre.textContent=JSON.stringify(item.proposal,null,2);raw.append(pre);article.append(raw);}
    article.append(node('p',`状态 ${item.state} · 请求 ${item.request_id} · 模型用量 ${item.receipt?.usage?.total_tokens??'待核对'}；未批准或提交计算。`,'form-note'));panel.append(article);
   }
+  if(data.execution)await renderAuthorExecutionPanel(id,panel,state,data.execution);
   if(state.resourceOpen)void renderAuthorResourcePanel(id,panel,state);
  }catch(error){if(alive())panel.replaceChildren(node('p','作者运行方案暂不可核验：'+error.message,'form-note'));}
+}
+async function renderAuthorExecutionPanel(id,parent,state,data){
+ if(current?.id!==id||parent.dataset.task!==id)return;
+ const panel=node('section',undefined,'result-widget');panel.id='author-execution-panel';parent.append(panel);
+ const sequence=state.executionSequence=(state.executionSequence||0)+1;
+ const alive=()=>current?.id===id&&parent.dataset.task===id&&state.executionSequence===sequence&&!$('#task-view').hidden;
+ panel.append(node('h4','作者 A：准备提交包 → 批准 → 提交 HPC → 跟进与回收'));
+ const status=node('p',state.executionError||data.disabled_reason||'批准只绑定当前原调用提交包；提交后显示真实作业号。','form-note');panel.append(status);
+ async function action(name,body){
+  if(state.executionPending||!alive())return;state.executionPending=name;status.textContent='正在处理作者 A '+name+'；保留当前请求，请勿重复点击。';
+  try{await api(`/api/tasks/${id}/author-execution/${name}`,body);state.executionError='';}
+  catch(error){state.executionError=error.message;}
+  finally{state.executionPending=null;if(alive())await renderAuthorPlanPanel(id);}
+ }
+ const prepare=node('button','核对并准备作者 A 提交包','quiet');prepare.disabled=Boolean(state.executionPending)||!data.can_prepare;prepare.onclick=()=>action('prepare',{});panel.append(prepare);
+ const latest=data.latest;
+ if(latest){
+  const payload=latest.report,resources=payload.resources;
+  panel.append(node('p',`当前包 ${latest.package_sha256.slice(0,12)} · ${payload.invocations.length} 个作者原调用 · ${payload.files.length} 个原件 · ${resources.cores} 核 CPU · 最长 ${(resources.wall_seconds/3600).toFixed(2)} 小时。`,'form-note'));
+  const detail=node('details');detail.append(node('summary','查看将执行的完整原调用、输入、输出、资源与版本'));const pre=node('pre');pre.textContent=JSON.stringify(payload,null,2);detail.append(pre);panel.append(detail);
+  const approve=node('button',latest.approved?'这份原调用提交包已批准':'批准这份原调用提交包','quiet');approve.disabled=Boolean(state.executionPending)||!data.can_approve;approve.onclick=()=>action('approve',{revision:data.task_revision,package_sha256:latest.package_sha256,note:'用户在作者 A 普通页面批准当前完整原调用提交包。'});panel.append(approve);
+  const submit=node('button','将已批准方案提交 HPC','quiet');submit.disabled=Boolean(state.executionPending)||!data.can_submit;submit.onclick=()=>action('submit',{package_sha256:latest.package_sha256});panel.append(submit);
+ }
+ const requests=(data.history||[]).flatMap(item=>item.requests||[]);
+ for(const request of requests)panel.append(node('p',`作者 A · 作业 ${request.job_id||'尚未取得作业号'} · 状态 ${request.state} · 已核算 CPU 核时 ${request.actual_core_seconds==null?'待核算':(request.actual_core_seconds/3600).toFixed(3)} · 请求 ${request.id}`,'form-note'));
+ if(requests.some(item=>item.dispatch_claimed&&item.state!=='rejected')){const follow=node('button','核对原作业状态并回收结果','quiet');follow.disabled=Boolean(state.executionPending);follow.onclick=()=>action('follow',{});panel.append(follow);}
 }
 async function renderAuthorResourcePanel(id,parent,state){
  if(current?.id!==id||parent.dataset.task!==id)return;

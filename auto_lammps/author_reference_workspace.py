@@ -1,4 +1,4 @@
-"""Ordinary reference-page access to pinned author plans, never a dispatcher.
+"""Ordinary reference plans and an explicitly configured accounted A controller.
 
 Only private deployment bindings supply source roots, license decisions and
 fixed executables. Browser inputs select a request and a revision note. Source
@@ -24,6 +24,7 @@ class AuthorReferenceWorkspace:
     def __init__(self,tasks,papers,scopes,bindings,*,model_provider,connection_provider,model_calls=None):
         self.tasks,self.papers,self.scopes=tasks,papers,scopes
         self.bindings=bindings;self.model_provider=model_provider
+        self.execution=None
         self.model_calls=model_calls
         self.current=ContextVar('author_reference_current',default=None)
         self.locks=private_directory(tasks.path.parent/'author-workspace-locks')
@@ -189,7 +190,37 @@ class AuthorReferenceWorkspace:
         result.update(configured=identifier in self.bindings,enabled=ready,
             can_prepare=ready and result['remaining_rounds']>0 and not result['pending_reconciliation'],
             disabled_reason=reason,source_reads_on_GET=False,can_submit=False,can_approve=False)
+        execution=self.execution_status(identifier)
+        result.update(execution=execution,can_submit=execution['can_submit'],can_approve=execution['can_approve'])
         return result
+
+    def execution_status(self,identifier):
+        self.tasks.get(identifier)
+        if self.execution is None:
+            return dict(task_id=identifier,configured=False,can_prepare=False,can_approve=False,
+                can_submit=False,latest=None,history=[],role='author_reference',scope='reference_only',B_input=False,
+                scientific_status='not_evaluated',disabled_reason='作者 A 的可信执行部署尚未登记；方案可查看，不能提交计算。')
+        return self.execution.status(identifier)
+
+    def _execution(self):
+        if self.execution is None:
+            raise TaskError('作者 A 执行未配置：需要现有参考账本、原件目录、固定环境与提交/回收端点。')
+        return self.execution
+
+    def prepare_execution(self,identifier):
+        with self.resources._lease(task_id(identifier)):
+            return self._execution().prepare(identifier)
+
+    def approve_execution(self,identifier,revision,package_sha256,*,note=''):
+        with self.resources._lease(task_id(identifier)):
+            return self._execution().approve(identifier,revision,package_sha256,note=note)
+
+    def submit_execution(self,identifier,package_sha256):
+        with self.resources._lease(task_id(identifier)):
+            return self._execution().dispatch(identifier,package_sha256)
+
+    def follow_execution(self,identifier):
+        return self._execution().follow(task_id(identifier))
 
     def prepare(self,identifier,request,*,revision_note=''):
         task_id(identifier);task_id(request)

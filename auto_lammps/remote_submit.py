@@ -89,7 +89,7 @@ def private_bytes_once(path, data):
     finally:os.close(fd)
 
 
-def install_authorization(config_path,request_id,manifest_sha256,root_path,stream):
+def install_authorization(config_path,request_id,manifest_sha256,root_path,stream,*,author_reference=False):
     """Fixed-protocol grant delivery only: no scheduler or input execution."""
     if not re.fullmatch(r'[a-f0-9]{32}',request_id) or not re.fullmatch(r'[a-f0-9]{64}',manifest_sha256):
         raise ValueError('Invalid authorization identity')
@@ -106,9 +106,20 @@ def install_authorization(config_path,request_id,manifest_sha256,root_path,strea
     if len(raw)>1600000:raise ValueError('Oversized authorization package')
     value=json.loads(raw)
     if set(value)!={'envelope','batch_base64'}:raise ValueError('Unexpected authorization fields')
+    if len(runtime.canonical(value['envelope']))>runtime.grant_envelope_limit(author_reference=author_reference):
+        raise ValueError('Authorization envelope exceeds its reference or agent capacity')
     key=runtime.read_regular(Path(profile['control_root'])/'grant.key',32,private=True)
     grant=runtime.verify_grant(value['envelope'],key,request_id=request_id,manifest_sha256=manifest_sha256,
         profile_sha256=runtime.digest(profile_data),now=time.time())
+    if author_reference:
+        if (grant.get('role')!='author_reference' or grant.get('author_package_sha256')!=manifest_sha256
+                or runtime.execution_mode(profile)!='native_slurm'):
+            raise ValueError('Reference authorization requires its original package and explicit native role')
+        if grant.get('approval_sha256')!=profile.get('author_reference',{}).get('approval_sha256'):
+            raise ValueError('Reference authorization deployment approval mismatch')
+        runtime.hash_value(grant.get('user_plan_approval_sha256'))
+    elif grant.get('role')=='author_reference':
+        raise ValueError('Reference authorization cannot be installed as an agent candidate')
     batch=base64.b64decode(value['batch_base64'],validate=True)
     if not 1<=len(batch)<=1000000 or runtime.digest(batch)!=runtime.hash_value(grant.get('batch_sha256')):
         raise ValueError('Batch differs from signed authorization')
@@ -129,7 +140,7 @@ def install_authorization(config_path,request_id,manifest_sha256,root_path,strea
         profile_sha256=runtime.digest(profile_data))
 
 
-def submit(config_path, request_id, manifest_sha256, root_path):
+def submit(config_path, request_id, manifest_sha256, root_path, *, author_reference=False):
     if sys.platform!='linux':
         raise ValueError('Scheduler submission requires the approved Linux service')
     if not re.fullmatch(r'[a-f0-9]{32}',request_id) or not re.fullmatch(r'[a-f0-9]{64}',manifest_sha256):
@@ -152,18 +163,39 @@ def submit(config_path, request_id, manifest_sha256, root_path):
     control=runtime.absolute(profile['control_root'])
     fd=runtime.directory(control,private=True); os.close(fd)
     key=runtime.read_regular(control/'grant.key',32,private=True)
-    envelope=json.loads(runtime.read_regular(control/(request_id+'.json'),16384,private=True))
+    envelope=json.loads(runtime.read_regular(control/(request_id+'.json'),
+        runtime.grant_envelope_limit(author_reference=author_reference),private=True))
     grant=runtime.verify_grant(envelope,key,request_id=request_id,manifest_sha256=manifest_sha256,
                               profile_sha256=runtime.digest(profile_data),now=time.time())
-    manifest_data=runtime.read_regular(case/'manifest.json',1000000)
+    if author_reference:
+        if (grant.get('role')!='author_reference' or grant.get('author_package_sha256')!=manifest_sha256
+                or runtime.execution_mode(profile)!='native_slurm'
+                or grant.get('execution_scope')!='trusted_research' or grant.get('formal_isolation') is not False):
+            raise ValueError('Reference submission requires a separately bound original native package')
+        if grant.get('approval_sha256')!=profile.get('author_reference',{}).get('approval_sha256'):
+            raise ValueError('Reference submission deployment approval mismatch')
+        runtime.hash_value(grant.get('user_plan_approval_sha256'))
+    elif grant.get('role')=='author_reference':
+        raise ValueError('A reference grant cannot submit an agent candidate')
+    manifest_data=runtime.read_regular(case/('author-package.json' if author_reference else 'manifest.json'),1000000)
     if runtime.digest(manifest_data)!=manifest_sha256:
         raise ValueError('Staged manifest differs from signed grant')
     manifest=json.loads(manifest_data)
     if manifest['resources']!=grant['resources'] or manifest['provenance']['task_sha256']!=grant['task_sha256']:
         raise ValueError('Grant task/resource mismatch')
-    stage=json.loads(runtime.read_regular(case/'stage.json',16384))
+    stage=json.loads(runtime.read_regular(case/('author-stage.json' if author_reference else 'stage.json'),
+        runtime.grant_envelope_limit(author_reference=author_reference)))
     if stage.get('state')!='staged' or stage.get('request_id')!=request_id or stage.get('manifest_sha256')!=manifest_sha256:
         raise ValueError('Incomplete upload')
+    if author_reference:
+        commands=runtime.author_reference_commands(profile,manifest,package_sha256=manifest_sha256,
+            profile_sha256=runtime.digest(profile_data),work_root=case/'output',resources=manifest['resources'])
+        runtime.validate_author_outputs(grant['outputs'],manifest,
+            input_bytes=len(manifest_data)+sum(item['size'] for item in manifest['files']))
+        if (stage.get('role')!='author_reference' or stage.get('package_sha256')!=manifest_sha256
+                or stage.get('profile_sha256')!=runtime.digest(profile_data)
+                or stage.get('command_plan_sha256')!=runtime.digest(runtime.canonical(commands))):
+            raise ValueError('Reference stage receipt differs from the fixed deployment and original actions')
     for item in manifest['files']:
         content=runtime.read_regular(case/runtime.relative(item['path']),item['size'])
         if runtime.digest(content)!=item['sha256'] or len(content)!=item['size']:
@@ -229,11 +261,13 @@ def main():
     parser.add_argument('--manifest-sha256',required=True)
     parser.add_argument('--root',required=True)
     parser.add_argument('--install-authorization',action='store_true')
+    parser.add_argument('--author-reference',action='store_true')
     args=parser.parse_args()
     try:
         config=Path(__file__).resolve().parent/'submission.json'
-        result=(install_authorization(config,args.request_id,args.manifest_sha256,args.root,sys.stdin.buffer)
-                if args.install_authorization else submit(config,args.request_id,args.manifest_sha256,args.root))
+        kwargs={'author_reference':True} if args.author_reference else {}
+        result=(install_authorization(config,args.request_id,args.manifest_sha256,args.root,sys.stdin.buffer,**kwargs)
+                if args.install_authorization else submit(config,args.request_id,args.manifest_sha256,args.root,**kwargs))
     except Exception as exc:
         print(json.dumps(dict(state='unknown',error_type=type(exc).__name__)))
         return 1

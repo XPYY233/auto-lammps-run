@@ -447,6 +447,201 @@ def copy_geometry_source(catalog_directory, item, output_fd):
         os.close(folder)
 
 
+def _copy_author_source(source_root, item, output_fd):
+    """Stream one exact original within a private HPC root; never import it."""
+    folder = os.dup(source_root)
+    try:
+        parts = safe_name(item['source_path']).split('/')
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+            os.close(folder); folder = child
+            info = os.fstat(folder)
+            # Match the already-reviewed author reader: the 0700 source root is
+            # the access boundary; nested same-owner group bits are harmless.
+            if info.st_uid != os.getuid() or info.st_mode & 0o002:
+                raise StageError('Author source subdirectory owner or permissions mismatch')
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid()
+                    or before.st_mode & 0o077 or before.st_size != item['size']):
+                raise StageError('Author source is not the pinned private regular file')
+            remaining, checksum = before.st_size, hashlib.sha256()
+            with os.fdopen(output_fd, 'wb', closefd=False) as output:
+                while remaining:
+                    block = os.read(fd, min(65536, remaining))
+                    if not block:
+                        raise StageError('Original author source truncated during staging')
+                    checksum.update(block); output.write(block); remaining -= len(block)
+                after = os.fstat(fd)
+                fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_nlink', 'st_mode')
+                if (os.read(fd, 1) or checksum.hexdigest() != item['sha256']
+                        or any(getattr(before, field) != getattr(after, field) for field in fields)):
+                    raise StageError('Original author source bytes changed during staging')
+                output.flush(); os.fsync(output_fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(folder)
+
+
+def _author_runtime(profile, profile_path):
+    """Load the fixed adjacent reviewed launcher, never task-selected Python."""
+    checksum = hash_value(profile.get('author_reference_runtime_sha256'))
+    helper = Path(profile_path).parent / 'runtime_launcher.py'
+    with approved_root(str(helper.parent)) as folder:
+        data = regular_read(folder, helper.name, HEADER_LIMIT, private=True)
+    if digest(data) != checksum:
+        raise StageError('Pinned author runtime helper changed')
+    namespace = {'__name__': '_approved_author_runtime', '__file__': str(helper)}
+    exec(compile(data, str(helper), 'exec'), namespace)
+    return namespace['author_reference_commands']
+
+
+def receive_author(root_path, request_id, package_sha256, stream, *, _profile_path=None):
+    """Reserve/stage fixed HPC originals for the separately bound reference lane.
+
+    Wire format is length + canonical author package metadata; there are no local
+    author bytes. The caller reserves this same request/package in the existing
+    ledger before invoking this trusted helper. This function shares the existing
+    aggregate storage lock, allocation identity and no-overwrite policy. It never
+    signs a grant or executes an author entrypoint. Old agent manifests and their
+    receiver remain unchanged.
+    """
+    if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
+        raise StageError('Invalid author request identity')
+    size = struct.unpack('!I', read_exact(stream, 4))[0]
+    if not 0 < size <= HEADER_LIMIT:
+        raise StageError('Author package exceeds the existing header bound')
+    raw = read_exact(stream, size)
+    if digest(raw) != hash_value(package_sha256):
+        raise StageError('Author package digest mismatch')
+    try:
+        package = json.loads(raw)
+        if not isinstance(package, dict) or encoded(package) != raw or stream.read(1):
+            raise StageError('Author package must contain canonical metadata only')
+        profile_path = Path(_profile_path) if _profile_path is not None else Path(__file__).resolve().parent/'runtime.json'
+        with approved_root(str(profile_path.parent)) as directory:
+            profile_raw = regular_read(directory, profile_path.name, HEADER_LIMIT, private=True)
+        profile = json.loads(profile_raw)
+        if profile.get('requests_root') != root_path:
+            raise StageError('Author staging root differs from the trusted runtime')
+        # The exact same command resolver rechecks role/deployment/original entry
+        # identities used by the eventual compute launcher. This is not a run.
+        try:
+            command_plan = _author_runtime(profile, profile_path)(profile, package,
+                package_sha256=package_sha256, profile_sha256=digest(profile_raw),
+                work_root=str(Path(root_path)/request_id/'output'), resources=package['resources'])
+        except RuntimeError as exc:
+            raise StageError(str(exc)) from exc
+        resources = package['resources']; allocation = resources['storage_bytes']
+        files = package['files']
+        total = len(raw) + RECEIPT_ALLOWANCE + sum(row['size'] for row in files)
+        if total > allocation:
+            raise StageError('Author originals and receipts exceed reserved storage')
+        names = set()
+        for row in files:
+            name = safe_name(row['path']); safe_name(row['source_path'])
+            if name.split('/')[0] in {'author-package.json', 'author-stage-intent.json', 'author-stage.json', 'author-actions'}:
+                raise StageError('Author original collides with reference controller metadata')
+            if name in names or any(name.startswith(old + '/') or old.startswith(name + '/') for old in names):
+                raise StageError('Overlapping original author paths')
+            names.add(name)
+        roots = profile['author_reference']['source_roots']
+        if not isinstance(roots, list) or not 1 <= len(roots) <= 4:
+            raise StageError('Fixed HPC author source roots are required')
+        with approved_root(root_path) as root, ExitStack() as stack:
+            source_roots = {}
+            for row in roots:
+                if not isinstance(row, dict) or set(row) != {'binding_sha256', 'path'}:
+                    raise StageError('Invalid fixed author source root')
+                pin = hash_value(row['binding_sha256'])
+                if pin in source_roots:
+                    raise StageError('Duplicate author source identity')
+                source = Path(row['path']); target = Path(root_path)
+                if source == target or source in target.parents or target in source.parents:
+                    raise StageError('Author originals must be disjoint from request storage')
+                control = Path(profile['control_root'])
+                if source == control or source in control.parents or control in source.parents:
+                    raise StageError('Author originals must be disjoint from execution grants')
+                source_roots[pin] = stack.enter_context(approved_root(row['path']))
+            for row in files:
+                if row['binding_sha256'] not in source_roots:
+                    raise StageError('Author file source identity is unregistered')
+            try:
+                lock = os.open('.stage.lock', os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=root)
+                os.fsync(root)
+            except FileExistsError:
+                lock = os.open('.stage.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+            try:
+                info = os.fstat(lock)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise StageError('Unsafe staging lock')
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                policy_raw = regular_read(root, 'policy.json', 4096)
+                policy = json.loads(policy_raw)
+                if (not isinstance(policy, dict) or set(policy) != {'schema_version', 'max_total_bytes', 'approval_sha256'}
+                        or type(policy['schema_version']) is not int or policy['schema_version'] != 1
+                        or type(policy['max_total_bytes']) is not int or policy['max_total_bytes'] <= ROOT_ALLOWANCE):
+                    raise StageError('Invalid private storage policy')
+                hash_value(policy['approval_sha256'])
+                used = ROOT_ALLOWANCE
+                for name in os.listdir(root):
+                    if name in {'.stage.lock', 'policy.json'}:
+                        continue
+                    if not re.fullmatch(r'[a-f0-9]{32}', name):
+                        raise StageError('Unexpected object in service root')
+                    if name == request_id:
+                        raise StageError('Author request already exists; reconcile rather than restage')
+                    with directory_at(root, name) as old:
+                        saved = json.loads(regular_read(old, 'allocation.json', 4096))
+                        if (saved.get('request_id') != name or type(saved.get('storage_bytes')) is not int
+                                or saved['storage_bytes'] <= 0):
+                            raise StageError('Invalid previous allocation; reconciliation required')
+                        used += saved['storage_bytes']
+                if used + allocation > policy['max_total_bytes']:
+                    raise StageError('Remote aggregate storage reservation exceeded')
+                os.mkdir(request_id, mode=0o700, dir_fd=root); os.fsync(root)
+                with directory_at(root, request_id) as target:
+                    write_new(target, 'allocation.json', encoded(dict(request_id=request_id,
+                        storage_bytes=allocation, manifest_sha256=package_sha256)))
+                    write_new(target, 'author-package.json', raw)
+                    write_new(target, 'author-stage-intent.json', encoded(dict(request_id=request_id,
+                        package_sha256=package_sha256, profile_sha256=digest(profile_raw),
+                        command_plan_sha256=digest(encoded(command_plan)), role='author_reference')))
+                    for row in files:
+                        folder = os.dup(target)
+                        try:
+                            parts = row['path'].split('/')
+                            for part in parts[:-1]:
+                                try:
+                                    os.mkdir(part, mode=0o700, dir_fd=folder); os.fsync(folder)
+                                except FileExistsError:
+                                    pass
+                                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+                                os.close(folder); folder = child
+                            fd = os.open(parts[-1], os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400, dir_fd=folder)
+                            try:
+                                _copy_author_source(source_roots[row['binding_sha256']], row, fd)
+                            finally:
+                                os.close(fd)
+                            os.fsync(folder)
+                        finally:
+                            os.close(folder)
+                    receipt = dict(schema_version=1, state='staged', role='author_reference',
+                        request_id=request_id, manifest_sha256=package_sha256, package_sha256=package_sha256,
+                        profile_sha256=digest(profile_raw), command_plan_sha256=digest(encoded(command_plan)),
+                        input_bytes=sum(row['size'] for row in files), storage_bytes=allocation,
+                        policy_sha256=digest(policy_raw), original_files_rewritten=False,
+                        physical_evaluation_performed=False, execution_authorized=False)
+                    write_new(target, 'author-stage.json', encoded(receipt))
+                    return receipt
+            finally:
+                os.close(lock)
+    except (KeyError, TypeError, AttributeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StageError('Malformed author package or trusted deployment') from exc
+
+
 def receive(root_path, request_id, manifest_sha256, stream, *, _geometry_catalog=None, _potential_catalog=None):
     if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
         raise StageError('Invalid request identity')
@@ -602,8 +797,11 @@ def main():
     parser.add_argument('--manifest-sha256')
     parser.add_argument('--list-geometry', action='store_true', help='Read fixed geometry metadata only; never stage or execute')
     parser.add_argument('--list-potentials', action='store_true', help='Read fixed potential metadata only; never stage or execute')
+    parser.add_argument('--author-reference', action='store_true', help='Stage pinned original HPC bytes for the reference lane')
     args = parser.parse_args()
     if args.list_geometry or args.list_potentials:
+        if args.author_reference:
+            parser.error('Reference staging cannot be combined with metadata inspection')
         if args.list_geometry and args.list_potentials:
             parser.error('Choose one fixed metadata inventory')
         if any(value is not None for value in (args.root, args.request_id, args.manifest_sha256)):
@@ -615,7 +813,7 @@ def main():
     signal.alarm(60)
     try:
         result = (inspect_geometry_catalog() if args.list_geometry else inspect_potential_catalog() if args.list_potentials else
-                  receive(args.root, args.request_id, args.manifest_sha256, sys.stdin.buffer))
+                  (receive_author if args.author_reference else receive)(args.root, args.request_id, args.manifest_sha256, sys.stdin.buffer))
     except (StageError, OSError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({'state': 'stage_failed', 'error_type': type(exc).__name__}))
         return 1

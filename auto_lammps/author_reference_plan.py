@@ -326,7 +326,13 @@ def plan_selection_context(evidence):
         requirements=dict(original_files='path_and_SHA256_only_no_new_scientific_source_code',
             coverage='every_original_dependency_exactly_once_no_scope_reduction',
             citations='literal_contiguous_quote_in_declared_source_id',
-            arguments='argv_is_data_never_shell_or_inline_code_and_must_name_pinned_entrypoint',
+            arguments='argv_is_data_never_shell_or_inline_code_and_actual_script_or_input_operand_must_be_pinned_entrypoint',
+            interpreter_arguments='Python: before the literal original script allow only separate startup tokens '
+                '-u -B -I -E -s -S -O -OO -q -v -b -bb and optional --; '
+                'shell: before the literal original script allow only -e -u -x -v --noprofile --norc and optional --; '
+                'reject inline -c, module -m, stdin, combined and concatenated options; '
+                'arguments after the original script are ordinary author-script parameters, never interpreter options; '
+                'LAMMPS must select exactly one original input with -in or -i',
             output_paths='literal_relative_file_paths_only_no_globs_variables_or_parent_segments; '
                 'list_source_supported_concrete_names_or_record_parameterized_outputs_in_missing_not_invented_names',
             missing='needs_clarification_is_a_saved_plan_not_execution_authorization',
@@ -405,18 +411,15 @@ def validate_author_plan(evidence, value):
         if (not isinstance(argv, list) or len(argv) > 128
                 or any(not isinstance(item, str) or not item or len(item) > 2000 for item in argv)):
             raise TaskError('作者 argv 必须是完整保留的字面字符串列表。')
-        if (not argv or any(any(ord(c) < 32 or ord(c) == 127 for c in item) or
-                          any(c in item for c in '\n\r;|&`$<>') or item in {'-c', '--command', '--eval', '-e'} for item in argv)):
-            raise TaskError('作者 argv 仅为字面参数，不允许 shell、内联代码或动态命令。')
-        named = False
-        for argument in argv:
-            if argument.startswith('-') or argument.startswith('/'):
-                continue
-            candidate = PurePosixPath(row['working_directory']) / argument
-            if '..' not in candidate.parts and str(candidate) == entrypoint['path']:
-                named = True
-        if not named:
-            raise TaskError('作者 argv 必须明确引用该固定原入口文件。')
+        # The actual interpreter script/LAMMPS input operand must be the fixed
+        # original, not merely an unrelated token after -c/-m/combined options.
+        # Parameters after a Python/shell script belong to that original script.
+        from .runtime_launcher import ExecutionDenied, validate_author_argv
+        try:
+            validate_author_argv(programs[row['executable_id']]['kind'], argv,
+                working_directory=row['working_directory'], entrypoint=entrypoint['path'])
+        except ExecutionDenied as exc:
+            raise TaskError('作者 argv 须实际执行固定原入口：' + str(exc)) from exc
         signature = sha256(canonical(dict(entrypoint=entrypoint, argv=argv, directory=row['working_directory'],
             environment=environment['sha256'], executable=programs[row['executable_id']]['sha256'])))
         if signature in signatures:
