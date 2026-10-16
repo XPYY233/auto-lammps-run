@@ -118,6 +118,23 @@ class AuthorReferencePlanTests(unittest.TestCase):
         self.assertEqual(second['revision']['feedback']['message'],first['receipt']['message'])
         self.assertEqual(self.calls.status()['used_requests'],2)
 
+    def test_original_state_lists_beyond_32_remain_bounded_nonexecuting_plans(self):
+        value=deepcopy(self.value);template=deepcopy(value['invocations'][0])
+        for count in (50,128):
+            value['invocations']=[dict(deepcopy(template),id='state-'+str(i),
+                argv=template['argv']+['--synthetic-state',str(i)]) for i in range(count)]
+            value['coverage'][0]['invocation_ids']=[row['id'] for row in value['invocations']]
+            report=validate_author_plan(self.evidence,value)
+            self.assertEqual(len(report['invocations']),count)
+            self.assertFalse(report['execution_authorized'])
+        value['invocations'].append(deepcopy(template))
+        with self.assertRaisesRegex(TaskError,'128'):
+            validate_author_plan(self.evidence,value)
+        menu=plan_selection_context(self.evidence)['output_types']['properties']
+        self.assertEqual(menu['invocations']['maxItems'],128)
+        self.assertEqual(menu['coverage']['items']['properties']['invocation_ids']['maxItems'],128)
+        self.assertEqual(self.calls.status()['used_requests'],0)
+
     def test_active_adapter_is_in_actual_messages_and_cannot_be_removed_or_changed(self):
         result = self.prepare()
         saved = self.service._stored(self.task['id'],result['request_id'])[1]

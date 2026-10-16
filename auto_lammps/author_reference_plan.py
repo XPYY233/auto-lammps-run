@@ -32,6 +32,7 @@ from .tasks import TaskError, task_id, text
 VERSION = 1
 STAGE = 'author_reference_plan'
 MAX_ROUNDS = 3
+MAX_INVOCATIONS = 128
 FLAGS = dict(scope='reference_only', role='author_reference_human_only', B_input=False,
              approval=False, execution_authorized=False, physical_evaluation_performed=False,
              scientific_status='not_evaluated', proposal_status='model_proposed_not_verified')
@@ -247,10 +248,10 @@ def plan_selection_context(evidence):
     coverage = dict(type='object', additionalProperties=False,
         required=['dependency_id', 'invocation_ids', 'analysis_capability_ids', 'citations', 'missing'],
         properties=dict(dependency_id=dict(type='string', enum=scope['dependency_ids']),
-            invocation_ids=strings(32, 80), analysis_capability_ids=strings(64, 80), citations=citations, missing=strings(64, 2000)))
+            invocation_ids=strings(MAX_INVOCATIONS, 80), analysis_capability_ids=strings(64, 80), citations=citations, missing=strings(64, 2000)))
     schema = dict(type='object', additionalProperties=False, required=sorted(_OUTPUT_FIELDS), properties=dict(
         status=dict(type='string', enum=['proposed', 'needs_clarification']), summary=string(4000),
-        invocations=dict(type='array', maxItems=32, items=invocation),
+        invocations=dict(type='array', maxItems=MAX_INVOCATIONS, items=invocation),
         coverage=dict(type='array', minItems=len(scope['dependency_ids']), maxItems=len(scope['dependency_ids']), items=coverage),
         questions=strings(64, 2000), limitations=strings(128, 2000)))
     return dict(tool='original_author_invocation_plan', version=VERSION,
@@ -310,9 +311,11 @@ def validate_author_plan(evidence, value):
     plan_selection_context(evidence)
     if (not isinstance(value, dict) or set(value) != _OUTPUT_FIELDS
             or value['status'] not in {'proposed', 'needs_clarification'}
-            or not isinstance(value['invocations'], list) or len(value['invocations']) > 32
+            or not isinstance(value['invocations'], list)
             or not isinstance(value['coverage'], list)):
         raise TaskError('作者方案 JSON 字段或版本状态不完整。')
+    if len(value['invocations']) > MAX_INVOCATIONS:
+        raise TaskError(f'作者原调用清单超过 {MAX_INVOCATIONS} 项表达上限；不能截断论文目标或隐式增加计算。')
     scope = evidence['reference_scope']['scope']
     sources = {row['id']: row for row in evidence['sources']}
     files = {row['path']: row for row in evidence['author_source']['files']}
@@ -401,7 +404,7 @@ def validate_author_plan(evidence, value):
                 or row['dependency_id'] not in expected or row['dependency_id'] in covered):
             raise TaskError('作者方案依赖对应编号缺失、新增或重复。')
         covered.add(row['dependency_id']); missing = _strings(row['missing']); issues.extend(missing)
-        calls = _ids(row['invocation_ids'], seen, 32)
+        calls = _ids(row['invocation_ids'], seen, MAX_INVOCATIONS)
         methods = _ids(row['analysis_capability_ids'], set(analyses), 64)
         cites = _citations(row['citations'], sources, required=not missing)
         if not calls and not methods and not missing:
