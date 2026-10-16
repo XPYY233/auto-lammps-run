@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import fcntl
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .author_reference_plan import AuthorReferencePlan, author_source_inputs, _deployment
 from .author_source_reader import AuthorSourceReader
@@ -32,8 +32,10 @@ class AuthorReferenceWorkspace:
             db.execute('CREATE TABLE IF NOT EXISTS author_source_evidence (id TEXT PRIMARY KEY,task_id TEXT NOT NULL,document TEXT NOT NULL,sha256 TEXT NOT NULL,at TEXT NOT NULL)')
             for action in ('UPDATE','DELETE'):
                 db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_author_source_evidence_{action} BEFORE {action} ON author_source_evidence BEGIN SELECT RAISE(ABORT,"immutable author source evidence"); END')
+        from .author_reference_resources import AuthorReferenceResources
+        self.resources=AuthorReferenceResources(self)
 
-    def _metadata(self,identifier):
+    def _metadata(self,identifier,*,require_scope=True):
         task=self.tasks.get(identifier)
         if task['mode']!='reproduction':raise TaskError('作者运行方案只属于论文参考任务。')
         binding=self.bindings.get(identifier)
@@ -66,7 +68,7 @@ class AuthorReferenceWorkspace:
             if legacy:reader.selection_request(receipt,intent,batch)
             else:reader._selection(receipt,batch)
         scope=self.scopes.get(identifier)
-        if not scope or scope['state']!='recorded':raise TaskError('请先保存并核对来自 P 的目标与共享依赖范围。')
+        if require_scope and (not scope or scope['state']!='recorded'):raise TaskError('请先保存并核对来自 P 的目标与共享依赖范围。')
         if self.tasks.paused(identifier) or self.tasks.lifecycle(identifier)['user_finished'] or self.tasks.lifecycle(identifier)['deleted']:
             raise TaskError('任务已暂停或结束；旧方案仍可查看。')
         return binding,paper,receipt,scope
@@ -111,6 +113,50 @@ class AuthorReferenceWorkspace:
             if used>=32:raise TaskError('参考源码证据版本容量已用完；已有版本和费用保留。')
             db.execute('INSERT INTO author_source_evidence VALUES(?,?,?,?,?)',(key,identifier,data.decode(),sha256(data),datetime.now(timezone.utc).isoformat()))
         return value
+
+    def _sources(self,identifier,binding,receipt):
+        """Retain the original package and append separately pinned new text.
+
+        File-type selection is a bounded reading tool, not a scientific scope
+        decision. Unread or truncated files remain explicit in the returned
+        inventory and are never interpreted as fully inspected source.
+        """
+        original=self._source(identifier,binding,receipt)
+        completed=self.resources.completed(identifier) if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport) else None
+        if completed is None:return original
+        report,context=completed
+        previous={row['path'] for row in receipt['files']}
+        text_extensions={'.py','.sh','.in','.lmp','.lammps','.md','.txt','.json','.yaml','.yml','.toml','.cfg'}
+        selections=[dict(path=row['path'],start_line=1,end_line=400) for row in report['files']
+            if row['path'] not in previous and row['size']<=256*1024
+            and (PurePosixPath(row['path']).suffix.lower() in text_extensions
+                 or PurePosixPath(row['path']).name.lower() in {'readme','license','makefile'})]
+        if not selections:return original
+        policy=dict(host_alias=context['host_alias'],remote_directory=context['remote_directory'],
+            reference_task_id=identifier,repository=context['repository'],commit=context['commit'],
+            acquisition_id=report['id'],receipt_sha256=sha256(canonical(report)),
+            inventory_sha256=report['inventory_sha256'],license_approved=True,
+            license_approval_sha256=context['license_approval_sha256'])
+        reader=AuthorSourceReader(self.resources.audit/'source-reads',policy,transport=binding['reader'].transport)
+        supplement=self._source(identifier,dict(reader=reader,format='acquisition_v1',selections=selections),report)
+        combined=dict(source_packages=[original,supplement])
+        author_source_inputs(combined,identifier)
+        return combined
+
+    def collect_sources(self,identifier):
+        """Ordinary reference action; read pinned data without a model call."""
+        task_id(identifier)
+        with self.resources._lease(identifier):
+            binding,_,receipt,_=self._metadata(identifier,require_scope=False)
+            value=author_source_inputs(self._sources(identifier,binding,receipt),identifier)
+            read={row['path'] for row in value['reads'] if row.get('state')=='read' and row.get('path')}
+            return dict(version=1,task_id=identifier,scope='reference_only',B_input=False,
+                calls_model=False,submits_HPC=False,execution_authorized=False,
+                physical_evaluation_performed=False,scientific_validation=False,
+                files=len(value['files']),read_files=len(read),source_fragments=len(value['sources']),
+                unread_files=[row['path'] for row in value['files'] if row['path'] not in read],
+                truncated_files=[row['path'] for row in value['reads'] if row.get('truncated')],
+                message='原作者文件与读取证明已保留；未读或截断文件明确列出，不消耗方案轮次。')
 
     def _input(self,identifier):
         value=self.current.get()
@@ -164,10 +210,17 @@ class AuthorReferenceWorkspace:
             if saved is None and (state['pending_reconciliation'] or state['remaining_rounds']==0):
                 raise TaskError('作者方案原请求待核对或三轮已用完；未重新读取或发送。')
             binding,paper,receipt,scope=self._metadata(identifier)
-            sources=self._source(identifier,binding,receipt)
+            sources=self._sources(identifier,binding,receipt)
+            checked=author_source_inputs(sources,identifier)
+            paths=list(binding['invocation_paths'])
+            for row in checked['reads']:
+                path=row.get('path','')
+                if (row.get('state')=='read' and path not in paths
+                        and PurePosixPath(path).suffix.lower() in {'.py','.sh','.in','.lmp','.lammps'}):
+                    paths.append(path)
             value=dict(task_id=identifier,paper_id=paper['id'],paper={key:paper[key] for key in ('title','doi')},
                 scope='reference_only',role='author_reference_human_only',scope_id=scope['id'],
-                author_source=sources,invocation_paths=deepcopy(binding['invocation_paths']),
+                author_source=sources,invocation_paths=paths,
                 deployment=deepcopy(binding['deployment']),missing=deepcopy(binding.get('missing',[])))
             token=self.current.set(dict(task_id=identifier,scope_id=scope['id'],receipt_document_sha256=sha256(canonical(receipt)),input=value))
             try:return self.planner.prepare(identifier,request,model['client'],

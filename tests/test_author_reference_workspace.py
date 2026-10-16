@@ -122,4 +122,28 @@ class AuthorWorkspaceTests(unittest.TestCase):
         self.assertEqual(data['history'][0]['proposal'],self.fx.value)
         self.assertEqual(len(self.fx.sent),1);self.assertEqual(self.fx.reader.calls,1)
 
+    def test_resource_status_and_pinned_text_read_do_not_consume_model_or_plan_rounds(self):
+        url='/api/tasks/'+self.task+'/author-resources'
+        status=self.http.get(url)
+        self.assertEqual(status.status_code,200,status.text)
+        self.assertFalse(status.json()['enabled'])  # Synthetic reader has no saved HPC transport.
+        self.assertEqual(self.fx.reader.calls,0)
+        reading=self.http.post(url+'/read',json={},headers=HEADERS)
+        self.assertEqual(reading.status_code,200,reading.text)
+        self.assertEqual(reading.json()['read_files'],2)
+        self.assertFalse(reading.json()['calls_model']);self.assertFalse(reading.json()['submits_HPC'])
+        self.assertEqual(self.workspace.planner.status(self.task)['used_rounds'],0)
+        self.assertEqual(self.fx.sent,[])
+        self.assertEqual(self.http.post(url+'/read',json={},headers=HEADERS).status_code,200)
+        self.assertEqual(self.fx.reader.calls,1)  # Retained source proof, not another read.
+
+    def test_resource_routes_reject_browser_supplied_paths_pins_or_execution_permission(self):
+        url='/api/tasks/'+self.task+'/author-resources'
+        for payload in ({'repository':'someone/else'},{'commit':'a'*40},{'remote_directory':'/tmp'},{'execution_authorized':True}):
+            acquire=self.http.post(url,json=dict(request_id='b'*32,**payload),headers=HEADERS)
+            self.assertEqual(acquire.status_code,422,acquire.text)
+            read=self.http.post(url+'/read',json=payload,headers=HEADERS)
+            self.assertEqual(read.status_code,422,read.text)
+        self.assertEqual(self.fx.reader.calls,0);self.assertEqual(self.fx.sent,[])
+
 if __name__=='__main__':unittest.main()

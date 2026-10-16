@@ -3194,6 +3194,7 @@ async function renderAuthorPlanPanel(id){
   const button=node('button',state.pending?'正在准备作者方案…':data.used_rounds?'基于上一版修订作者方案':'让应用 AI 准备作者运行方案','quiet');button.disabled=Boolean(state.pending)||!data.can_prepare;
   button.onclick=()=>send(crypto.randomUUID().replaceAll('-',''),note.value);
   const refresh=node('button','刷新作者方案记录','quiet');refresh.onclick=()=>renderAuthorPlanPanel(id);panel.append(note,button,refresh,status);
+  const resources=node('button','补齐作者原件：获取到 HPC，不消耗方案轮次','quiet');resources.onclick=()=>{state.resourceOpen=true;return renderAuthorResourcePanel(id,panel,state);};panel.append(resources);
   for(const item of data.history){
    const article=node('article',undefined,'result-widget');article.append(node('h4',`作者运行方案 · 第 ${item.round}/${item.max_rounds} 版`),node('p',item.receipt?.message||item.events.at(-1)?.document?.message||item.state,'form-note'));
    if(item.recoverable){const resume=node('button','恢复原作者方案请求','quiet');resume.disabled=Boolean(state.pending);resume.onclick=()=>send(item.request_id,item.revision_note||'');article.append(resume);}
@@ -3205,7 +3206,48 @@ async function renderAuthorPlanPanel(id){
    if(item.proposal){const raw=node('details');raw.append(node('summary','查看 AI 原始完整答复（保留未通过的方案）'));const pre=node('pre');pre.textContent=JSON.stringify(item.proposal,null,2);raw.append(pre);article.append(raw);}
    article.append(node('p',`状态 ${item.state} · 请求 ${item.request_id} · 模型用量 ${item.receipt?.usage?.total_tokens??'待核对'}；未批准或提交计算。`,'form-note'));panel.append(article);
   }
+  if(state.resourceOpen)void renderAuthorResourcePanel(id,panel,state);
  }catch(error){if(alive())panel.replaceChildren(node('p','作者运行方案暂不可核验：'+error.message,'form-note'));}
+}
+async function renderAuthorResourcePanel(id,parent,state){
+ if(current?.id!==id||parent.dataset.task!==id)return;
+ let panel=$('#author-resource-panel');if(!panel){panel=node('section',undefined,'result-widget');panel.id='author-resource-panel';parent.append(panel);}
+ panel.dataset.task=id;
+ const sequence=state.resourceSequence=(state.resourceSequence||0)+1;
+ const alive=()=>current?.id===id&&parent.dataset.task===id&&panel.dataset.task===id&&!$('#task-view').hidden&&state.resourceSequence===sequence;
+ try{
+  const data=await api(`/api/tasks/${id}/author-resources`);if(!alive())return;
+  panel.replaceChildren(node('h4','补齐固定版本作者资料'),node('p','复用当前论文已批准的仓库、版本和 HPC 连接，将原件保存到超算。不调用模型、不提交计算，原方案、范围和轮次保留。','form-note'));
+  const latest=data.latest;
+  if(latest){
+   panel.append(node('p',`${latest.repository} · ${latest.commit} · 已获取 ${latest.files.length} 个文件；原件${latest.source_complete?'完整':'尚未完整'}。`,'form-note'));
+   if(latest.failures?.length){const detail=node('details');detail.append(node('summary','查看资料缺项与获取诊断'));const pre=node('pre');pre.textContent=JSON.stringify(latest.failures,null,2);detail.append(pre);panel.append(detail);}
+   const detail=node('details');detail.append(node('summary','查看已获取文件、大小与 SHA-256'));for(const row of latest.files||[])detail.append(node('p',`${row.path} · ${row.size} B · ${row.sha256}`));panel.append(detail);
+  }
+  const feedback=node('p',state.resourceError||data.disabled_reason||state.resourceRead?.message||(state.resourcePending?'正在获取原件，保留原请求，请勿重复点击。':'获取原件后，可单独读取补充文本，再修订同一作者方案。'),'form-note');feedback.setAttribute('role','status');panel.append(feedback);
+  const acquire=node('button',state.resourcePending?'正在获取原件…':latest?.recoverable?'核对原资料获取请求':'获取固定作者仓库到 HPC','quiet');acquire.disabled=Boolean(state.resourcePending)||!data.enabled||Boolean(latest?.source_complete);
+  acquire.onclick=async()=>{
+   if(!alive()||state.resourcePending)return;
+   const request=latest?.recoverable?latest.request_id:crypto.randomUUID().replaceAll('-','');state.resourcePending=request;acquire.disabled=true;feedback.textContent='正在通过保存的 HPC 连接获取原件；不会消耗方案轮次。';
+   try{await api(`/api/tasks/${id}/author-resources`,{request_id:request});state.resourceError='';}
+   catch(error){state.resourceError=error.message;}
+   finally{state.resourcePending=null;if(alive())await renderAuthorResourcePanel(id,parent,state);}
+  };panel.append(acquire);
+  if(latest?.source_complete){
+   const read=node('button',state.sourceReadPending?'正在读取补充原件…':'读取补充作者原件（不调用模型）','quiet');read.disabled=Boolean(state.sourceReadPending)||Boolean(state.resourcePending)||!data.enabled;
+   read.onclick=async()=>{
+    if(!alive()||state.sourceReadPending||state.resourcePending)return;
+    state.sourceReadPending=true;read.disabled=true;feedback.textContent='正在核验并读取补充原件，保留原文件与读取证明。';
+    try{state.resourceRead=await api(`/api/tasks/${id}/author-resources/read`,{});state.resourceError='';}
+    catch(error){state.resourceError=error.message;}
+    finally{state.sourceReadPending=false;if(alive())await renderAuthorResourcePanel(id,parent,state);}
+   };panel.append(read);
+  }
+  if(state.resourceRead){
+   const read=state.resourceRead;panel.append(node('p',`已读 ${read.read_files}/${read.files} 个文件，保留 ${read.source_fragments} 个来源片段；未调用模型或新增计算。`,'form-note'));
+   for(const [label,names] of [['未读文件（未冒称已检查）',read.unread_files],['截断文件（仅保留有界片段）',read.truncated_files]])if(names?.length){const detail=node('details');detail.append(node('summary',label));for(const name of names)detail.append(node('p',name));panel.append(detail);}
+  }
+ }catch(error){if(alive())panel.replaceChildren(node('p','作者资料入口暂不可核验：'+error.message,'form-note'));}
 }
 const outputAnalysisStates=new Map();
 async function renderOutputAnalysisPanel(id){

@@ -247,6 +247,10 @@ class AuthorPlanInput(Input):
     revision_note: str = Field(default='', max_length=4000)
 
 
+class AuthorResourceInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
 class ScientificReviewInput(Input):
     analysis_id: str = Field(min_length=64, max_length=64)
 
@@ -1356,6 +1360,24 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/author-plan')
     def author_plan_status(identifier: str):
         return author_workspace.status(identifier)
+
+    @app.get('/api/tasks/{identifier}/author-resources')
+    def author_resource_status(identifier: str):
+        return author_workspace.resources.status(identifier)
+
+    @app.post('/api/tasks/{identifier}/author-resources')
+    def author_resource_acquire(identifier: str,data: AuthorResourceInput):
+        try:return author_workspace.resources.acquire(identifier,data.request_id)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '作者资料未通过核验；原请求保留，未发起模型或计算。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-resources/read')
+    def author_resource_read(identifier: str,data: Input):
+        try:return author_workspace.collect_sources(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '作者原件读取未完成；已有证据保留，未发起模型或计算。'
+            return JSONResponse(dict(detail=message),status_code=422)
 
     @app.post('/api/tasks/{identifier}/author-plan')
     def author_plan_prepare(identifier: str,data: AuthorPlanInput):

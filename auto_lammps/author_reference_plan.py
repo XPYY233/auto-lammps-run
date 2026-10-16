@@ -33,6 +33,8 @@ VERSION = 1
 STAGE = 'author_reference_plan'
 MAX_ROUNDS = 3
 MAX_INVOCATIONS = 128
+MAX_SOURCE_PACKAGES = 4
+MAX_SOURCE_FILES = 128
 FLAGS = dict(scope='reference_only', role='author_reference_human_only', B_input=False,
              approval=False, execution_authorized=False, physical_evaluation_performed=False,
              scientific_status='not_evaluated', proposal_status='model_proposed_not_verified')
@@ -82,6 +84,8 @@ def author_source_inputs(value, identifier):
     """Validate retained reader data, without doing another remote read."""
     if value is None:
         return dict(capability=None, sources=[], files=[], reads=[], invocation_paths=[])
+    if isinstance(value, dict) and 'source_packages' in value:
+        return _source_packages(value, identifier)
     if isinstance(value,dict) and (value.get('capability') or {}).get('adapter')=='pinned_legacy_author_source_reader':
         from .legacy_author_source_reader import validated_inputs
         return validated_inputs(value,identifier)
@@ -137,6 +141,63 @@ def author_source_inputs(value, identifier):
                                    **{key: item[key] for key in ('path', 'sha256', 'size', 'start_line',
                                       'end_line', 'returned_end_line', 'total_lines', 'truncated', 'text_sha256')}))
     return dict(capability=deepcopy(capability), sources=sources, files=deepcopy(capability['files']), reads=proofs)
+
+
+def _source_packages(value, identifier):
+    """Union independently verified packages; never substitute a new receipt."""
+    task_id(identifier)
+    packages = value.get('source_packages')
+    if (set(value) != {'source_packages'} or not isinstance(packages, list)
+            or not 1 <= len(packages) <= MAX_SOURCE_PACKAGES):
+        raise TaskError('作者源码来源包须明确为一至四包，不能截断来源或嵌套聚合。')
+    members, files, sources, proofs = {}, {}, {}, {}
+    identity, total = None, 0
+    for package in packages:
+        if (not isinstance(package, dict) or 'source_packages' in package
+                or not isinstance(package.get('capability'), dict)
+                or not isinstance(package.get('reads'), list) or not package['reads']):
+            raise TaskError('每个作者来源包必须保留独立能力与原请求、回执，不能嵌套或省略读取。')
+        # Both formats retain their existing task, receipt, file and text checks.
+        checked = author_source_inputs(package, identifier)
+        capability = checked['capability']
+        current = (capability['repository'], capability['commit'])
+        if identity is not None and identity != current:
+            raise TaskError('补充作者来源必须属于同一固定仓库和 commit，不能更换原流程。')
+        identity = current
+        members.setdefault(sha256(canonical(capability)), deepcopy(capability))
+        for row in checked['files']:
+            if row['path'] in files and files[row['path']] != row:
+                raise TaskError('补充来源的同路径原文件大小或 SHA 不一致；不能覆盖旧文件。')
+            files[row['path']] = deepcopy(row)
+            if len(files) > MAX_SOURCE_FILES:
+                raise TaskError('作者源码合计超过 128 个唯一文件；未截断清单。')
+        for row in checked['sources']:
+            if row['id'] in sources:
+                if sources[row['id']] != row:
+                    raise TaskError('相同作者源码片段编号的文本或来源不一致。')
+                continue
+            sources[row['id']] = deepcopy(row)
+            total += len(row['text'].encode('utf-8'))
+            if total > author_source_worker.MAX_TEXT_BYTES:
+                raise TaskError('作者来源包唯一文本合计超出 256 KiB；未删减片段。')
+        for row in checked['reads']:
+            key = (row.get('source_id'), row['request_sha256'])
+            if key in proofs and proofs[key] != row:
+                raise TaskError('同一作者读取身份的回执不一致，不能覆盖历史。')
+            proofs[key] = deepcopy(row)
+    capability = dict(adapter='pinned_author_source_packages', adapter_version=VERSION,
+        scope='reference_only', B_input=False, execution_authorized=False,
+        physical_evaluation_performed=False, repository=identity[0], commit=identity[1],
+        members=list(members.values()), files=deepcopy(list(files.values())))
+    return dict(capability=capability, sources=list(sources.values()),
+                files=list(files.values()), reads=list(proofs.values()))
+
+
+def _source_capability_members(capability):
+    if capability is None:
+        return []
+    return (capability['members'] if capability.get('adapter') == 'pinned_author_source_packages'
+            else [capability])
 
 
 def _deployment(value):
@@ -450,8 +511,15 @@ def _revision_sources(previous, current):
     if any(new_sources.get(key) != value for key, value in old_sources.items()):
         raise TaskError('修订不能删去或改写上一稿的原始来源；请保留原片段并追加新证据。')
     old_author, new_author = previous['author_source'], current['author_source']
-    if old_author['capability'] is not None and old_author['capability'] != new_author['capability']:
-        raise TaskError('作者仓库、固定 commit 或文件清单已变化；未冒充同一原流程修订。')
+    old_members = _source_capability_members(old_author['capability'])
+    new_members = _source_capability_members(new_author['capability'])
+    if any(member not in new_members for member in old_members):
+        raise TaskError('修订必须保留所有原作者来源包及其完整能力，不能换回执冒充旧来源。')
+    if old_members and any((member['repository'], member['commit']) !=
+            (old_members[0]['repository'], old_members[0]['commit']) for member in new_members):
+        raise TaskError('补充作者来源不能更换原仓库或 commit。')
+    if any(row not in new_author['files'] for row in old_author['files']):
+        raise TaskError('修订必须保留原作者文件及其大小和 SHA。')
     if any(row not in new_author['reads'] for row in old_author['reads']):
         raise TaskError('修订必须保留上一稿作者读取回执。')
     if not set(previous['invocation_source_ids']) <= set(current['invocation_source_ids']):
@@ -469,6 +537,7 @@ def _revision_sources(previous, current):
         raise TaskError('原分析能力被移除、覆盖；未覆盖旧方案。')
     old_environment_ids = {row['id'] for row in old_deployment['environments']}
     return dict(added_source_ids=[key for key in new_sources if key not in old_sources],
+                added_source_package_sha256=[sha256(canonical(row)) for row in new_members if row not in old_members],
                 added_environment_ids=[row['id'] for row in new_deployment['environments']
                                        if row['id'] not in old_environment_ids],
                 added_analysis_ids=[row['id'] for row in new_deployment['analysis_capabilities']

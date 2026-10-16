@@ -172,3 +172,41 @@ test('author evidence redraw removes a different-task plan without creating a mo
  await prepare.onclick();assert.equal(s.calls.length,1);
  assert.equal(s.calls.filter(call=>call.body!==undefined).length,0);
 });
+
+const resourceStatus=(latest=null)=>({enabled:true,history:latest?[latest]:[],latest});
+const resourceRow=(overrides={})=>({request_id:REQUEST,repository:'example/source',commit:'f'.repeat(40),state:'unknown',files:[],source_complete:false,recoverable:true,failures:[],...overrides});
+async function openResources(s,data=resourceStatus()){
+ const opening=button(s,'补齐作者原件：获取到 HPC，不消耗方案轮次').onclick();
+ assert.equal(s.calls.at(-1).path,`/api/tasks/${TASK}/author-resources`);
+ assert.equal(s.calls.at(-1).body,undefined);s.calls.at(-1).resolve(data);await opening;
+}
+test('opening missing-author resources only reads status and fetching uses a single fixed-source identity',async()=>{
+ const s=setup();await open(s);await openResources(s);
+ const fetch=button(s,'获取固定作者仓库到 HPC'),posting=fetch.onclick();await fetch.onclick();
+ assert.equal(s.calls.length,3);assert.equal(s.calls[2].path,`/api/tasks/${TASK}/author-resources`);
+ assert.deepEqual(plain(s.calls[2].body),{request_id:'d'.repeat(32)});
+ s.calls[2].resolve(resourceStatus(resourceRow({source_complete:true,recoverable:false,state:'finished'})));
+ await flush();s.calls.at(-1).resolve(resourceStatus(resourceRow({source_complete:true,recoverable:false,state:'finished'})));await posting;
+ assert.ok(button(s,'读取补充作者原件（不调用模型）'));assert.equal(s.calls.filter(c=>c.path.endsWith('/author-plan')&&c.body!==undefined).length,0);
+});
+test('unknown source retrieval recovers its original identity and never invents a new request',async()=>{
+ const s=setup();await open(s);await openResources(s,resourceStatus(resourceRow()));
+ const posting=button(s,'核对原资料获取请求').onclick();assert.deepEqual(plain(s.calls.at(-1).body),{request_id:REQUEST});assert.equal(s.uuidCalls(),0);
+ s.calls.at(-1).resolve(resourceStatus(resourceRow()));await flush();s.calls.at(-1).resolve(resourceStatus(resourceRow()));await posting;
+ assert.ok(button(s,'核对原资料获取请求'));assert.equal(s.calls.filter(c=>c.body!==undefined).length,1);
+});
+test('reading supplemental files is a separate empty-input action and shows retained read limits',async()=>{
+ const s=setup();await open(s);const status=resourceStatus(resourceRow({state:'partial',source_complete:true,recoverable:false}));await openResources(s,status);
+ const read=button(s,'读取补充作者原件（不调用模型）'),reading=read.onclick();await read.onclick();
+ assert.equal(s.calls.at(-1).path,`/api/tasks/${TASK}/author-resources/read`);assert.deepEqual(plain(s.calls.at(-1).body),{});
+ s.calls.at(-1).resolve({files:7,read_files:5,source_fragments:5,message:'READ_WITHOUT_MODEL',unread_files:['data.bin'],truncated_files:['large.py']});
+ await flush();s.calls.at(-1).resolve(status);await reading;
+ assert.match(text(s.panel()),/已读 5\/7/);assert.match(text(s.panel()),/data.bin/);assert.match(text(s.panel()),/large.py/);
+ assert.equal(s.calls.filter(c=>c.body!==undefined).length,1);assert.equal(s.uuidCalls(),0);
+});
+test('an old source status cannot publish controls after switching tasks',async()=>{
+ const s=setup();await open(s);const opening=button(s,'补齐作者原件：获取到 HPC，不消耗方案轮次').onclick();
+ s.c.current.id=OTHER;const changed=s.c.renderAuthorPlanPanel(OTHER);s.calls.at(-1).resolve(available({task_id:OTHER}));await changed;
+ const before=text(s.panel());s.calls[1].resolve(resourceStatus(resourceRow({repository:'STALE_SOURCE_ONLY'})));await opening;
+ assert.equal(text(s.panel()),before);assert.doesNotMatch(text(s.panel()),/STALE_SOURCE_ONLY/);assert.equal(s.uuidCalls(),0);
+});
