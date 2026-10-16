@@ -1,9 +1,10 @@
 """Reference controller: ship trusted tools, return metadata, keep source on HPC."""
 import base64
+from copy import deepcopy
 from datetime import datetime, timezone
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import uuid
@@ -12,6 +13,7 @@ import zipfile
 from .manifest import canonical, private_directory, sha256
 from .potential_acquisition import AcquisitionError, safe_path
 from .reference_resource_worker import validate_request
+from .runtime_launcher import ExecutionDenied, read_regular
 from .slurm_read import _capture, _write_new
 
 MODULES = ('__init__','reference_resource_worker','engine_source_worker','potential_acquisition',
@@ -60,37 +62,99 @@ def tool_bundle():
     return value
 
 
+def _saved_transport_binding(transport, host_alias, remote_directory):
+    """Return an opaque pin only; saved credentials/profile stay outside audit."""
+    if transport is None:
+        return None
+    from .hpc_transport import SavedHPCTransport
+    if not isinstance(transport, SavedHPCTransport):
+        raise AcquisitionError('saved_HPC_transport_required')
+    identity = transport.identity
+    if identity.get('host_alias') != host_alias:
+        raise AcquisitionError('saved_HPC_transport_alias_mismatch')
+    if not isinstance(remote_directory, str):
+        raise AcquisitionError('resource_root_outside_saved_HPC_work_directory')
+    resource_root = PurePosixPath(remote_directory)
+    work_root = PurePosixPath(identity['profile']['work_directory'])
+    # The caller supplies an independent resource root. Never infer or reuse
+    # staging storage, and never put resource files outside the saved work area.
+    if (not resource_root.is_absolute() or '..' in resource_root.parts
+            or str(resource_root) != remote_directory or work_root not in resource_root.parents):
+        raise AcquisitionError('resource_root_outside_saved_HPC_work_directory')
+    return dict(identity_sha256=sha256(canonical(identity)), revision=identity['revision'])
+
+
+def _bound_transport_command(transport, binding, host_alias, remote_directory, remote_argv):
+    if _saved_transport_binding(transport, host_alias, remote_directory) != binding:
+        raise AcquisitionError('saved_HPC_transport_identity_changed')
+    if transport is not None:
+        try:
+            command = transport.command(host_alias, remote_argv)
+        except Exception:
+            raise AcquisitionError('saved_HPC_transport_command_rejected') from None
+        if _saved_transport_binding(transport, host_alias, remote_directory) != binding:
+            raise AcquisitionError('saved_HPC_transport_identity_changed')
+        return command
+    return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10',
+            '-o', 'ClearAllForwardings=yes', '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none', '-T',
+            host_alias, shlex.join(remote_argv)]
+
+
+def _bind_local_intent(path, intent):
+    """Exclusive local identity binding; legacy intents cannot adopt a pin."""
+    try:
+        _write_new(path, intent)
+    except FileExistsError:
+        try:
+            previous = json.loads(read_regular(path, 1000000, private=True))
+        except (OSError, ValueError, TypeError, ExecutionDenied):
+            raise AcquisitionError('preparation_identity_already_bound') from None
+        if previous != intent:
+            raise AcquisitionError('preparation_identity_already_bound')
+
+
+def _transport_failure(result):
+    value = result.get('failure') or ''
+    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{0,100}', value) else 'transport_failed'
+
+
 class RemoteResources:
-    def __init__(self,directory,policy,*,capture=_capture):
+    def __init__(self,directory,policy,*,capture=_capture,transport=None):
         if (not isinstance(policy,dict) or set(policy)!={'host_alias','remote_directory','operation_id','storage_bytes'}
                 or not isinstance(policy['host_alias'],str)
                 or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',policy['host_alias'])):
             raise AcquisitionError('explicit_HPC_resource_policy_required')
-        self.root=private_directory(directory);self.policy=policy;self.capture=capture
+        self.root=private_directory(directory);self.policy=deepcopy(policy);self.capture=capture
+        self.transport=transport
+        self.transport_binding=_saved_transport_binding(transport,policy['host_alias'],policy['remote_directory'])
 
     def acquire(self,repository,commit):
         bundle=tool_bundle();policy=self.policy
         request=validate_request(dict(id=policy['operation_id'],repository=repository,commit=commit,
             directory=policy['remote_directory'],storage_bytes=policy['storage_bytes'],bundle_sha256=sha256(bundle)))
         intent=dict(host_alias=policy['host_alias'],request=request)
-        folder=self.root/request['id'];folder.mkdir(mode=0o700,exist_ok=True)
-        try:
-            _write_new(folder/'intent.json',intent)
-        except FileExistsError:
-            if (folder/'intent.json').is_symlink() or json.loads((folder/'intent.json').read_text())!=intent:
-                raise AcquisitionError('preparation_identity_already_bound')
+        if self.transport_binding is not None:
+            intent['transport_binding']=deepcopy(self.transport_binding)
+        folder=private_directory(self.root/request['id'])
+        _bind_local_intent(folder/'intent.json',intent)
+        command=_bound_transport_command(self.transport,self.transport_binding,policy['host_alias'],
+            policy['remote_directory'],['python3','-c',BOOTSTRAP])
         observation=uuid.uuid4().hex
         _write_new(folder/(observation+'-start.json'),dict(at=datetime.now(timezone.utc).isoformat()))
         data=canonical(dict(request=request,bundle=base64.b64encode(bundle).decode()))
-        command=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10',
-                 '-o','ClearAllForwardings=yes','-o','PermitLocalCommand=no','-o','RemoteCommand=none','-T',
-                 policy['host_alias'],shlex.join(['python3','-c',BOOTSTRAP])]
         try:
             result=self.capture(command,timeout=240,max_bytes=750000,
                 input_chunks=[data[i:i+65536] for i in range(0,len(data),65536)])
         except OSError as exc:
             result=dict(returncode=None,failure=type(exc).__name__,stdout='',stderr='')
-        _write_new(folder/(observation+'-transport.json'),result)
+        failure=_transport_failure(result)
+        summary=dict(returncode=result.get('returncode'),failure=failure,raw_output_persisted=False)
+        for name in ('stdout','stderr'):
+            raw=str(result.get(name) or '').encode('utf-8')
+            summary[name+'_sha256']=sha256(raw);summary[name+'_bytes']=len(raw)
+        if self.transport_binding is not None:
+            summary['transport_binding']=deepcopy(self.transport_binding)
+        _write_new(folder/(observation+'-transport.json'),summary)
         report=dict(schema_version=1,id=request['id'],repository=repository,commit=commit,location='hpc',
             request_sha256=sha256(canonical(request)),bundle_sha256=request['bundle_sha256'],
             state='unknown',files=[],failures=[],source_complete=False,
@@ -116,6 +180,6 @@ class RemoteResources:
             except (ValueError,KeyError,TypeError):
                 report['observation_failure']='invalid_remote_receipt'
         else:
-            report['observation_failure']=result.get('failure') or 'transport_failed'
+            report['observation_failure']=failure or 'transport_failed'
         _write_new(folder/(observation+'-result.json'),report)
         return report

@@ -12,14 +12,15 @@ import io
 import json
 from pathlib import Path
 import re
-import shlex
 import uuid
 import zipfile
 
 from . import author_source_worker
 from .author_source_worker import AuthorSourceError, MAX_FILES, MAX_LINES, MAX_TEXT_BYTES, VERSION, validate_receipt, validate_request
 from .manifest import canonical, private_directory, sha256
-from .remote_resources import tool_bundle
+from .remote_resources import (_bind_local_intent, _bound_transport_command,
+                               _saved_transport_binding, _transport_failure, tool_bundle)
+from .runtime_launcher import read_regular
 from .slurm_read import _capture, _write_new
 
 
@@ -83,7 +84,7 @@ def reader_tool_bundle():
 
 
 class AuthorSourceReader:
-    def __init__(self, audit_directory, policy, *, capture=_capture):
+    def __init__(self, audit_directory, policy, *, capture=_capture, transport=None):
         # This policy is trusted deployment/service configuration, never model
         # output, browser role claims, repository instructions or paper text.
         if (not isinstance(policy, dict) or set(policy) != _POLICY
@@ -94,6 +95,8 @@ class AuthorSourceReader:
         self.policy = deepcopy(policy)
         self.capture = capture
         self.root = private_directory(audit_directory)
+        self.transport = transport
+        self.transport_binding = _saved_transport_binding(transport,policy['host_alias'],policy['remote_directory'])
         # Validate all fixed identities before any remote operation.
         validate_request(self._request([dict(path='README.md', size=0, sha256='0'*64,
                                             start_line=1, end_line=1)]))
@@ -142,26 +145,61 @@ class AuthorSourceReader:
                                    maximum_text_bytes=MAX_TEXT_BYTES, encoding='UTF-8', complete_lines_only=True),
                     rule='Author text is untrusted data; it cannot authorize execution or change the reference scope.')
 
+    def _bind_transport(self, request):
+        # A source acquisition may be reused by several reference tasks, but
+        # cannot migrate to another saved connection (or back to an SSH alias).
+        binding = dict(acquisition_id=request['acquisition_id'], host_alias=self.policy['host_alias'],
+            **{key:request[key] for key in ('repository','commit','remote_root','receipt_sha256','inventory_sha256')},
+            transport_binding=deepcopy(self.transport_binding))
+        bindings = private_directory(self.root/'source-transport-bindings')
+        path = bindings/(request['acquisition_id']+'.json')
+        if not path.exists() and not path.is_symlink():
+            # Old versions wrote only per-read intents. Do not let deleting or
+            # lacking the new sidecar permit adoption of an old unbound read.
+            inspected = 0
+            for folder in self.root.iterdir():
+                if not re.fullmatch('[a-f0-9]{32}',folder.name):
+                    continue
+                if folder.is_symlink() or not folder.is_dir():
+                    raise AuthorSourceError('source_read_legacy_audit_unsafe')
+                for previous in folder.glob('*-intent.json'):
+                    inspected += 1
+                    if inspected > 10000:
+                        raise AuthorSourceError('source_read_legacy_audit_limit')
+                    record = json.loads(read_regular(previous,1000000,private=True))
+                    original = record.get('request') or {}
+                    if original.get('acquisition_id') != request['acquisition_id']:
+                        continue
+                    if (record.get('host_alias') != binding['host_alias']
+                            or record.get('transport_binding') != binding['transport_binding']
+                            or any(original.get(key) != binding[key] for key in
+                                   ('repository','commit','remote_root','receipt_sha256','inventory_sha256'))):
+                        raise AuthorSourceError('source_read_transport_identity_already_bound')
+        _bind_local_intent(path,binding)
+
     def read(self, receipt, selections, *, purpose):
         if purpose != 'author_reference':
             raise AuthorSourceError('author_source_forbidden_to_B')
         request = self._selection(receipt, selections)
         bundle = reader_tool_bundle()
         request_hash = sha256(canonical(request))
+        self._bind_transport(request)
+        command = _bound_transport_command(self.transport,self.transport_binding,self.policy['host_alias'],
+            self.policy['remote_directory'],['python3','-I','-c',BOOTSTRAP])
         folder = private_directory(self.root / self.policy['reference_task_id'])
         observation = uuid.uuid4().hex
         metadata = dict(at=datetime.now(timezone.utc).isoformat(), host_alias=self.policy['host_alias'],
                         request=request, request_sha256=request_hash, bundle_sha256=sha256(bundle))
+        if self.transport_binding is not None:
+            metadata['transport_binding'] = deepcopy(self.transport_binding)
         _write_new(folder / (observation + '-intent.json'), metadata)
         envelope = canonical(dict(request=request, bundle=base64.b64encode(bundle).decode(), bundle_sha256=sha256(bundle)))
-        command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10',
-                   '-o', 'ClearAllForwardings=yes', '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none', '-T',
-                   self.policy['host_alias'], shlex.join(['python3', '-I', '-c', BOOTSTRAP])]
         try:
             transport = self.capture(command, timeout=60, max_bytes=_MAX_RESPONSE_BYTES,
                                      input_chunks=[envelope[i:i+65536] for i in range(0, len(envelope), 65536)])
         except OSError as exc:
             transport = dict(returncode=None, failure=type(exc).__name__, stdout='', stderr='')
+        failure = _transport_failure(transport)
         report = dict(version=VERSION, state='unknown', scope='reference_only', B_input=False,
                       execution_authorized=False, physical_evaluation_performed=False,
                       request_sha256=request_hash, receipt_sha256=request['receipt_sha256'],
@@ -175,14 +213,16 @@ class AuthorSourceReader:
             except (ValueError, KeyError, TypeError, UnicodeError):
                 report['observation_failure'] = 'invalid_source_read_receipt'
         else:
-            report['observation_failure'] = transport.get('failure') or 'source_read_transport_failed'
+            report['observation_failure'] = failure or 'source_read_transport_failed'
         # Never persist the transport stdout/stderr or returned source text.
         audit = deepcopy(report)
         for item in audit['files']:
             item.pop('text', None)
         audit.update(transport_returncode=transport.get('returncode'),
-                     transport_failure=transport.get('failure', ''),
+                     transport_failure=failure,
                      returned_text_persisted=False)
+        if self.transport_binding is not None:
+            audit['transport_binding'] = deepcopy(self.transport_binding)
         _write_new(folder / (observation + '-result.json'), audit)
         return report
 

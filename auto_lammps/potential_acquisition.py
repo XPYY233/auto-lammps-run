@@ -212,7 +212,7 @@ class MeamAcquisition:
 
 
 def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None, policy=None, capture=None,
-                            discovery_library=None):
+                            discovery_library=None, transport=None):
     paper = papers.get(identifier)
     from .reference_resource_association import reference_resource_candidate
     candidate = reference_resource_candidate(paper, discovery_library=discovery_library)
@@ -221,14 +221,16 @@ def prepare_paper_resources(papers, identifier, audit_directory, *, reader=None,
     if reader is None:
         from .remote_resources import RemoteResources
         options = {'capture': capture} if capture is not None else {}
+        if transport is not None:
+            options['transport'] = transport
         acquisition = RemoteResources(audit_directory, policy, **options).acquire(candidate['repository'], candidate['commit'])
         papers.record_reference_resources(identifier, acquisition, discovery_library=discovery_library)
         report = acquisition.get('potential_acquisition')
         if report is None:
             return {'state': acquisition['state'], 'bindings': [], 'files': []}
     else:
-        if policy is not None:
-            raise AcquisitionError('Synthetic reader cannot be combined with HPC policy')
+        if policy is not None or transport is not None:
+            raise AcquisitionError('Synthetic reader cannot be combined with HPC policy or transport')
         report = MeamAcquisition(audit_directory, reader=reader).acquire(candidate['repository'], candidate['commit'])
     papers.record_potential_acquisition(identifier, report, discovery_library=discovery_library)
     return report
