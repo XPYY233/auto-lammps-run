@@ -100,6 +100,24 @@ class AuthorReferencePlanTests(unittest.TestCase):
         self.assertEqual(before,self.fixture.snapshot_old_records())
         self.assertEqual(self.calls.status()['used_requests'],1)
 
+    def test_output_glob_gets_actionable_feedback_and_revision_keeps_original_answer(self):
+        self.value['invocations'][0]['output_files'][0]['path']='values*.csv'
+        previous=deepcopy(self.value)
+        first=self.prepare()
+        self.assertEqual(first['state'],'invalid_output')
+        self.assertIn('original-call',first['receipt']['message'])
+        self.assertIn('output_files[0].path',first['receipt']['message'])
+        self.assertIn('通配符',first['receipt']['message'])
+        sent=json.loads(self.sent[0]['messages'][-1]['content'])
+        self.assertIn('no_globs',sent['original_author_invocation_plan']['requirements']['output_paths'])
+        self.value['invocations'][0]['output_files'][0]['path']='values.csv'
+        second=self.prepare('5'*32)
+        self.assertEqual(second['state'],'prepared')
+        self.assertEqual(second['round'],2)
+        self.assertEqual(second['revision']['complete_previous_answer'],previous)
+        self.assertEqual(second['revision']['feedback']['message'],first['receipt']['message'])
+        self.assertEqual(self.calls.status()['used_requests'],2)
+
     def test_active_adapter_is_in_actual_messages_and_cannot_be_removed_or_changed(self):
         result = self.prepare()
         saved = self.service._stored(self.task['id'],result['request_id'])[1]

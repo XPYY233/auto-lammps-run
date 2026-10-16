@@ -232,8 +232,10 @@ def plan_selection_context(evidence):
     citations = dict(type='array', maxItems=32, items=citation)
     file_type = dict(type='object', additionalProperties=False, required=['path', 'sha256'],
                      properties=dict(path=string(500), sha256=dict(type='string', pattern='^[a-f0-9]{64}$')))
+    output_path = dict(type='string', minLength=1, maxLength=500,
+        pattern=r'^(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$')
     output = dict(type='object', additionalProperties=False, required=['path', 'kind', 'description', 'citations'],
-        properties=dict(path=string(500), kind=dict(type='string', enum=['numeric_table', 'trajectory', 'log', 'other']),
+        properties=dict(path=output_path, kind=dict(type='string', enum=['numeric_table', 'trajectory', 'log', 'other']),
                         description=string(2000), citations=citations))
     invocation = dict(type='object', additionalProperties=False,
         required=['id', 'entrypoint', 'argv', 'working_directory', 'environment_id', 'executable_id',
@@ -263,6 +265,8 @@ def plan_selection_context(evidence):
             coverage='every_original_dependency_exactly_once_no_scope_reduction',
             citations='literal_contiguous_quote_in_declared_source_id',
             arguments='argv_is_data_never_shell_or_inline_code_and_must_name_pinned_entrypoint',
+            output_paths='literal_relative_file_paths_only_no_globs_variables_or_parent_segments; '
+                'list_source_supported_concrete_names_or_record_parameterized_outputs_in_missing_not_invented_names',
             missing='needs_clarification_is_a_saved_plan_not_execution_authorization',
             execution_approval='not_required_for_nonexecuting_plan_preparation',
             revision='complete_saved_previous_answer_plus_specific_errors_not_start_over'))
@@ -366,11 +370,16 @@ def validate_author_plan(evidence, value):
         if not isinstance(row['output_files'], list) or len(row['output_files']) > 128:
             raise TaskError('作者预期输出清单无效。')
         outputs, names = [], set()
-        for item in row['output_files']:
+        for output_index,item in enumerate(row['output_files']):
             if (not isinstance(item, dict) or set(item) != {'path', 'kind', 'description', 'citations'}
                     or item['kind'] not in {'numeric_table', 'trajectory', 'log', 'other'}):
                 raise TaskError('作者预期输出字段无效。')
-            path = safe_path(item['path'])
+            try:
+                path = safe_path(item['path'])
+            except ValueError:
+                raise TaskError(f'作者调用 {row["id"]} 的 output_files[{output_index}].path '
+                    '须为具体相对文件路径，不接受通配符、变量、绝对路径或父目录；'
+                    '参数化输出请按原文列出具体名称，无法确定则明确记入 missing。') from None
             if path in names:
                 raise TaskError('作者预期输出重复。')
             names.add(path)
