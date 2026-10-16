@@ -99,4 +99,3 @@ class ReferenceBBudgetTests(unittest.TestCase):
             with self.subTest(cores=cores,state=state),self.assertRaises(Conflict):
                 self.ledger.approve_reference_derived_b_limit(self.candidate,author,[source],
                     scope_sha256=H,evidence_sha256=H,approval_sha256=H)
-
