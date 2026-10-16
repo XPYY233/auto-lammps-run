@@ -236,6 +236,12 @@ class ChartInput(ProviderInput):
     question: str = Field(min_length=1, max_length=1000)
 
 
+class OutputAnalysisInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    source_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    question: str = Field(min_length=1, max_length=4000)
+
+
 class ScientificReviewInput(Input):
     analysis_id: str = Field(min_length=64, max_length=64)
 
@@ -303,7 +309,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -487,6 +493,19 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         connection_provider=reference_target_connection)
     reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
         connection_provider=reference_target_connection)
+    def output_analysis_connection(identifier):
+        store.get(identifier)
+        if model_client is None:raise TaskError('本项目模型调用账本尚未配置。')
+        client=connections.client('deepseek-official',calls=model_client.calls)
+        with store.transaction() as db:
+            revision=db.execute('SELECT COUNT(*) FROM connection_events WHERE provider=?',('deepseek-official',)).fetchone()[0]
+        return dict(client=client,enabled=connections.assistant_enabled and connections.available('deepseek-official'),
+            connection_revision=max(1,revision),credential_generation=max(1,revision))
+    from .output_analysis import OutputAnalysis
+    output_analyses=output_analysis_service or OutputAnalysis(raw_outputs,
+        connection_provider=output_analysis_connection,reference_sources=reference_target_sources,
+        model_calls=model_client.calls if model_client else None)
+    if output_analyses.tasks.path!=store.path:raise ValueError('Output analysis must share the task store')
     from .reference_scope import ReferenceScopeService
     reference_scopes = ReferenceScopeService(store, papers, reference_targets)
     paper_workflow = paper_workflow_service or PaperWorkflowService(store, papers,
@@ -697,6 +716,32 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         try:return reference_outputs_service.status(identifier)
         except (ValueError,KeyError,TypeError,OSError,runtime_denied):
             return JSONResponse({'detail':'作者原始输出清单暂不可核验。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/output-analyses')
+    def output_analysis_history(identifier: str):
+        try:
+            result=output_analyses.status(identifier)
+            result['enabled']=bool(output_analysis_service or (model_client and connections.assistant_enabled))
+            return result
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'原始输出分析来源暂不可核验。'},status_code=409)
+
+    @app.post('/api/tasks/{identifier}/output-analyses')
+    def generate_output_analysis(identifier: str,data: OutputAnalysisInput):
+        try:return output_analyses.generate(identifier,data.request_id,data.source_request_id,data.question)
+        except TaskError as error:
+            try:recorded=output_analyses.get(identifier,data.request_id) is not None
+            except (TaskError,ValueError,KeyError,TypeError,OSError):recorded=True
+            return JSONResponse({'detail':str(error),'request_recorded':recorded},status_code=422)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse({'detail':'原始输出或分析契约未通过检查；原记录保留。'},status_code=409)
+
+    @app.get('/api/tasks/{identifier}/output-analyses/{request_id}/files/{name}')
+    def output_analysis_file(identifier: str,request_id: str,name: str):
+        data=output_analyses.download(identifier,request_id,name)
+        media={'.png':'image/png','.csv':'text/csv; charset=utf-8','.json':'application/json'}
+        return Response(data,media_type=media.get(Path(name).suffix,'application/octet-stream'),
+            headers={'Content-Disposition':'inline; filename="'+name+'"','Cache-Control':'no-store'})
 
     @app.post('/api/tasks/{identifier}/reference-outputs')
     def collect_reference_outputs(identifier: str,data: ReferenceOutputInput):
@@ -1279,7 +1324,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/paper-workflow')
     def human_paper_workflow(identifier: str):
-        return paper_workflow.get(identifier)
+        report=paper_workflow.get(identifier)
+        if report.get('applicable'):
+            try:
+                available=output_analyses.status(identifier)
+                enabled=bool(output_analysis_service or (model_client and connections.assistant_enabled))
+                ready=enabled and any(run['role']=='reference' for run in available['runs'])
+            except (ValueError,KeyError,TypeError,OSError,runtime_denied):ready=False
+            if ready:
+                for item in report['actions']:
+                    if item['id']=='analyze_A':item.update(enabled=True,disabled_reason='',method='GET',endpoint='/api/tasks/'+identifier+'/output-analyses')
+        return report
 
     @app.post('/api/tasks/{identifier}/paper-workflow/resources')
     def human_paper_resources(identifier: str, data: Revision):

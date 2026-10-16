@@ -390,11 +390,13 @@ class DeepSeekClient:
         # receipt always records the model actually requested.
         self.model = model or calls.config.model
 
-    def complete_json(self, identifier, messages, *, reasoning_effort=None, thinking=None):
+    def complete_json(self, identifier, messages, *, reasoning_effort=None, thinking=None, expected_request_sha256=None):
         effective_thinking = self.thinking if thinking is None else thinking
         if type(effective_thinking) is not bool:
             raise ModelError('invalid_thinking_mode')
         body = request_body(self.calls.config, messages, model=self.model, thinking=effective_thinking, reasoning_effort=reasoning_effort)
+        if expected_request_sha256 is not None and sha256(body)!=expected_request_sha256:
+            raise ModelError('model_request_changed')
         self.calls.reserve(identifier, body)
         receipt = dict(provider='deepseek', requested_model=self.model, thinking=effective_thinking,
                        reasoning_effort=reasoning_effort if effective_thinking else None,
