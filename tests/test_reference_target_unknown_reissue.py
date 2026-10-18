@@ -46,6 +46,19 @@ class ReferenceTargetUnknownReissueTests(unittest.TestCase):
             connection_revision=flags.get('connection_revision',1),
             credential_generation=flags.get('credential_generation',1))
 
+    def revise(self,request='f'*32,parent=None,service=None):
+        return (service or self.service).revise_original(self.task,request,self.f.client,
+            parent_request=parent or self.child,connection_revision=1,credential_generation=1)
+
+    def failed_original_replay(self):
+        self.original['sources'][0]['text']+=' Common neighbor analysis (CNA) identi\ue103es\nlayers in this synthetic example.'
+        self.f.inputs=deepcopy(self.original)
+        self.unknown()
+        self.f.value['targets'][0]['citations'][0]['quote']='Common neighbor analysis (CNA) identifies'
+        replay=self.reissue();self.assertEqual(replay['state'],'unavailable')
+        self.assertTrue(replay['can_revise_original'])
+        return replay,deepcopy(self.f.calls.lookup(self.child))
+
     def test_explicit_reissue_sends_exact_original_body_once_and_preserves_unknown_charge(self):
         self.unknown();wire=[]
         def capture(body,*args):wire.append(body);return self.transport(body,*args)
@@ -211,6 +224,75 @@ class ReferenceTargetUnknownReissueTests(unittest.TestCase):
             connection_revision=1,credential_generation=1)
         self.assertFalse(options[0]['enabled'])
         with self.assertRaisesRegex(TaskError,'三次'):self.reissue(request='a'*32)
+        self.assertEqual(self.f.calls.status()['used_requests'],3)
+        self.assertEqual(len(self.service.history(self.task)),3)
+
+    def test_third_round_revises_complete_failed_original_answer_without_unicode_repair(self):
+        failed,parent_call=self.failed_original_replay()
+        self.f.provider.side_effect=AssertionError('latest P cannot replace the original source')
+        self.f.value['targets'][0]['citations'][0]['quote']='Common neighbor analysis (CNA)'
+        result=self.revise();self.assertEqual(result['state'],'completed',result)
+        wire=self.f.sent[-1];payload=json.loads(wire['messages'][-1]['content'])
+        revision=payload['reference_target_revision']
+        self.assertEqual(revision['parent_request'],self.child)
+        self.assertEqual(revision['complete_previous_answer'],parent_call['receipt']['structured_output'])
+        self.assertEqual(payload['sources'],self.original['sources'])
+        self.assertIn('identi\ue103es\nlayers',payload['sources'][0]['text'])
+        errors=revision['feedback']['errors']
+        bad=[r for r in errors if r['path']==['targets',0,'citations',0]][0]
+        self.assertEqual(bad['original_citation']['quote'],'Common neighbor analysis (CNA) identifies')
+        self.assertFalse(revision['feedback']['automatic_scientific_repair'])
+        self.assertEqual(self.f.calls.lookup(self.child),parent_call)
+        self.assertEqual(self.service.get(self.task,self.child)['receipt'],failed['receipt'])
+        self.assertTrue(result['original_source_preserved']);self.assertTrue(result['historical_source'])
+        self.assertEqual(result['original_revision_of'],self.child)
+        self.assertEqual(result['original_revision'],dict(request_id='f'*32,parent_request=self.child))
+        self.assertEqual(self.service.get(self.task,'f'*32)['state'],'completed')
+        self.assertFalse(self.service.get(self.task,self.child)['can_revise_original'])
+        self.assertEqual(self.f.calls.status()['used_requests'],3)
+        self.assertEqual(len(self.service.history(self.task)),3)
+        self.assertEqual(self.revise(),result)
+        with self.assertRaises(TaskError):self.revise(request='a'*32)
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.f.tasks.transaction() as db:db.execute('DELETE FROM reference_target_original_revisions')
+
+    def test_failed_third_original_revision_does_not_open_a_fourth_round(self):
+        self.failed_original_replay()
+        third=self.revise();self.assertEqual(third['state'],'unavailable')
+        self.assertFalse(third['can_revise_original'])
+        with self.assertRaisesRegex(TaskError,'三次'):self.revise(request='a'*32,parent='f'*32)
+        self.assertEqual(self.f.calls.status()['used_requests'],3)
+        self.assertEqual(len(self.service.history(self.task)),3)
+
+    def test_unknown_or_non_original_failed_parent_never_allows_original_revision(self):
+        self.unknown()
+        with self.assertRaises(TaskError):self.revise(parent=self.parent)
+        self.f.client.transport=Mock(side_effect=TimeoutError('synthetic second unknown'))
+        self.reissue()
+        with self.assertRaises(TaskError):self.revise()
+        self.assertEqual(self.f.calls.status()['used_requests'],2)
+
+    def test_revision_rechecks_complete_model_output_and_preserves_known_failure(self):
+        _failed,original=self.failed_original_replay()
+        lookup=self.f.calls.lookup
+        def tampered(identifier):
+            value=deepcopy(lookup(identifier))
+            if identifier==self.child:value['receipt']['structured_output']['limitations']=['altered']
+            return value
+        with patch.object(self.f.calls,'lookup',side_effect=tampered),self.assertRaises(TaskError):self.revise()
+        self.assertEqual(self.f.calls.lookup(self.child),original)
+        self.assertEqual(self.f.calls.status()['used_requests'],2)
+        self.assertEqual(len(self.service.history(self.task)),2)
+
+    def test_original_revision_unsent_crash_reuses_same_relation_and_frozen_sources_after_restart(self):
+        self.failed_original_replay()
+        with patch.object(self.f.client,'complete_json',side_effect=KeyboardInterrupt('synthetic unsent revision')):
+            with self.assertRaises(KeyboardInterrupt):self.revise()
+        self.assertEqual(self.f.calls.status()['used_requests'],2)
+        self.assertEqual(len(self.service.history(self.task)),3)
+        self.f.provider.side_effect=AssertionError('restart must keep original P')
+        self.f.value['targets'][0]['citations'][0]['quote']='Common neighbor analysis (CNA)'
+        result=self.revise(service=self.make());self.assertEqual(result['state'],'completed')
         self.assertEqual(self.f.calls.status()['used_requests'],3)
         self.assertEqual(len(self.service.history(self.task)),3)
 

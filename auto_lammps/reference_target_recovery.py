@@ -5,6 +5,7 @@ messages, validators and model client remain authoritative; this layer adds only
 append-only user authorization and same-task recovery accounting.
 """
 from copy import deepcopy
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ class ReferenceTargetAnalysis(OriginalReferenceTargetAnalysis):
             raise TaskError('历史参考来源核验需受信的只读服务。')
         super().__init__(*args,**kwargs)
         self.historical_reference_provider=historical_reference_provider
+        self.original_revision_context=ContextVar('reference_target_original_revision',default=None)
         with self.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS reference_target_unknown_reissues ('
                 'id TEXT PRIMARY KEY REFERENCES reference_target_intents(id), '
@@ -34,11 +36,126 @@ class ReferenceTargetAnalysis(OriginalReferenceTargetAnalysis):
                 db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_reference_target_unknown_reissues_{action} '
                     f'BEFORE {action} ON reference_target_unknown_reissues BEGIN '
                     "SELECT RAISE(ABORT,'immutable reference target reissue'); END")
+            db.execute('CREATE TABLE IF NOT EXISTS reference_target_original_revisions ('
+                'id TEXT PRIMARY KEY REFERENCES reference_target_intents(id),'
+                'parent_request TEXT NOT NULL UNIQUE REFERENCES reference_target_intents(id),'
+                'task_id TEXT NOT NULL REFERENCES reference_target_scopes(task_id),'
+                'document TEXT NOT NULL,document_sha256 TEXT NOT NULL)')
+            for action in ('UPDATE','DELETE'):
+                db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_reference_target_original_revisions_{action} '
+                    f'BEFORE {action} ON reference_target_original_revisions BEGIN '
+                    "SELECT RAISE(ABORT,'immutable original-source target revision'); END")
+
+    def _input(self,identifier,*,active=True):
+        original=self.original_revision_context.get()
+        if original is not None and original['task_id']==identifier:
+            return self._historical_input(identifier,original,active=active)
+        return super()._input(identifier,active=active)
 
     def _generation_context(self,identifier,request_id,client,connection_revision,credential_generation):
         reissued=self._authorized_reissue_context(identifier,request_id,client,connection_revision,credential_generation)
         if reissued is not None:return reissued
+        revision=self._original_revision(identifier,request_id=request_id)
+        if revision is not None:
+            return self._original_revision_generation(identifier,request_id,revision,client,
+                connection_revision,credential_generation)
         return super()._generation_context(identifier,request_id,client,connection_revision,credential_generation)
+
+    def _original_revision(self,identifier,*,request_id=None,parent_request=None):
+        with self.tasks.transaction() as db:
+            self._task(db,identifier)
+            row=db.execute('SELECT * FROM reference_target_original_revisions WHERE '+
+                ('id=?' if request_id is not None else 'parent_request=?'),
+                (task_id(request_id or parent_request),)).fetchone()
+        if row is None:return None
+        value=json.loads(row['document'])
+        if (row['task_id']!=identifier or value['task_id']!=identifier or value['request_id']!=row['id']
+                or value['parent_request']!=row['parent_request']
+                or sha256(canonical(value))!=row['document_sha256']):
+            raise TaskError('原来源修订关系摘要或本任务身份不一致。')
+        return value
+
+    def _original_revision_proof(self,identifier,parent_request,client,connection_revision,credential_generation):
+        saved=self._stored(identifier,parent_request)
+        if saved is None or saved[2] is None or saved[2]['state'] not in {'invalid_output','unavailable'}:
+            raise TaskError('只允许基于原来源已知完整失败答复修订；未知请求不能修订或重发。')
+        row,parent,receipt,_events=saved
+        reissued=self._unknown_reissue(identifier,request_id=parent_request)
+        revised=self._original_revision(identifier,request_id=parent_request)
+        if not ((reissued and parent.get('unknown_reissue')) or (revised and parent.get('original_source_revision'))):
+            raise TaskError('本入口只修订已保留原来源的恢复答复，不能借用其他来源或任务。')
+        self._historical_input(identifier,parent,active=True)
+        model=self._model(identifier,client,connection_revision,credential_generation)
+        if model!=parent['model_binding']:
+            raise TaskError('原来源修订的模型、授权、配置或凭据版本已变化。')
+        call=client.calls.lookup(parent_request) or {};model_receipt=call.get('receipt') or {}
+        if (call.get('request_sha256')!=parent['request_sha256']
+                or model_receipt.get('request_sha256')!=parent['request_sha256']
+                or model_receipt.get('state')!='completed' or model_receipt.get('http_status')!=200
+                or model_receipt.get('finish_reason')!='stop' or model_receipt.get('transport_attempts')!=1
+                or model_receipt.get('provider')!='deepseek' or model_receipt.get('requested_model')!=client.model
+                or model_receipt.get('output_sha256')!=sha256(canonical(model_receipt.get('structured_output')))
+                or {k:v for k,v in model_receipt.items() if k in _MODEL_RECEIPT_FIELDS}!=receipt['model_receipt']):
+            raise TaskError('原完整模型答复、用量或失败回执未通过核验；未修订或重发。')
+        validate_prepared_messages(STAGE,parent['messages'],parent['input'])
+        return dict(parent=parent,parent_context_sha256=row['document_sha256'],
+            parent_receipt_sha256=row['receipt_sha256'],parent_model_call_sha256=sha256(canonical(call)),
+            original_input_sha256=sha256(canonical(parent['input'])),
+            source_output_sha256=model_receipt['output_sha256'])
+
+    def _original_revision_generation(self,identifier,request_id,relation,client,connection_revision,credential_generation):
+        proof=self._original_revision_proof(identifier,relation['parent_request'],client,
+            connection_revision,credential_generation)
+        fixed={key:proof[key] for key in ('parent_context_sha256','parent_receipt_sha256',
+            'parent_model_call_sha256','original_input_sha256','source_output_sha256')}
+        if any(relation.get(key)!=value for key,value in fixed.items()):
+            raise TaskError('原来源修订的父答复或原文绑定已变化；未重建方案。')
+        token=self.original_revision_context.set(proof['parent'])
+        try:
+            context=super()._generation_context(identifier,request_id,client,connection_revision,credential_generation)
+        finally:self.original_revision_context.reset(token)
+        if (context['input']!=proof['parent']['input']
+                or context.get('revision_parent',{}).get('parent_request')!=relation['parent_request']
+                or context['revision_parent']['source_output_sha256']!=proof['source_output_sha256']):
+            raise TaskError('修订必须包含声明父稿的完整答复和原始来源，不能推倒重写。')
+        return {**context,'original_source_revision':dict(parent_request=relation['parent_request'],
+            relation_sha256=sha256(canonical(relation)))}
+
+    def revise_original(self,identifier,request_id,client,*,parent_request,connection_revision,credential_generation):
+        task_id(identifier);task_id(request_id);task_id(parent_request)
+        if request_id==parent_request:raise TaskError('修订需新版本编号；原稿与费用不能覆盖。')
+        with self._lease(identifier) as acquired:
+            if not acquired:
+                prior=self._original_revision(identifier,parent_request=parent_request)
+                if prior and prior['request_id']==request_id:return self.get(identifier,request_id)
+                raise TaskError('本任务正在核定或修订；未重复发送。')
+            prior=self._original_revision(identifier,parent_request=parent_request)
+            if prior:
+                if prior['request_id']!=request_id:raise TaskError('这份父稿已有后继修订，不能重复另建版本。')
+            else:
+                proof=self._original_revision_proof(identifier,parent_request,client,connection_revision,credential_generation)
+                relation=dict(version=1,task_id=identifier,request_id=request_id,parent_request=parent_request,
+                    operation='revise_complete_original_source_answer',original_source_preserved=True,
+                    automatic_retry=False,at=datetime.now(timezone.utc).isoformat(),
+                    **{key:proof[key] for key in ('parent_context_sha256','parent_receipt_sha256',
+                        'parent_model_call_sha256','original_input_sha256','source_output_sha256')})
+                context=self._original_revision_generation(identifier,request_id,relation,client,
+                    connection_revision,credential_generation)
+                with self.tasks.transaction() as db:
+                    self._task(db,identifier,active=True)
+                    if self._pending(db,identifier):raise TaskError('本任务另有未知或待定请求；未修订。')
+                    if db.execute('SELECT 1 FROM reference_target_intents WHERE id=?',(request_id,)).fetchone():
+                        raise TaskError('修订编号已有其他意图；不能覆盖。')
+                    limit=db.execute('SELECT max_suggestions FROM reference_target_scopes WHERE task_id=?',(identifier,)).fetchone()[0]
+                    count=db.execute('SELECT count(*) FROM reference_target_intents WHERE task_id=?',(identifier,)).fetchone()[0]
+                    if count>=limit:raise TaskError('原任务最多三次目标建议已用完；未增加第四轮。')
+                    db.execute('INSERT INTO reference_target_intents VALUES (?,?,?,?,?)',(request_id,identifier,
+                        canonical(context).decode(),sha256(canonical(context)),relation['at']))
+                    db.execute('INSERT INTO reference_target_original_revisions VALUES (?,?,?,?,?)',(request_id,
+                        parent_request,identifier,canonical(relation).decode(),sha256(canonical(relation))))
+                    self._event(db,request_id,'prepared','沿用原 P 和完整前稿，仅修订已指出的问题；原失败与费用保留。')
+        return self.analyze(identifier,request_id,client,connection_revision=connection_revision,
+            credential_generation=credential_generation)
 
     def _unknown_reissue(self,identifier,*,request_id=None,parent_request=None):
         with self.tasks.transaction() as db:
@@ -235,24 +352,37 @@ class ReferenceTargetAnalysis(OriginalReferenceTargetAnalysis):
         state = original_state
         reissued=self._unknown_reissue(identifier,request_id=request_id)
         superseded=self._unknown_reissue(identifier,parent_request=request_id)
+        revision=self._original_revision(identifier,request_id=request_id)
+        successor=self._original_revision(identifier,parent_request=request_id)
+        historical=bool(reissued or revision)
         blocking=original_state in {'prepared','dispatching','unknown'}
         if superseded:
             child=self._stored(identifier,superseded['request_id'])
             if child and child[2] and child[2]['state']!='unknown':blocking=False
         if original_state == 'completed':
             try:
-                current=(self._historical_input(identifier,context) if reissued
+                current=(self._historical_input(identifier,context) if historical
                     else self._input(identifier,active=False))
                 if current != context['input']:
                     state = 'source_unavailable'
             except Exception:
                 state = 'source_unavailable'
+        with self.tasks.transaction() as db:
+            count=db.execute('SELECT count(*) FROM reference_target_intents WHERE task_id=?',(identifier,)).fetchone()[0]
+            limit=db.execute('SELECT max_suggestions FROM reference_target_scopes WHERE task_id=?',(identifier,)).fetchone()[0]
+            pending=self._pending(db,identifier)
+        can_revise=(historical and original_state in {'invalid_output','unavailable'}
+            and (receipt.get('model_receipt') or {}).get('state')=='completed'
+            and count<limit and not pending and successor is None)
         return dict(**_FLAGS, task_id=identifier, request_id=request_id, state=state,
             original_state=original_state,
             at=row['at'], context_sha256=row['document_sha256'], source_binding=(context['input'] or {}).get('source_binding'),
             scientific_adapter=context['scientific_adapter'],
             paper=(context['input'] or {}).get('paper'), events=events, receipt=receipt,
-            blocking=blocking,original_source_preserved=bool(reissued),historical_source=bool(reissued),
+            blocking=blocking,original_source_preserved=historical,historical_source=historical,
+            can_revise_original=can_revise,original_revision_of=revision['parent_request'] if revision else None,
+            original_revision=(dict(request_id=revision['request_id'],parent_request=revision['parent_request']) if revision
+                else dict(request_id=successor['request_id'],parent_request=request_id) if successor else None),
             unknown_reissue=(dict(request_id=reissued['request_id'],unknown_reissue_of=reissued['unknown_reissue_of'],
                 retain_unknown_charge=True,authorization_kind=reissued['authorization_kind']) if reissued
                 else dict(request_id=superseded['request_id'],unknown_reissue_of=request_id,
@@ -338,7 +468,7 @@ class ReferenceTargetAnalysis(OriginalReferenceTargetAnalysis):
                     message='固定 P、目标来源、连接或授权已变化；未继续发送。')
             with self.tasks.transaction() as db: self._event(db, request_id, 'dispatching')
             try:
-                if context.get('unknown_reissue'):
+                if context.get('unknown_reissue') or context.get('original_source_revision'):
                     validate_prepared_messages(STAGE,context['messages'],context['input'])
                     client.complete_json(request_id,context['messages'],expected_request_sha256=context['request_sha256'])
                 else:

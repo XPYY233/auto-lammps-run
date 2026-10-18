@@ -80,3 +80,14 @@ test('stale inventory preserves original recovery controls but prohibits a fresh
  assert.ok(f.all().some(x=>x.textContent==='按原内容恢复这次目标核定（一次）'));
  assert.equal(f.calls.filter(x=>x.data).length,0);
 });
+test('known failure can revise its full original proposal once within the same three-round cap',async()=>{
+ const parent='d'.repeat(32),record={state:'unavailable',request_id:parent,original_source_preserved:true,
+  receipt:{model_receipt:{state:'completed'},message:'Exact citation mismatch'}};
+ const f=fixture([{state:'unknown',request_id:'e'.repeat(32)},record]);await f.render({historyOnly:true});
+ const revise=f.all().find(x=>x.textContent==='基于完整前稿修订原核定（消耗下一轮）');assert.ok(revise);
+ await revise.onclick();const post=f.calls.find(x=>x.data);
+ assert.equal(post.path,`/api/tasks/${ID}/reference-target-analysis/${parent}/revise-original`);
+ assert.deepEqual(Object.keys(post.data),['request_id']);
+ const capped=fixture([{state:'unknown'},record,{...record,request_id:'f'.repeat(32)}]);await capped.render({historyOnly:true});
+ assert.equal(capped.all().some(x=>x.textContent==='基于完整前稿修订原核定（消耗下一轮）'),false);
+});

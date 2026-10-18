@@ -3598,6 +3598,15 @@ async function renderReferenceTargetAnalysis(panel,report,identity,{historyOnly=
      try{await api(`/api/tasks/${id}/reference-target-analysis/${record.request_id}/review`,{});if(alive())await refresh();}
      catch(error){if(alive()){item.append(node('p','原答复复核未完成：'+error.message,'error'));check.disabled=false;}}};item.append(check);
    }
+   if(record===latest&&record.original_source_preserved&&['invalid_output','unavailable'].includes(record.state)&&
+      record.receipt?.model_receipt?.state==='completed'&&records.length<3){
+    const revise=node('button','基于完整前稿修订原核定（消耗下一轮）');
+    item.append(node('p','保留原 P、完整前稿和具体错误，让应用 AI 修订；不会重新提取 P 或清空三轮记录。','form-note'));
+    const revisionRequest=crypto.randomUUID().replaceAll('-','');
+    revise.onclick=async()=>{if(!alive()||revise.disabled)return;revise.disabled=true;
+     try{await api(`/api/tasks/${id}/reference-target-analysis/${record.request_id}/revise-original`,{request_id:revisionRequest});if(alive())await refresh();}
+     catch(error){if(alive()){item.append(node('p','原来源修订需查看记录：'+error.message,'error'));await refresh();}}};item.append(revise);
+   }
    const recovery=(result.unknown_reissues||[]).find(row=>row.unknown_reissue_of===record.request_id);
    if(recovery){
     item.append(node('p','恢复只重发原消息和原 P 来源，保留原未知调用与未确定费用，并计入本任务三次核定上限。新调用仍未知时不会自动再发。','form-note'));

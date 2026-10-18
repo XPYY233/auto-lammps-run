@@ -1681,6 +1681,14 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             connection_revision=context['connection_revision'],
             credential_generation=context['credential_generation'])
 
+    @app.post('/api/tasks/{identifier}/reference-target-analysis/{parent_request}/revise-original')
+    def revise_original_reference_target(identifier: str,parent_request: str,data: ReferenceTargetAnalysisInput):
+        require_open_task(identifier)
+        context=workbench_context(identifier)
+        return reference_targets.revise_original(identifier,data.request_id,context['client'],
+            parent_request=parent_request,connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'])
+
     @app.get('/api/tasks/{identifier}/reference-scopes')
     def reference_scope_history(identifier: str):
         return reference_scopes.status(identifier)
