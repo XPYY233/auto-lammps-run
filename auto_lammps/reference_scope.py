@@ -202,14 +202,14 @@ class ReferenceScopeService:
             raise ReferenceScopeUnavailable('target_request_unavailable', '目标核定请求尚未形成完整回执。')
         row, context, receipt, _events = saved
         with self.tasks.transaction() as db:
-            unknown = db.execute('SELECT 1 FROM reference_target_intents i LEFT JOIN reference_target_receipts r '
-                'ON r.id=i.id WHERE i.task_id=? AND (r.id IS NULL OR json_extract(r.document,"$.state")="unknown")',
-                (identifier,)).fetchone()
+            unknown = self._pending(db, identifier)
         if unknown:
             raise ReferenceScopeUnavailable('target_request_unknown', '目标核定仍有未知请求，请先核对。')
         evidence = reference_target_input(context['input'])
-        if (context['input'] != evidence or context['task_id'] != identifier
-                or self.targets._input(identifier, active=False) != evidence):
+        source = (self.targets.scope_source(identifier, target_request_id)
+                  if callable(getattr(self.targets, 'scope_source', None))
+                  else self.targets._input(identifier, active=False))
+        if (context['input'] != evidence or context['task_id'] != identifier or source != evidence):
             raise ReferenceScopeUnavailable('source_unavailable', '完整 P 输入或论文来源已变化，请重新查看。')
         model, binding = receipt['model_receipt'], context['model_binding']
         if (model.get('state') != 'completed' or model.get('provider') != 'deepseek'
@@ -283,6 +283,27 @@ class ReferenceScopeService:
             controller_sha256=context['controller_sha256'])
         return report, provenance
 
+    def _pending(self, db, identifier):
+        # Recovery owns the immutable, explicit disposition of unknown calls.
+        # Reuse that check; a raw UNKNOWN SQL filter would block forever even
+        # after an authorized child has a verified, known terminal receipt.
+        check = getattr(self.targets, '_pending', None)
+        if callable(check):
+            return check(db, identifier)
+        return bool(db.execute('SELECT 1 FROM reference_target_intents i LEFT JOIN reference_target_receipts r '
+            'ON r.id=i.id WHERE i.task_id=? AND (r.id IS NULL OR json_extract(r.document,"$.state")="unknown")',
+            (identifier,)).fetchone())
+
+    def _source_view(self, identifier, target_request_id):
+        # Display only; never add fields to the pinned scope/provenance schema.
+        if not callable(getattr(self.targets, 'scope_source', None)):
+            return {}
+        target = self.targets.get(identifier, target_request_id) or {}
+        if target.get('historical_source') is True and target.get('original_source_preserved') is True:
+            return dict(historical_source=True, original_source_preserved=True,
+                        source_version_status='historical_original_snapshot')
+        return {}
+
     def preview(self, identifier, target_request_id, selected_ids, exclusion_reason='', *, target_review_id=None):
         task = self._task(task_id(identifier), active=True)
         report, provenance = self._analysis(identifier, target_request_id, target_review_id)
@@ -295,7 +316,8 @@ class ReferenceScopeService:
             frozen_record_sha256=task['frozen_sha256'], provenance=provenance, prior_execution=history,
             **_closure(report, selected_ids, exclusion_reason))
         return dict(task_id=identifier, scope=scope, scope_sha256=sha256(canonical(scope)),
-                    can_prepare_A_plan=not scope['blockers'], **FLAGS)
+                    can_prepare_A_plan=not scope['blockers'], **FLAGS,
+                    **self._source_view(identifier, target_request_id))
 
     def _stored(self, identifier, scope_id):
         with self.tasks.transaction() as db:
@@ -343,7 +365,8 @@ class ReferenceScopeService:
             reason = '任务已暂停或结束；旧范围仍可查看。'
         return dict(**value, original_state='recorded', state=state, receipt_sha256=receipt_sha256,
                     disabled_reason=reason,
-                    can_prepare_A_plan=state == 'recorded' and not value['scope']['blockers'] and not inactive)
+                    can_prepare_A_plan=state == 'recorded' and not value['scope']['blockers'] and not inactive,
+                    **self._source_view(identifier, value['scope']['provenance']['target_request_id']))
 
     def history(self, identifier):
         self._task(task_id(identifier))
@@ -396,9 +419,7 @@ class ReferenceScopeService:
             if (target is None or target['context_sha'] != source['target_context_sha256']
                     or target['receipt_sha'] != source['target_receipt_sha256']):
                 raise StaleTask('目标核定回执已变化，未保存范围。')
-            if db.execute('SELECT 1 FROM reference_target_intents i LEFT JOIN reference_target_receipts r '
-                'ON r.id=i.id WHERE i.task_id=? AND (r.id IS NULL OR json_extract(r.document,"$.state")="unknown")',
-                (identifier,)).fetchone():
+            if self._pending(db, identifier):
                 raise ReferenceScopeUnavailable('target_request_unknown', '目标核定仍有未知请求，未保存范围。')
             existing = db.execute('SELECT id FROM reference_scope_receipts WHERE id=?', (scope_id,)).fetchone()
             if existing is not None:

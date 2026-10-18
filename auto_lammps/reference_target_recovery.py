@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from .deepseek import request_body
+from .deepseek import DeepSeekConfig,request_body
 from .manifest import canonical, sha256
 from .reference_targets import (ReferenceTargetAnalysis as OriginalReferenceTargetAnalysis,
     ReferenceTargetUnavailable, reference_target_input, _FLAGS, _MODEL_RECEIPT_FIELDS, STAGE,
@@ -219,6 +219,74 @@ class ReferenceTargetAnalysis(OriginalReferenceTargetAnalysis):
                 or old['paper']!={key:rows[0][key] for key in ('title','doi')}):
             raise TaskError('原目标请求与当前任务的唯一论文身份不一致。')
         return supplied
+
+    def scope_source(self,identifier,request_id):
+        """Verify the retained disposition chain without models or credentials."""
+        saved=self._stored(identifier,task_id(request_id))
+        if saved is None or saved[2] is None:raise TaskError('目标核定的完整历史回执尚未保留。')
+        final_context=saved[1];context=final_context;current=request_id;visited=set();replays=0
+        historical=bool(self._unknown_reissue(identifier,request_id=request_id)
+            or self._original_revision(identifier,request_id=request_id))
+        if not historical:return self._input(identifier,active=False)
+        while True:
+            if current in visited or len(visited)>=3:raise TaskError('原来源关系循环或超过原任务三轮。')
+            visited.add(current)
+            row,context,receipt,_events=self._stored(identifier,current)
+            if reference_target_input(context['input'])!=final_context['input']:
+                raise TaskError('原恢复与修订链的完整 P 快照不一致。')
+            binding=context['model_binding'];model=receipt['model_receipt']
+            body=request_body(DeepSeekConfig(**binding['config']),context['messages'],
+                model=binding['model'],thinking=binding['thinking'])
+            if (sha256(body)!=context['request_sha256'] or model.get('request_sha256')!=context['request_sha256']
+                    or model.get('provider')!='deepseek' or model.get('requested_model')!=binding['model']):
+                raise TaskError('原恢复或修订的模型正文与已保存回执不一致。')
+            validate_prepared_messages(STAGE,context['messages'],context['input'])
+            replay=self._unknown_reissue(identifier,request_id=current)
+            revision=self._original_revision(identifier,request_id=current)
+            if replay:
+                if revision:raise TaskError('同一版本不能同时是重发与修订。')
+                parent=self._stored(identifier,replay['unknown_reissue_of'])
+                if parent is None or parent[2] is None or parent[2]['state']!='unknown':
+                    raise TaskError('原显式重发缺少保留的未知父请求。')
+                parent_row,parent_context,parent_receipt,_=parent
+                expected={**deepcopy(parent_context),'unknown_reissue':dict(
+                    unknown_reissue_of=replay['unknown_reissue_of'],authorization_sha256=sha256(canonical(replay)))}
+                if (context!=expected or replay.get('supplier_checked') is not True
+                        or replay.get('retain_unknown_charge') is not True or replay.get('automatic_retry') is not False
+                        or replay.get('authorization_kind')!='supplier_checked_unknown_reissue_once'
+                        or replay['original_context_sha256']!=parent_row['document_sha256']
+                        or replay['original_receipt_sha256']!=parent_row['receipt_sha256']
+                        or replay['original_input_sha256']!=sha256(canonical(parent_context['input']))
+                        or replay['original_request_sha256']!=parent_context['request_sha256']):
+                    raise TaskError('原未知调用的显式处置、父来源或费用保留关系不一致。')
+                replays+=1;current=replay['unknown_reissue_of'];continue
+            if revision:
+                parent=self._stored(identifier,revision['parent_request'])
+                if parent is None or parent[2] is None or parent[2]['state'] not in {'invalid_output','unavailable'}:
+                    raise TaskError('原来源修订缺少已知完整失败父稿。')
+                parent_row,parent_context,parent_receipt,_=parent
+                previous=context.get('revision_parent') or {};answer=previous.get('complete_previous_answer')
+                if (context.get('original_source_revision')!=dict(parent_request=revision['parent_request'],
+                        relation_sha256=sha256(canonical(revision)))
+                        or context['model_binding']!=parent_context['model_binding']
+                        or revision.get('operation')!='revise_complete_original_source_answer'
+                        or revision.get('original_source_preserved') is not True
+                        or revision.get('automatic_retry') is not False
+                        or revision['parent_context_sha256']!=parent_row['document_sha256']
+                        or revision['parent_receipt_sha256']!=parent_row['receipt_sha256']
+                        or revision['original_input_sha256']!=sha256(canonical(parent_context['input']))
+                        or revision['source_output_sha256']!=parent_receipt['model_receipt'].get('output_sha256')
+                        or previous.get('parent_request')!=revision['parent_request']
+                        or previous.get('parent_context_sha256')!=parent_row['document_sha256']
+                        or previous.get('parent_receipt_sha256')!=parent_row['receipt_sha256']
+                        or sha256(canonical(answer))!=revision['source_output_sha256']):
+                    raise TaskError('原来源修订、完整前稿或父回执绑定不一致。')
+                current=revision['parent_request'];continue
+            if (replays!=1 or receipt['state']!='unknown' or model.get('state')!='unknown'
+                    or context.get('unknown_reissue') or context.get('original_source_revision')):
+                raise TaskError('原来源关系未回溯到唯一已处置的未知请求。')
+            break
+        return self._historical_input(identifier,final_context)
 
     def _unknown_reissue_context(self,identifier,parent_request,client,connection_revision,credential_generation):
         saved=self._stored(identifier,parent_request)
