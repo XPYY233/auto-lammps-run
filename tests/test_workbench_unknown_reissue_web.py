@@ -1,10 +1,13 @@
 """HTTP authorization boundary; synthetic evidence and zero model/HPC dispatch."""
 import unittest
+import importlib.util
 from unittest.mock import patch
 import test_workbench_targets_web as fixture
 from auto_lammps.workbench_jobs import WorkbenchExtractionJobs
 
 
+@unittest.skipUnless(importlib.util.find_spec('auto_research') is not None,
+    'separately installed literature workbench is optional')
 class UnknownReissueWebTests(unittest.TestCase):
     def setUp(self):
         self.f = fixture.WorkbenchTargetsWebTests()
