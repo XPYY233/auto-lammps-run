@@ -22,4 +22,3 @@ class OutputAnalysisMethodWiringTests(unittest.TestCase):
             provider=factory.call_args.kwargs['reference_method_sources']
             self.assertEqual(provider('a'*32),expected)
             workspace.cached_analysis_sources.assert_called_once_with('a'*32)
-
