@@ -80,6 +80,34 @@ class AuthorSelectedWorkspaceTests(unittest.TestCase):
         self.assertEqual(context['request']['selected'],sorted(self.fx.choices(3),key=lambda row:row['path']))
         self.assertEqual((Path(self.fx.old['remote_directory'])/'result.json').read_bytes(),self.fx.original_bytes)
 
+    def test_checked_subset_with_unresolved_environment_is_acquired_without_promoting_readiness(self):
+        pending=self.selections[(self.task,self.selection_id)]
+        pending.update(status='needs_clarification',missing=['Python packages and the complete invocation remain unverified.'],
+            limitations=['No scientific execution has been authorized.'],source_complete=False,execution_ready=False,
+            scientific_applicability_verified=False,physical_evaluation_performed=False)
+        before=deepcopy(pending)
+        result=self.acquire()
+        self.assertEqual(result['latest']['state'],'selected_complete')
+        self.assertFalse(result['latest']['source_complete'])
+        self.assertFalse(result['execution_authorized'])
+        self.assertFalse(result['physical_evaluation_performed'])
+        completed=self.service.completed(self.task)
+        self.assertEqual(completed[0][1]['selection_report'],before)
+        self.assertEqual(completed[0][1]['selection_report']['status'],'needs_clarification')
+        self.assertEqual(self.selections[(self.task,self.selection_id)],before)
+        self.assertEqual(self.actions,['acquire'])
+
+    def test_empty_clarification_invalid_unknown_and_readiness_claims_never_fetch(self):
+        original=deepcopy(self.report)
+        for edit in [dict(status='needs_clarification',selections=[],missing=['No file known.']),
+                dict(status='needs_clarification',missing=[]),dict(status='invalid_output'),
+                dict(status='unknown'),dict(status='failed'),dict(source_complete=True),dict(execution_ready=True)]:
+            self.selections[(self.task,self.selection_id)]={**deepcopy(original),**edit}
+            with self.subTest(edit=edit),self.assertRaises(TaskError):self.acquire()
+        self.assertEqual(self.actions,[])
+        self.assertEqual(self.factory_calls,0)
+        self.assertEqual(self.service.status(self.task)['history'],[])
+
     def test_cross_task_operation_or_model_selection_is_rejected_before_acquisition(self):
         self.acquire();calls=len(self.fx.blobs.calls)
         with self.assertRaisesRegex(TaskError,'另一任务'):

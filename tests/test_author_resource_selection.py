@@ -230,6 +230,36 @@ class AuthorResourceSelectionTests(unittest.TestCase):
         self.assertFalse(value['report']['source_complete'])
         self.assertEqual(self.transport.call_count,1)
 
+    def test_valid_nonempty_clarification_can_acquire_without_resolving_environment(self):
+        self.proposal.update(status='needs_clarification',missing=[
+            'The Python environment and complete author invocation remain unverified.'])
+        value=self.prepare()
+        self.assertEqual(value['state'],'needs_clarification',value)
+        before=deepcopy(self.service.history(self.task))
+        fetched=self.service.selection(self.task,'7'*32)
+        self.assertEqual(fetched,value['report'])
+        self.assertEqual(fetched['status'],'needs_clarification')
+        self.assertEqual(fetched['missing'],self.proposal['missing'])
+        self.assertTrue(fetched['paths'])
+        for key in ('source_complete','execution_ready','execution_authorized',
+                    'scientific_applicability_verified','physical_evaluation_performed'):
+            self.assertIs(fetched[key],False)
+        self.assertEqual(self.service.history(self.task),before)
+        self.assertEqual(self.transport.call_count,1)
+        self.assertEqual(self.fx.service.status(self.task)['used_rounds'],2)
+
+    def test_empty_clarification_invalid_and_unknown_answers_cannot_acquire(self):
+        self.proposal.update(status='needs_clarification',selections=[],missing=['No concrete subset is selectable.'])
+        self.assertEqual(self.prepare()['state'],'needs_clarification')
+        with self.assertRaisesRegex(TaskError,'非空'):self.service.selection(self.task,'7'*32)
+        self.proposal['extra']='Invalid but retained'
+        self.assertEqual(self.prepare('8'*32,revision_note='Fix concrete selection')['state'],'invalid_output')
+        with self.assertRaises(TaskError):self.service.selection(self.task,'8'*32)
+        self.transport.side_effect=TimeoutError('synthetic unknown')
+        self.assertEqual(self.prepare('9'*32,revision_note='Correct invalid schema')['state'],'unknown')
+        with self.assertRaises(TaskError):self.service.selection(self.task,'9'*32)
+        self.assertEqual(self.transport.call_count,3)
+
     def test_current_connection_change_blocks_new_context_and_old_ledger_cannot_be_replaced(self):
         self.fx.connection['credential_generation']=2
         with self.assertRaisesRegex(TaskError,'变化'):self.prepare()

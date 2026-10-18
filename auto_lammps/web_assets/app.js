@@ -3353,7 +3353,8 @@ async function renderAuthorResourceSelections(id,parent,state){
    for(const file of item.report?.files||[])detail.append(node('p',`${file.path} · ${file.size} B · SHA-256 ${file.sha256}`));
    for(const error of item.report?.failures||[])detail.append(node('p',error.reason,'form-note'));panel.append(detail);
   }
-  const selected=data.latest?.state==='selected'?data.latest:null;
+  const selected=['selected','needs_clarification'].includes(data.latest?.state)&&data.latest?.report?.selections?.length>0?data.latest:null;
+  if(selected?.state==='needs_clarification')panel.append(node('p','已有具体文件可以取件；其他缺项仍待澄清，取件不会批准运行或改变科学状态。','form-note'));
   if(selected||acquired?.recoverable){
    const fetch=node('button',state.selectedFetchPending?'正在获取所选原件…':acquired?.recoverable?'只核对原所选原件获取请求':'把 AI 所选原件获取到 HPC','quiet');
    fetch.disabled=Boolean(state.selectionPending)||Boolean(state.selectedFetchPending)||(!acquired?.recoverable&&data.acquisitions?.history?.some(item=>item.selection_request_id===selected?.request_id));

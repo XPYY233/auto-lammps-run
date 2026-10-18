@@ -177,3 +177,18 @@ test('hidden or detached task controls cannot start selection or acquisition',as
  await button(s,SELECT).onclick();await button(s,FETCH).onclick();
  assert.equal(s.calls.length,1);assert.equal(s.uuids(),0);
 });
+
+test('validated nonempty clarified selection offers fetching while keeping all unresolved needs',async()=>{
+ const s=setup(),row=selected({state:'needs_clarification'});
+ await open(s,status({used_rounds:1,history:[row],latest:row}));
+ assert.ok(button(s,FETCH));assert.match(text(s.panel()),/其他缺项仍待澄清/);
+ assert.match(text(s.panel()),/Original environment remains unverified/);
+ const pending=button(s,FETCH).onclick();
+ assert.deepEqual(plain(s.calls.at(-1).body),{request_id:'d'.repeat(32),selection_request_id:REQUEST});
+ await finish(s,pending,{latest:null},status({used_rounds:1,history:[row],latest:row}));
+});
+test('empty clarified and invalid nonempty selections never offer fetching',async()=>{
+ for(const row of [selected({state:'needs_clarification',report:{selections:[],missing:['Still unresolved.']}}),selected({state:'invalid_output'})]){
+  const s=setup();await open(s,status({used_rounds:1,history:[row],latest:row}));assert.equal(button(s,FETCH),undefined);
+ }
+});

@@ -62,7 +62,14 @@ class AuthorSelectedResourceWorkspace:
             acquisition_receipt_sha256=sha256(canonical(raw['acquisition_receipt'])),
             tree_report_sha256=sha256(canonical(raw['tree_report'])))
         if (not isinstance(report,dict) or any(report.get(key)!=value for key,value in expected.items())
-                or report.get('status')!='selected' or report.get('scope')!='reference_only'
+                or report.get('status') not in {'selected','needs_clarification'}
+                or not isinstance(report.get('selections'),list) or not report['selections']
+                or (report.get('status')=='needs_clarification'
+                    and (not isinstance(report.get('missing'),list) or not report['missing']))
+                or any(report.get(key,False) is not False for key in
+                    ('source_complete','execution_ready','physical_evaluation_performed',
+                     'scientific_applicability_verified'))
+                or report.get('scope')!='reference_only'
                 or report.get('B_input') is not False or report.get('execution_authorized') is not False
                 or raw['tree_request']['receipt_sha256']!=expected['acquisition_receipt_sha256']):
             raise TaskError('原模型选择与当前固定仓库、版本或清单回执不同；未取件。')
