@@ -119,6 +119,20 @@ class RetainedBridgeContractTests(unittest.TestCase):
         with patch.object(bridge,'MAX_BYTES',3),self.assertRaises(AnalysisError):bridge.check_files({'source1':b'1\n2\n'})
         with self.assertRaises(AnalysisError):bridge.describe(b'1\x00\n')
 
+    def test_empty_source_retains_identity_and_zero_rows_but_is_not_numeric_data(self):
+        inventory,preview=bridge.describe(b'')
+        self.assertTrue(inventory['empty'])
+        self.assertEqual(inventory['format_hint'],'empty')
+        self.assertEqual((inventory['size'],inventory['line_count'],inventory['numeric_line_count']),(0,0,0))
+        self.assertEqual(inventory['sha256'],sha256(b''))
+        self.assertEqual(preview,'')
+        self.assertEqual(inventory['preview']['lines'],[])
+        files={'source1':b''}
+        self.assertEqual(set(bridge.check_files(files)),{'source1'})
+        with self.assertRaisesRegex(AnalysisError,'incomplete final line'):
+            bridge.execute_plan(mixed_plan(files,5),files)
+        self.assertIn('Current ready plans do not accept empty',str(bridge.tool_context()['contract']))
+
     def test_full_numeric_native_result_uses_interior_rows_and_exact_selection(self):
         data=scalar_data();files={'source1':data};plan=mixed_plan(files)
         result=bridge.execute_plan(plan,files)

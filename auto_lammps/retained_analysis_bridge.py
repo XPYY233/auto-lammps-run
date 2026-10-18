@@ -33,7 +33,7 @@ class NativeExecutionError(RuntimeError):
 
 def describe(data):
     """Scan every physical line; expose only bounded, labeled source excerpts."""
-    if type(data) is not bytes or not data or len(data) > MAX_BYTES:
+    if type(data) is not bytes or len(data) > MAX_BYTES:
         raise AnalysisError('retained_source_byte_limit')
     try:
         content = data.decode('ascii')
@@ -115,10 +115,11 @@ def describe(data):
         parts.append(item['text'])
         previous = item['line']
     inventory = dict(size=len(data), sha256=sha256(data), line_count=len(lines),
-        numeric_line_count=numeric_rows, format_hint='lammps_dump' if frame_count else 'numeric_text',
+        numeric_line_count=numeric_rows, format_hint='empty' if not data else 'lammps_dump' if frame_count else 'numeric_text',
         preview=dict(only_preview=True, complete_source_shown=len(excerpts)==len(lines)
             and all(item['complete_line'] for item in excerpts), lines=excerpts),
         final_line_terminated=data.endswith(b'\n'))
+    if not data:inventory['empty']=True
     if frame_count:
         inventory.update(frame_count=frame_count, first_timestep=timesteps[0] if timesteps else None,
             last_timestep=timesteps[-1] if timesteps else None, atom_column_sets=atom_headers,
@@ -346,6 +347,7 @@ def tool_context():
             numeric_cells_per_file=500000,operations=analysis.MAX_OPERATIONS,figures=16),
         contract=['Previews are for method/column selection only. Full retained source bytes are parsed for all calculations.',
             'Every input must have an explicit parser and operation; no silently skipped input, automatic frame/window, unit inference or source reduction.',
+            'Empty files remain in the source inventory and verified bytes with their SHA and zero lines. Current ready plans do not accept empty numeric/trajectory tables or provide an empty-source exclusion: return needs_evidence rather than omit an empty source or invent samples.',
             'The plan is selected after collection and is not a pre-execution frozen analysis or scientific acceptance.',
             'Numeric labeled tables require exact # columns: and # units: headers. Native scalar tables require both exact headers and complete integer cadence.',
             'Source parser/mapping and every operation require authenticated method_evidence. Quotations establish provenance, not scientific correctness.',
