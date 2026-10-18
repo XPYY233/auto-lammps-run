@@ -112,6 +112,7 @@ class WorkbenchRuntime:
     native_paper_sources_reader: object = None
     native_known_failure_planner: object = None
     native_known_failure_creator: object = None
+    native_unknown_reissue_creator: object = None
 
 
 def _reference_paper_sources(pages):
@@ -157,7 +158,7 @@ def _reference_paper_sources(pages):
 
 
 def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
-                                session_id):
+                                session_id, explicit_reissue_store=None):
     """Compose existing exported classes; never open another project's settings.
 
     ``auto_research`` must already be installed in this service's Python runtime.
@@ -300,6 +301,84 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                         raise
             return {'checkpoint': checkpoint, 'execution': state, 'job': decoded,
                 'replacement_index': plan['replacement_index'], 'replacement_call': plan['replacement_call']}
+        def unknown_reissue_create(token, parent_token, *, request_id, authorization, now):
+            """Explicit fresh consent, not an automatic retry of an unknown call.
+
+            Use the original native types, codec, immutable PDF and CAS API.
+            The old known-failure parent is copied byte-for-byte to a separate
+            authorization store. Both original checkpoints remain untouched.
+            """
+            if explicit_reissue_store is None:
+                raise TaskError('显式重发的独立持久授权存储尚未接好。')
+            from copy import deepcopy
+            from .workbench_adapter import native_digest
+            from auto_research.evidence.literature_checkpoint_runtime import (
+                LiteratureExecutionState, encode_execution_state)
+            from auto_research.evidence.literature_task_checkpoint import (
+                LiteratureTaskCheckpoint, LiteratureContinuationLineage)
+            from auto_research.evidence.literature_task_checkpoint_codec import encode_checkpoint
+            old, parent = native_recovery(token), native_recovery(parent_token)
+            checkpoint, original = old['checkpoint'], parent['checkpoint']
+            state, job_state = old['execution'], old['job']
+            if (authorization['unknown_checkpoint_sha256'] != sha256(encode_checkpoint(checkpoint))
+                    or authorization['parent_checkpoint_sha256'] != sha256(encode_checkpoint(original))):
+                raise TaskError('原密封断点已变化，未重发。')
+            child_token = sha256(('explicit-unknown-reissue:'+token+':'+request_id).encode())
+            native_id = 'literature_'+sha256(child_token.encode())
+            store = explicit_reissue_store.reissue_store(request_id)
+            try:
+                copied = store.load(original.manifest.task_id)
+            except Exception as exc:
+                if getattr(exc,'code',None) != 'literature_checkpoint_not_found': raise
+                store.create(original)
+            else:
+                if encode_checkpoint(copied) != encode_checkpoint(original):
+                    raise TaskError('显式重发的原断点副本不一致。')
+            prior = store.find_continuation(original.manifest.task_id)
+            if prior is not None:
+                if prior.manifest.task_id != native_id:
+                    raise TaskError('显式重发已经使用，不能另建原生身份。')
+                admitted = prior
+            else:
+                lifetime = min(86400, int(job_state.expires_at-job_state.issued_at))
+                if lifetime <= 0: raise TaskError('原生任务授权期限无效。')
+                content = snapshot_blobs.get(job_state.snapshot_ref,
+                    expected_sha256=job_state.snapshot['pdf_sha256'])
+                new_ref = snapshot_blobs.put(content, expected_sha256=job_state.snapshot['pdf_sha256'])
+                payload = json.loads(state.job_state)
+                payload.update(job_token=child_token, issued_at=now, expires_at=now+lifetime,
+                    snapshot_ref=new_ref)
+                payload['state_fingerprint'] = native_digest({k:v for k,v in payload.items()
+                    if k != 'state_fingerprint'})
+                encoded_job = canonical(payload)
+                decoded_job = persistence.decode_job_private_state(encoded_job)
+                lineage = replace(checkpoint.continuation_lineage,
+                    continuation_request_id=request_id, proof_bytes=canonical({
+                        'schema_version':'auto-lammps-explicit-unknown-reissue-v1',
+                        'original_known_length_proof':json.loads(checkpoint.continuation_lineage.proof_bytes),
+                        'authorization':deepcopy(authorization)}))
+                admitted = LiteratureTaskCheckpoint(
+                    manifest=replace(checkpoint.manifest, task_id=native_id,
+                        issued_at=now, expires_at=now+lifetime),
+                    revision=0, state='authorized', stage=checkpoint.stage,
+                    receipts=original.receipts[:-1], spent_calls=original.spent_calls,
+                    spent_tokens=original.spent_tokens, updated_at=now,
+                    private_payload=encode_execution_state(LiteratureExecutionState(
+                        job_state=encoded_job, stage_fingerprint=state.stage_fingerprint,
+                        receipt_offset=state.receipt_offset, completed_results=state.completed_results)),
+                    continuation_lineage=lineage)
+                admitted = store.create_continuation(admitted)
+            explicit_reissue_store.register(native_id, request_id, sha256(canonical(authorization)))
+            child_state = execution.decode_execution_state(admitted.private_payload)
+            child_job = persistence.decode_job_private_state(child_state.job_state)
+            try: jobs.peek_stage(child_token, session_id=session_id)
+            except job.LiteratureExtractionJobError as exc:
+                if exc.code == 'literature_job_expired':
+                    jobs.restore_private_state(child_state.job_state, session_id=session_id,
+                        allow_authenticated_session_rebind=True)
+                elif exc.code != 'literature_stage_busy': raise
+            return {'job_token':child_token, 'checkpoint':admitted,
+                'execution':child_state,'job':child_job}
         def native_source(paper_id):
             source = database.get_paper(paper_id)
             return context._read_stable_pdf_snapshot(str(source['pdf_path'])).sha256
@@ -318,7 +397,9 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
             visuals.visual_asset_image_path, native_capabilities, native_stage,
             native_recovery, native_source, native_paper_sources_reader=native_paper_sources,
             native_known_failure_planner=known_plan if known_length is not None else None,
-            native_known_failure_creator=known_create if known_length is not None else None)
+            native_known_failure_creator=known_create if known_length is not None else None,
+            native_unknown_reissue_creator=unknown_reissue_create
+                if explicit_reissue_store is not None and known_length is not None else None)
     except (ImportError, AttributeError, TypeError, ValueError):
         raise TaskError('本机文献工作台依赖或持久服务尚未接好，未开始提取。') from None
 
@@ -442,7 +523,10 @@ class WorkbenchExtractionBridge:
                 'id TEXT PRIMARY KEY REFERENCES workbench_extraction_intents(id), '
                 'source_request_id TEXT NOT NULL UNIQUE REFERENCES workbench_extraction_intents(id), '
                 'document TEXT NOT NULL)')
-            for table in ('workbench_extraction_intents', 'workbench_extraction_receipts',
+            db.execute('CREATE TABLE IF NOT EXISTS workbench_extraction_unknown_reissues ('
+                'id TEXT PRIMARY KEY, unknown_request_id TEXT NOT NULL UNIQUE, '
+                'document TEXT NOT NULL, document_sha256 TEXT NOT NULL)')
+            for table in ('workbench_extraction_unknown_reissues', 'workbench_extraction_intents', 'workbench_extraction_receipts',
                     'workbench_extraction_continuations', 'workbench_extraction_recoveries'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} '
@@ -904,6 +988,263 @@ class WorkbenchExtractionBridge:
         except Exception:
             raise original_error from None
 
+    def _unknown_reissue_claim(self, db, unknown_request_id):
+        row = db.execute('SELECT id,document,document_sha256 FROM workbench_extraction_unknown_reissues '
+            'WHERE unknown_request_id=?', (unknown_request_id,)).fetchone()
+        if row is None: return None
+        document = json.loads(row['document'])
+        if (sha256(canonical(document)) != row['document_sha256']
+                or document.get('request_id') != row['id']
+                or document.get('unknown_reissue_of') != unknown_request_id):
+            raise TaskError('显式重发授权记录不一致。')
+        return document
+
+    def _unknown_reissue_context(self, identifier, unknown_request_id, binding, client, *,
+            connection_revision, credential_generation, authorization_request_id=None):
+        """Authenticate a zero-progress unknown child against its real parent.
+
+        This does not change the old outcome, renew its expiry, lease a native
+        task, allocate a checkpoint or send any provider request. The explicit
+        user action authorizes a new child with the same successful prefix.
+        """
+        from auto_research.evidence.literature_task_checkpoint_codec import encode_checkpoint
+        task_id(unknown_request_id)
+        if authorization_request_id is not None: task_id(authorization_request_id)
+        error = TaskError('未知断点、成功答复、原文或连接未完全核对；未重发或收费。')
+        def require(value):
+            if not value: raise error
+        paper = self._paper(identifier, binding)
+        runtime = self.runtime
+        require(callable(runtime.native_unknown_reissue_creator)
+            and callable(runtime.native_recovery_reader) and callable(runtime.native_source_reader)
+            and runtime.native_source_reader(binding.workbench_paper_id) == binding.pdf_sha256)
+        model_binding = self._model_binding(client)
+        identity = dict(task_id=identifier, paper_id=paper['id'], title=paper['title'], doi=paper['doi'],
+            role=HUMAN_ROLE, source_sha256=binding.pdf_sha256, model=client.model,
+            connection_revision=connection_revision, credential_generation=credential_generation)
+        with self.papers.tasks.transaction() as db:
+            old_intent, old_receipt = self._request(db, unknown_request_id)
+            require(old_receipt.get('state') == 'failed_or_unknown'
+                and all(old_intent.get(k) == v for k,v in identity.items())
+                and old_intent.get('resume_of') is not None
+                and 'unknown_reissue_of' not in old_intent)
+            claim = self._unknown_reissue_claim(db, unknown_request_id)
+            require(claim is None or claim['request_id'] == authorization_request_id)
+            require(not db.execute("SELECT 1 FROM task_lifecycle WHERE task_id=? AND action IN ('delete','finish')",
+                (identifier,)).fetchone())
+            child_binding = self._continuation(db, unknown_request_id)
+            require(child_binding is not None
+                and child_binding['intent_sha256'] == sha256(canonical(old_intent))
+                and all(child_binding.get(k) == v for k,v in model_binding.items())
+                and child_binding['workbench_paper_id'] == binding.workbench_paper_id
+                and child_binding['source_sha256'] == binding.pdf_sha256
+                and child_binding['session_sha256'] == sha256(runtime.session_id.encode()))
+            parent_id = old_intent['resume_of']; parent_intent, parent_receipt = self._request(db, parent_id)
+            require(parent_receipt['state'] == 'failed'
+                and all(parent_intent.get(k) == v for k,v in identity.items()))
+            parent_binding = self._continuation(db, parent_id)
+            trusted = self.recoveries.get(parent_id)
+            require(parent_binding is not None)
+            if trusted:
+                require(trusted.intent_sha256 == sha256(canonical(parent_intent))
+                    and trusted.receipt_sha256 == sha256(canonical(parent_receipt))
+                    and all(getattr(trusted,k) == v for k,v in model_binding.items())
+                    and trusted.job_token == parent_binding['job_token']
+                    and trusted.prior_native_capability_sha256 == parent_binding['native_capability_sha256'])
+                expected_native = trusted.native_capability_sha256
+            else:
+                require(parent_binding['intent_sha256'] == sha256(canonical(parent_intent))
+                    and all(parent_binding.get(k) == v for k,v in model_binding.items()))
+                expected_native = parent_binding['native_capability_sha256']
+            lineage = []; seen = set(); cursor = parent_id
+            while cursor is not None:
+                require(cursor not in seen); seen.add(cursor)
+                intent, receipt = self._request(db, cursor)
+                saved = self._continuation(db, cursor)
+                require(receipt['state'] == 'failed' and saved is not None
+                    and saved['job_token'] == parent_binding['job_token']
+                    and all(intent.get(k) == v for k,v in identity.items()))
+                lineage.append((intent, receipt, saved['native_capability_sha256']))
+                cursor = intent.get('resume_of')
+            for row in db.execute('SELECT i.id,i.document intent,r.document receipt FROM workbench_extraction_intents i '
+                    'LEFT JOIN workbench_extraction_receipts r ON r.id=i.id WHERE i.paper_id=?', (paper['id'],)):
+                other = json.loads(row['intent'])
+                if (other.get('source_sha256') != binding.pdf_sha256
+                        or row['id'] in {unknown_request_id, authorization_request_id}): continue
+                receipt = json.loads(row['receipt']) if row['receipt'] else None
+                require(receipt is not None and receipt.get('state') not in {'unknown','failed_or_unknown'})
+        adapter_identity = {**{k:identity[k] for k in
+            ('task_id','paper_id','title','doi','role','source_sha256')},
+            'request_id':unknown_request_id, 'workbench_paper_id':binding.workbench_paper_id}
+        adapter = WorkbenchScientificAdapter(adapter_identity,
+            capability_reader=runtime.native_capability_reader, stage_reader=lambda:None)
+        current_native = sha256(canonical(adapter.installed))
+        require(current_native == expected_native == child_binding['native_capability_sha256'])
+        with client.calls.transaction() as db:
+            _, policy = client.calls._latest_policy(db)
+        require(json.loads(policy).get('config') == asdict(client.calls.config)
+            and client.calls.config.max_output_tokens >= 32000)
+        old = runtime.native_recovery_reader(child_binding['job_token'])
+        parent = runtime.native_recovery_reader(parent_binding['job_token'])
+        checkpoint, execution, job = old['checkpoint'], old['execution'], old['job']
+        original, previous, parent_job = parent['checkpoint'], parent['execution'], parent['job']
+        native_lineage = checkpoint.continuation_lineage
+        require(original.continuation_lineage is None and native_lineage is not None
+            and original.state == checkpoint.state == 'outcome_unknown'
+            and checkpoint.lease_owner_digest is original.lease_owner_digest is None
+            and native_lineage.parent_task_id == original.manifest.task_id
+            and native_lineage.parent_revision == original.revision
+            and native_lineage.parent_checkpoint_digest == sha256(encode_checkpoint(original))
+            and native_lineage.parent_job_state_digest == sha256(previous.job_state)
+            and native_lineage.continuation_request_id == unknown_request_id
+            and native_lineage.failed_receipt == original.receipts[-1]
+            and original.stage == checkpoint.stage in {'initial_focus','coverage_gap'}
+            and original.receipts[-1].state == checkpoint.receipts[-1].state == 'outcome_unknown'
+            and checkpoint.receipts[:-1] == original.receipts[:-1]
+            and len(checkpoint.receipts) == len(original.receipts)
+            and execution.receipt_offset == previous.receipt_offset
+            and execution.completed_results == previous.completed_results
+            and job.stage_outputs == parent_job.stage_outputs
+            and job.chunks == parent_job.chunks and job.snapshot == parent_job.snapshot
+            and dict(job.paper) == dict(parent_job.paper) == {'title':paper['title'],'doi':paper['doi']}
+            and job.paper_id == parent_job.paper_id == binding.workbench_paper_id
+            and job.snapshot['pdf_sha256'] == binding.pdf_sha256
+            and checkpoint.receipts[-1].max_tokens == 32000
+            and original.receipts[-1].max_tokens == {'initial_focus':16000,'coverage_gap':12000}[original.stage]
+            and len(execution.completed_results) == len(native_lineage.prefix_result_digests)
+            and checkpoint.spent_calls == original.spent_calls+1
+            and checkpoint.spent_tokens == original.spent_tokens+32000
+            and checkpoint.manifest.max_calls == original.manifest.max_calls+1
+            and checkpoint.manifest.max_tokens == original.manifest.max_tokens+32000)
+        for field in ('session_digest','provider_id','runtime_revision','credential_generation',
+                'task_models','executor_id','executor_version','pdf_snapshot_fingerprint'):
+            require(getattr(checkpoint.manifest,field) == getattr(original.manifest,field))
+        require(original.manifest.session_digest == sha256(runtime.session_id.encode())
+            and original.manifest.provider_id == 'deepseek'
+            and original.manifest.runtime_revision == connection_revision
+            and original.manifest.credential_generation == credential_generation
+            and original.manifest.task_models == (('analysis',client.model),('extraction',client.model))
+            and original.manifest.executor_id == adapter.installed['executor']['id']
+            and original.manifest.executor_version == adapter.installed['executor']['version'])
+        rows = []
+        for intent, receipt, native_digest_sha in reversed(lineage):
+            ids = receipt.get('model_request_ids'); require(isinstance(ids,list) and len(set(ids)) == len(ids))
+            base = {k:intent[k] for k in ('task_id','paper_id','role','source_sha256','request_id')}
+            for ordinal, call_id in enumerate(ids,1):
+                require(call_id == sha256(canonical({**base,'ordinal':ordinal}))[:32])
+                record = client.calls.lookup(call_id) or {}; result = record.get('receipt') or {}
+                proof = result.get('scientific_adapter') or {}; n = len(rows)
+                require(n < len(original.receipts)); native = original.receipts[n]
+                require(record.get('request_sha256') == result.get('request_sha256')
+                    and result.get('provider') == 'deepseek' and result.get('requested_model') == client.model
+                    and result.get('purpose') == 'literature_workbench_extraction'
+                    and result.get('transport_attempts') == 1 and result.get('http_status') == 200
+                    and proof.get('adapter_source_sha256') == adapter.adapter_sha256
+                    and proof.get('native_contract_sha256') == native_digest_sha
+                    and sha256(canonical(proof.get('native_capabilities'))) == native_digest_sha
+                    and proof.get('identity') == {**base,'title':paper['title'],'doi':paper['doi'],
+                        'workbench_paper_id':binding.workbench_paper_id}
+                    and proof.get('native_call_digest') == native.call_digest
+                    and proof.get('stage') == native.stage and result.get('task') == native.task
+                    and result.get('max_output_tokens') == native.max_tokens)
+                _digest(result.get('response_sha256')); _digest(result.get('request_sha256'))
+                usage = result.get('usage') or {}
+                require(all(type(usage.get(k)) is int and usage[k]>=0 for k in
+                    ('prompt_tokens','completion_tokens','total_tokens'))
+                    and usage['total_tokens'] == usage['prompt_tokens']+usage['completion_tokens'])
+                if n < len(original.receipts)-1:
+                    require(native.state == 'succeeded' and result.get('state') == 'completed'
+                        and result.get('finish_reason') == 'stop'
+                        and result.get('output_sha256') == sha256(canonical(result.get('structured_output')))
+                        and native_digest(result['structured_output']) == native.result_digest)
+                else:
+                    require(result.get('state') == 'response_invalid' and result.get('finish_reason') == 'length'
+                        and result.get('error') == 'incomplete_generation')
+                rows.append((call_id, result))
+        require(len(rows) == len(original.receipts))
+        known_proof = json.loads(native_lineage.proof_bytes)
+        require(known_proof.get('original_request_id') == parent_id
+            and known_proof.get('model_request_id') == rows[-1][0]
+            and known_proof.get('request_sha256') == rows[-1][1]['request_sha256']
+            and known_proof.get('response_sha256') == rows[-1][1]['response_sha256']
+            and known_proof.get('native_task_id') == original.manifest.task_id)
+        ids = old_receipt.get('model_request_ids')
+        require(isinstance(ids,list) and len(ids) == 1)
+        base = {k:old_intent[k] for k in ('task_id','paper_id','role','source_sha256','request_id')}
+        require(ids[0] == sha256(canonical({**base,'ordinal':1}))[:32])
+        unknown_row = client.calls.lookup(ids[0]) or {}; unknown = unknown_row.get('receipt') or {}
+        proof = unknown.get('scientific_adapter') or {}
+        require(unknown.get('state') == 'unknown' and unknown.get('usage') is None
+            and unknown.get('transport_attempts') == 1
+            and unknown.get('requested_model') == client.model and unknown.get('provider') == 'deepseek'
+            and unknown.get('purpose') == 'literature_workbench_extraction'
+            and unknown.get('request_sha256') == unknown_row.get('request_sha256')
+            and unknown.get('max_output_tokens') == 32000
+            and proof.get('identity') == adapter_identity
+            and proof.get('adapter_source_sha256') == adapter.adapter_sha256
+            and proof.get('native_contract_sha256') == current_native
+            and proof.get('native_call_digest') == checkpoint.receipts[-1].call_digest
+            and proof.get('stage_fingerprint') == execution.stage_fingerprint)
+        for idx,result in enumerate(execution.completed_results):
+            require(native_digest(result) == native_lineage.prefix_result_digests[idx]
+                == checkpoint.receipts[execution.receipt_offset+idx].result_digest)
+        return dict(version=1, task_id=identifier, paper_id=paper['id'],
+            source_sha256=binding.pdf_sha256, unknown_reissue_of=unknown_request_id,
+            parent_request_id=parent_id, unknown_model_request_id=ids[0],
+            unknown_model_record_sha256=sha256(canonical(unknown_row)),
+            unknown_checkpoint_sha256=sha256(encode_checkpoint(checkpoint)),
+            parent_checkpoint_sha256=sha256(encode_checkpoint(original)),
+            successful_prefix_sha256=sha256(canonical(execution.completed_results)),
+            reused_model_calls=len(original.receipts)-1, prefix_count=len(execution.completed_results),
+            stage_fingerprint=execution.stage_fingerprint, inherited_unknown_model_calls=1,
+            inherited_unknown_reserved_tokens=32000, inherited_failed_model_calls=1,
+            inherited_failed_reserved_tokens=original.receipts[-1].max_tokens,
+            native_capability_sha256=current_native, **model_binding,
+            connection_revision=connection_revision, credential_generation=credential_generation,
+            unknown_job_token=child_binding['job_token'], parent_job_token=parent_binding['job_token'])
+
+    def unknown_reissue_options(self, identifier, binding, client, *, connection_revision, credential_generation):
+        options = []
+        for receipt in self.history(identifier):
+            if receipt.get('state') != 'failed_or_unknown': continue
+            old_id = receipt['request_id']
+            option = dict(unknown_reissue_of=old_id, enabled=False, reused_model_calls=0,
+                reason='未知请求尚未形成可核验的零进度断点；未重发。')
+            with self.papers.tasks.transaction() as db:
+                claimed = self._unknown_reissue_claim(db,old_id)
+            if claimed:
+                option.update(request_id=claimed['request_id'],
+                    reason='这条未知断点的显式重发已使用；请查看原恢复请求，不能再次重发。')
+            else:
+                try:
+                    context = self._unknown_reissue_context(identifier,old_id,binding,client,
+                        connection_revision=connection_revision,credential_generation=credential_generation)
+                    option.update(enabled=True, reused_model_calls=context['reused_model_calls'],
+                        inherited_unknown_reserved_tokens=context['inherited_unknown_reserved_tokens'],
+                        reason='供应商已核对后，可明确授权一次断点重发；保留未知费用与已保存答复，不重扫全文。')
+                except (TaskError,ImportError,ValueError,TypeError,KeyError): pass
+            options.append(option)
+        return options
+
+    def authorize_unknown_reissue(self, identifier, request_id, binding, client, *, unknown_reissue_of,
+            supplier_checked, retain_unknown_charge, connection_revision, credential_generation):
+        task_id(request_id);task_id(unknown_reissue_of)
+        if supplier_checked is not True or retain_unknown_charge is not True or request_id == unknown_reissue_of:
+            raise TaskError('必须明确确认供应商已核对并保留未知费用，且使用新的恢复编号。')
+        context = self._unknown_reissue_context(identifier,unknown_reissue_of,binding,client,
+            connection_revision=connection_revision,credential_generation=credential_generation,
+            authorization_request_id=request_id)
+        document = {**context,'request_id':request_id,'supplier_checked':True,'retain_unknown_charge':True,
+            'automatic_retry':False,'authorization_kind':'explicit_user_unknown_reissue_once'}
+        with self.papers.tasks.transaction() as db:
+            prior = self._unknown_reissue_claim(db,unknown_reissue_of)
+            if prior:
+                if canonical(prior) != canonical(document): raise TaskError('显式重发授权身份已变化。')
+                return prior
+            db.execute('INSERT INTO workbench_extraction_unknown_reissues VALUES (?,?,?,?)',
+                (request_id,unknown_reissue_of,canonical(document).decode(),sha256(canonical(document))))
+        return document
+
     def recovery_options(self, identifier, binding, client, *, connection_revision,
                          credential_generation):
         """Human status view; private tokens and source data never leave it."""
@@ -947,7 +1288,7 @@ class WorkbenchExtractionBridge:
                 (request_id, canonical(document).decode(), sha256(canonical(document))))
 
     def extraction_identity(self, identifier, request_id, binding, client, *, force_rescan=False,
-                repair_visuals=False, resume_of=None, connection_revision, credential_generation):
+                repair_visuals=False, resume_of=None, unknown_reissue_of=None, connection_revision, credential_generation):
         """Read-only identity/options check shared by queued and synchronous actions."""
         task_id(request_id)
         if (type(force_rescan) is not bool or type(repair_visuals) is not bool
@@ -956,6 +1297,10 @@ class WorkbenchExtractionBridge:
                 or type(connection_revision) is not int or connection_revision < 0
                 or type(credential_generation) is not int or credential_generation < 0):
             raise TaskError('文献提取选项或模型连接身份无效。')
+        if unknown_reissue_of is not None:
+            task_id(unknown_reissue_of)
+            if unknown_reissue_of == request_id or resume_of is not None or force_rescan or repair_visuals:
+                raise TaskError('显式未知重发不能同时重扫、修图或恢复其他任务。')
         if resume_of is not None:
             task_id(resume_of)
             if resume_of == request_id:
@@ -971,15 +1316,17 @@ class WorkbenchExtractionBridge:
             automatic_retry=False)
         if resume_of is not None:
             intent['resume_of'] = resume_of
+        if unknown_reissue_of is not None:
+            intent['unknown_reissue_of'] = unknown_reissue_of
         return intent
 
     def extract(self, identifier, request_id, binding, client, *, force_rescan=False,
-                repair_visuals=False, resume_of=None, connection_revision, credential_generation,
+                repair_visuals=False, resume_of=None, unknown_reissue_of=None, connection_revision, credential_generation,
                 before_model_request=None):
         """Controller-authorized user click; no B fields are accepted or read."""
         intent=self.extraction_identity(identifier,request_id,binding,client,
             force_rescan=force_rescan,repair_visuals=repair_visuals,resume_of=resume_of,
-            connection_revision=connection_revision,credential_generation=credential_generation)
+            unknown_reissue_of=unknown_reissue_of, connection_revision=connection_revision,credential_generation=credential_generation)
         paper={key:intent['paper_id'] if key=='id' else intent[key] for key in ('id','title','doi')}
         binding_hash = sha256(canonical(intent))
         with self.papers.tasks.transaction() as db:
@@ -992,6 +1339,17 @@ class WorkbenchExtractionBridge:
                     raise TaskError('提取请求编号已用于其他来源或模型配置。')
                 return json.loads(prior['receipt']) if prior['receipt'] else {
                     **json.loads(prior['intent']), 'state': 'unknown', 'automatic_retry': False}
+        explicit_reissue = None
+        if unknown_reissue_of is not None:
+            with self.papers.tasks.transaction() as db:
+                explicit_reissue = self._unknown_reissue_claim(db, unknown_reissue_of)
+            if explicit_reissue is None or explicit_reissue['request_id'] != request_id:
+                raise TaskError('缺少同一未知断点的显式一次重发授权。')
+            current = self._unknown_reissue_context(identifier,unknown_reissue_of,binding,client,
+                connection_revision=connection_revision,credential_generation=credential_generation,
+                authorization_request_id=request_id)
+            if any(explicit_reissue.get(k) != v for k,v in current.items()):
+                raise TaskError('显式重发绑定的来源、旧断点或模型已变化。')
         recovery = self._recovery_context(identifier, resume_of, binding, client,
             connection_revision=connection_revision, credential_generation=credential_generation
             ) if resume_of is not None else None
@@ -1017,8 +1375,9 @@ class WorkbenchExtractionBridge:
                     continue
                 old = json.loads(row['receipt']) if row['receipt'] else None
                 if old is None or old['state'] in {'unknown', 'failed_or_unknown'}:
-                    raise TaskError('同一 PDF 的先前提取状态未知；请先核对，不能换请求编号再次收费。')
-                if (not recovery and not force_rescan and not repair_visuals and (old['state'] in
+                    if not explicit_reissue or old_intent['request_id'] != unknown_reissue_of:
+                        raise TaskError('同一 PDF 的先前提取状态未知；请先核对，不能换请求编号再次收费。')
+                if (not recovery and not explicit_reissue and not force_rescan and not repair_visuals and (old['state'] in
                         {'completed', 'completed_with_limitations', 'no_evidence_published'}
                         or old.get('model_request_ids'))):
                     raise TaskError('这份 PDF 已有提取记录；请查看现有证据，重扫须明确发起。')
@@ -1041,6 +1400,9 @@ class WorkbenchExtractionBridge:
                     recovery['native_capability_sha256'])
                 db.execute('INSERT INTO workbench_extraction_continuations VALUES (?,?,?)',
                     (request_id, canonical(continuation).decode(), sha256(canonical(continuation))))
+        if explicit_reissue:
+            recovery = {**explicit_reissue, 'kind':'explicit_unknown_reissue',
+                'inherited_failed_tokens':explicit_reissue['inherited_failed_reserved_tokens']}
         adapter = WorkbenchModelClient(client, task=identifier, paper=paper['id'],
             source_sha256=binding.pdf_sha256, request_id=request_id,
             before_model_request=before_model_request)
@@ -1052,7 +1414,17 @@ class WorkbenchExtractionBridge:
                 result.update(inherited_failed_model_calls=1,
                     inherited_failed_reserved_tokens=recovery['inherited_failed_tokens'],
                     local_recovery_used=True)
+        if explicit_reissue:
+            result.update(inherited_unknown_model_calls=1,
+                inherited_unknown_reserved_tokens=explicit_reissue['inherited_unknown_reserved_tokens'],
+                supplier_checked=True,retain_unknown_charge=True,
+                authorization_kind='explicit_user_unknown_reissue_once')
         try:
+            if explicit_reissue:
+                child = self.runtime.native_unknown_reissue_creator(
+                    explicit_reissue['unknown_job_token'],explicit_reissue['parent_job_token'],
+                    request_id=request_id,authorization=explicit_reissue,now=int(time.time()))
+                recovery.update(job_token=child['job_token'])
             if recovery and recovery.get('kind') == 'known_length_continuation':
                 from .workbench_known_failure import create_known_failure_child
                 recovery = create_known_failure_child(self, identifier, resume_of, binding, client,
@@ -1089,7 +1461,8 @@ class WorkbenchExtractionBridge:
             fresh = getattr(jobs, 'assert_source_fresh', None)
             if callable(fresh):
                 fresh(token, session_id=self.runtime.session_id)
-            if recovery and recovery.get('kind') in {'known_length_continuation','known_length_existing_child'}:
+            if recovery and recovery.get('kind') in {'known_length_continuation','known_length_existing_child',
+                    'explicit_unknown_reissue'}:
                 model_binding = self._model_binding(client)
                 expected_native = recovery['native_capability_sha256']
                 def recovery_model_guard():

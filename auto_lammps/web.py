@@ -13,7 +13,7 @@ import sys
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, SecretStr
 from fastapi.exceptions import RequestValidationError
 
 from .tasks import FIELDS, FrozenTask, StaleTask, TaskError, TaskStore
@@ -302,6 +302,14 @@ class WorkbenchExtractionInput(Input):
     resume_of: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
+class WorkbenchUnknownReissueInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    unknown_reissue_of: str = Field(pattern=r'^[a-f0-9]{32}$')
+    supplier_checked: StrictBool
+    retain_unknown_charge: StrictBool
+
+
 class PaperRecommendationInput(Input):
     scope_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
@@ -427,11 +435,17 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         messages = (history_reader(identifier, model_client.calls)
                     if workbench_jobs and binding and model_client and callable(history_reader)
                     else workbench_bridge.history(identifier) if workbench_jobs and binding else [])
+        unknown_reissues = []
+        if enabled and callable(getattr(workbench_jobs, 'unknown_reissue_options', None)):
+            try:
+                unknown_reissues = workbench_jobs.unknown_reissue_options(identifier)
+            except (TaskError, ValueError, OSError):
+                unknown_reissues = []
         return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
             source_sha256=binding.pdf_sha256 if binding else None,
             messages=messages,
             jobs=workbench_jobs.history(identifier) if workbench_jobs and binding else [],
-            evidence=evidence, recoveries=recoveries,
+            evidence=evidence, recoveries=recoveries, unknown_reissues=unknown_reissues,
             execution_authorized=False)
     def workbench_context(identifier):
         binding = workbench_binding(identifier)
@@ -1501,6 +1515,20 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if result is None:
             raise TaskError('没有这条文献提取记录。')
         return result
+
+    @app.post('/api/tasks/{identifier}/workbench/reissue-unknown', status_code=202)
+    def reissue_unknown_workbench(identifier: str, data: WorkbenchUnknownReissueInput):
+        status = workbench_status(identifier)
+        if not status['enabled']:
+            raise TaskError(status['disabled_reason'])
+        if data.source_sha256 != status['source_sha256']:
+            raise StaleTask('论文全文已更新，请刷新后再恢复；未发送模型请求。')
+        if data.supplier_checked is not True or data.retain_unknown_charge is not True:
+            raise TaskError('须先核对供应商记录，并明确保留旧未知调用及费用。')
+        return workbench_jobs.enqueue_unknown_reissue(identifier, data.request_id,
+            source_sha256=data.source_sha256, unknown_reissue_of=data.unknown_reissue_of,
+            supplier_checked=data.supplier_checked,
+            retain_unknown_charge=data.retain_unknown_charge)
 
     @app.get('/api/tasks/{identifier}/workbench/targets')
     def workbench_target_history(identifier: str):

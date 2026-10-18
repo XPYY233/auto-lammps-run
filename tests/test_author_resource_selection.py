@@ -277,5 +277,30 @@ class AuthorResourceSelectionTests(unittest.TestCase):
         self.assertEqual(self.transport.call_count,1)
         self.assertEqual(self.service.status(self.task)['used_rounds'],1)
 
+    def test_large_fixed_tree_uses_complete_compact_menu_without_truncating_scope_or_prior_answer(self):
+        evidence=self.service._input(self.task)
+        evidence['sources']=[dict(text='原文全页不在路径选择阶段重新解释。'*15000)]
+        evidence['reference_scope']['scope']['limitations']=['完整范围原文限制。'*1500]
+        evidence['author_plan']['report']['limitations']=['完整前稿不能截断。'*1500]
+        evidence['available_files']=[dict(path=f'inputs/alloy-{i:04d}/original-scientific-input.in',
+            size=100+i,type='blob',mode='100644',sha='f'*40,status='supported_blob') for i in range(1300)]
+        evidence['tree_report']['entries']=deepcopy(evidence['available_files'])
+        expected=deepcopy(evidence)
+        from auto_lammps.deepseek import request_body
+        with patch.object(self.service,'_input',return_value=evidence):
+            context=self.service._context(self.task,'7'*32,self.fx.client,1,1,'')
+        payload=json.loads(context['messages'][-1]['content'])
+        self.assertEqual(payload['reference_scope'],expected['reference_scope'])
+        self.assertEqual(payload['author_plan'],expected['author_plan'])
+        self.assertEqual(payload['available_files'],{r['path']:r['size'] for r in expected['available_files']})
+        self.assertEqual(payload['source_pages_binding']['sha256'],sha256(canonical(expected['sources'])))
+        self.assertNotIn('tree_report',payload)
+        self.assertEqual(context['input'],expected)
+        self.assertEqual(evidence,expected)
+        validate_prepared_messages(STAGE,context['messages'],expected)
+        self.assertLess(len(request_body(self.fx.calls.config,context['messages'],model=self.fx.client.model)),524288)
+        self.assertEqual(self.transport.call_count,0)
+        self.assertEqual(self.fx.calls.status()['used_requests'],self.baseline)
+
 
 if __name__=='__main__':unittest.main()

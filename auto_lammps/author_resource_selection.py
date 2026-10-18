@@ -51,8 +51,9 @@ def selection_context(evidence):
             for key,value in FLAGS.items()) or evidence.get('version')!=VERSION):
         raise TaskError('作者资料选择只属于参考端，不能供给独立 B。')
     string=lambda maximum:dict(type='string',minLength=1,maxLength=maximum)
-    paths=[item['path'] for item in evidence['available_files']]
-    path_type=dict(type='string',enum=paths) if paths else {'not':{}}
+    # The complete path menu is sent once as available_files. Membership is
+    # enforced by validate_selection against trusted metadata after the reply.
+    path_type=string(2000) if evidence['available_files'] else {'not':{}}
     dependencies=evidence['reference_scope']['scope']['dependency_ids']
     dependency_type=dict(type='string',enum=dependencies) if dependencies else {'not':{}}
     row=dict(type='object',additionalProperties=False,required=['path','reason','dependency_ids'],
@@ -67,7 +68,7 @@ def selection_context(evidence):
         tree_sha1=evidence['tree_sha1'],tree_report_sha256=evidence['tree_report_sha256'],
         limits=dict(files=MAX_FILES,remaining_files=max(0,MAX_FILES-len(evidence['existing_files'])),
                     source_bytes=MAX_SOURCE,blob_bytes=MAX_BLOB,rounds=MAX_ROUNDS),
-        rules=['Select concrete paths only from available_files, never a URL, glob, directory, symlink or submodule.',
+        rules=['Select concrete path keys only from available_files (values are byte sizes), never a URL, glob, directory, symlink or submodule.',
                'The complete inspected tree is metadata, not source contents or proof of scientific applicability.',
                'Use the unchanged selected P targets, their shared dependency IDs and the complete saved author clarification.',
                'Do not select already retained files again; preserve their pins and all reported missing evidence.',
@@ -319,12 +320,24 @@ class AuthorResourceSelection:
                 feedback=dict(state=receipt['state'],error_code=receipt['error_code'],message=receipt['message'],
                     previous_requested_revision=old['revision_note'],requested_revision=note),
                 original_answer_modified=False,target_scope_reduction_allowed=False)
-        payload=dict(**evidence,author_resource_selection=selection_context(evidence),
+        # A file-selection request does not reinterpret the full article. Keep
+        # all scientific scope and the complete author answer, but avoid sending
+        # the same inspected tree twice or blob identities the model cannot edit.
+        view=deepcopy(evidence)
+        view.pop('tree_report')
+        source_pages=view.pop('sources')
+        view['source_pages_binding']=dict(sha256=sha256(canonical(source_pages)),
+            source_count=len(source_pages),
+            use='Path selection only; complete P scope and author answer retain their source excerpts. '
+                'Full paper pages remain bound in the trusted input, not reinterpreted in this step.')
+        view['available_files']={row['path']:row['size'] for row in evidence['available_files']}
+        payload=dict(**view,author_resource_selection=selection_context(evidence),
                      resource_selection_revision=revision,user_revision_note=note)
         messages=[dict(role='system',content=(
             'Select the ORIGINAL AUTHOR files needed for the unchanged supplied P scope and saved author clarification. '
             'Return the complete JSON object in author_resource_selection.output_types. Choose concrete paths only from '
-            'available_files. Reasons and dependency IDs are proposed scientific choices, not verified file contents. '
+            'available_files keys (the values are file byte sizes). Reasons and dependency IDs are proposed '
+            'scientific choices, not verified file contents. '
             'Do not choose all repository files by default, repeat retained files, invent URLs, code, environment details '
             'or results, or change repository, commit, P targets or prior missing evidence. Use needs_clarification for '
             'specific unresolved needs. Do not execute tools, approve or submit physics, claim scientific success or '
@@ -333,8 +346,16 @@ class AuthorResourceSelection:
             'uncounted JSON repair. Explain choices and limitations in concise Chinese.')),
                   dict(role='user',content=canonical(payload).decode())]
         messages,proof=prepare_stage_messages(STAGE,messages,evidence)
+        # Preserve the same JSON value without double-escaping every Chinese
+        # character in the nested chat JSON. Proofs still use canonical values.
+        messages[-1]['content']=json.dumps(json.loads(messages[-1]['content']),
+            ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
         validate_prepared_messages(STAGE,messages,evidence)
-        body=request_body(client.calls.config,messages,model=client.model,thinking=client.thinking)
+        try:body=request_body(client.calls.config,messages,model=client.model,thinking=client.thinking)
+        except ModelError as error:
+            if str(error)=='input_too_large':
+                raise TaskError('完整P范围、前稿与文件目录超过本项目模型输入容量；未截断、未调用或收费。') from None
+            raise
         return dict(version=VERSION,**FLAGS,task_id=identifier,input=evidence,model_binding=model,messages=messages,
             request_sha256=sha256(body),scientific_adapter=proof,revision=revision,revision_note=note,
             controller_sha256=sha256(Path(__file__).read_bytes()))

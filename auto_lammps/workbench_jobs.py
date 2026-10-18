@@ -123,6 +123,8 @@ class WorkbenchExtractionJobs:
         if binding.pdf_sha256!=options['source_sha256']:
             raise TaskError('论文来源已变化；请刷新后再提取。')
         kwargs={key:options[key] for key in ('force_rescan','repair_visuals','resume_of')}
+        if options.get('unknown_reissue_of') is not None:
+            kwargs['unknown_reissue_of']=options['unknown_reissue_of']
         kwargs.update(connection_revision=supplied['connection_revision'],
                       credential_generation=supplied['credential_generation'])
         intent=self.bridge.extraction_identity(identifier,request_id,binding,client,**kwargs)
@@ -171,22 +173,25 @@ class WorkbenchExtractionJobs:
             if intent['source_sha256']!=source_sha256:continue
             receipt=json.loads(row['receipt']) if row['receipt'] else None
             if receipt is None or receipt['state'] in {'unknown','failed_or_unknown'}:
-                raise TaskError('同一 PDF 原提取状态未知；须先核对，不能再次排队或收费。')
-            if (not options['resume_of'] and not options['force_rescan'] and not options['repair_visuals']
+                if intent['request_id'] != options.get('unknown_reissue_of'):
+                    raise TaskError('同一 PDF 原提取状态未知；须先核对，不能再次排队或收费。')
+            if (not options.get('unknown_reissue_of') and not options['resume_of'] and not options['force_rescan'] and not options['repair_visuals']
                     and (receipt['state'] in {'completed','completed_with_limitations','no_evidence_published'}
                          or receipt.get('model_request_ids'))):
                 raise TaskError('同一 PDF 已有提取记录；请查看已有证据或使用原恢复入口。')
         for row in db.execute('SELECT j.id,(SELECT e.state FROM workbench_job_events e WHERE e.job_id=j.id '
                 'ORDER BY e.sequence DESC LIMIT 1) state FROM workbench_jobs j WHERE j.source_sha256=?',
                 (source_sha256,)):
-            if row['id']==exclude_request:continue
+            if row['id']==exclude_request or row['id']==options.get('unknown_reissue_of'):continue
             if row['state'] in BLOCKING:
                 raise TaskError('同一 PDF 已排队、正在提取或状态待核对；不能换请求编号重复排队。')
 
-    def enqueue(self,identifier,request_id,*,source_sha256,force_rescan=False,repair_visuals=False,resume_of=None):
+    def enqueue(self,identifier,request_id,*,source_sha256,force_rescan=False,repair_visuals=False,resume_of=None,
+            _unknown_reissue_of=None):
         task_id(request_id);_digest(source_sha256)
         options=dict(source_sha256=source_sha256,force_rescan=force_rescan,
                      repair_visuals=repair_visuals,resume_of=resume_of)
+        if _unknown_reissue_of is not None: options['unknown_reissue_of']=_unknown_reissue_of
         row=self._row(identifier,request_id)
         if row:
             self._same_request(row[1]['intent'],identifier,request_id,options)
@@ -200,6 +205,14 @@ class WorkbenchExtractionJobs:
             frozen,binding,client,kwargs=self._context(identifier,request_id,options)
         except Exception:
             raise TaskError('论文来源、模型配置或提取授权未通过核验，未排队或收费。') from None
+        if _unknown_reissue_of is not None:
+            with self.tasks.transaction() as db:
+                claim=self.bridge._unknown_reissue_claim(db,_unknown_reissue_of)
+            if claim is None or claim['request_id'] != request_id:
+                raise TaskError('缺少同一未知断点的显式重发授权。')
+            self.bridge._unknown_reissue_context(identifier,_unknown_reissue_of,binding,client,
+                connection_revision=kwargs['connection_revision'],credential_generation=kwargs['credential_generation'],
+                authorization_request_id=request_id)
         if resume_of is not None:
             self.bridge._recovery_context(identifier,resume_of,binding,client,
                 connection_revision=kwargs['connection_revision'],credential_generation=kwargs['credential_generation'])
@@ -215,6 +228,32 @@ class WorkbenchExtractionJobs:
                 self._event(db,request_id,'queued')
         self.pool.submit(self.run,identifier,request_id)
         return self.get(identifier,request_id)
+
+    def unknown_reissue_options(self,identifier):
+        supplied=self.context_provider(identifier)
+        if not isinstance(supplied,dict) or supplied.get('enabled') is not True:return []
+        return self.bridge.unknown_reissue_options(identifier,supplied['binding'],supplied['client'],
+            connection_revision=supplied['connection_revision'],credential_generation=supplied['credential_generation'])
+
+    def enqueue_unknown_reissue(self,identifier,request_id,*,source_sha256,unknown_reissue_of,
+            supplier_checked,retain_unknown_charge):
+        task_id(request_id);task_id(unknown_reissue_of);_digest(source_sha256)
+        if supplier_checked is not True or retain_unknown_charge is not True:
+            raise TaskError('请明确确认供应商已核对并保留未知费用。')
+        options=dict(source_sha256=source_sha256,force_rescan=False,repair_visuals=False,
+            resume_of=None,unknown_reissue_of=unknown_reissue_of)
+        existing=self._row(identifier,request_id)
+        if existing:
+            self._same_request(existing[1]['intent'],identifier,request_id,options)
+            return self.get(identifier,request_id)
+        if self.closed:raise TaskError('文献后台服务已关闭，未新增授权。')
+        frozen,binding,client,kwargs=self._context(identifier,request_id,options)
+        self.bridge.authorize_unknown_reissue(identifier,request_id,binding,client,
+            unknown_reissue_of=unknown_reissue_of,supplier_checked=supplier_checked,
+            retain_unknown_charge=retain_unknown_charge,connection_revision=kwargs['connection_revision'],
+            credential_generation=kwargs['credential_generation'])
+        return self.enqueue(identifier,request_id,source_sha256=source_sha256,
+            _unknown_reissue_of=unknown_reissue_of)
 
     @contextmanager
     def _lease(self,request_id):
@@ -236,6 +275,8 @@ class WorkbenchExtractionJobs:
             saved,frozen,events=row
             intent=frozen['intent']
             options={key:intent.get(key) for key in ('source_sha256','force_rescan','repair_visuals','resume_of')}
+            if intent.get('unknown_reissue_of') is not None:
+                options['unknown_reissue_of']=intent['unknown_reissue_of']
             prior=self._receipt(identifier,request_id)
             if prior is not None:
                 state=(prior['state'] if prior['state']!='unknown' and all(

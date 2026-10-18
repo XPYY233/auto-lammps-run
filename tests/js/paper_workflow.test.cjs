@@ -273,3 +273,26 @@ test('disabled or invalid workbench recovery options never create native continu
  const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed',request_id:'d'.repeat(32),model_request_ids:['native-call']}],recoveries:[{resume_of:'d'.repeat(32),enabled:false,reused_model_calls:24},{resume_of:'untrusted-native-token',enabled:true,reused_model_calls:24}]}));
  assert.equal(find(entry,n=>n.textContent==='从已保存的阶段继续核验'),undefined);assert.equal(s.calls.length,1);
 });
+
+test('supplier-checked unknown recovery is one explicit queue action and preserves old unknown history',async()=>{
+ const s=setup();publish(s);const original='f'.repeat(32),option={unknown_reissue_of:original,enabled:true,reused_model_calls:155,reason:'Authenticated unchanged prefix'};
+ const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'failed_or_unknown',request_id:original}],unknown_reissues:[option]}));
+ const run=find(entry,n=>n.textContent==='仅重发已核对的断点（保留成功答复）');
+ const check=find(entry,n=>n.tag==='input'&&n.type==='checkbox');assert.equal(run.disabled,true);
+ await run.onclick();assert.equal(s.calls.length,1);
+ check.checked=true;check.onchange();assert.equal(run.disabled,false);
+ const first=run.onclick();await flush();await run.onclick();assert.equal(s.calls.length,2);
+ assert.equal(s.pending[1].path,`/api/tasks/${TASK}/workbench/reissue-unknown`);
+ assert.equal(s.pending[1].data.unknown_reissue_of,original);
+ assert.equal(s.pending[1].data.supplier_checked,true);assert.equal(s.pending[1].data.retain_unknown_charge,true);
+ assert.equal(s.pending[1].data.force_rescan,undefined);assert.equal(s.pending[1].data.native_base_request,undefined);
+ s.pending[1].resolve({state:'queued'});await flush();s.pending[2].resolve(workbenchRecord({messages:[{state:'failed_or_unknown',request_id:original}],jobs:[{state:'dispatching',request_id:'e'.repeat(32)}],unknown_reissues:[option]}));await first;
+ assert.match(text(entry),/状态待核对/);assert.equal(find(entry,n=>n.textContent==='仅重发已核对的断点（保留成功答复）'),undefined);
+});
+test('unknown recovery ignores disabled malformed or zero-prefix grants',async()=>{
+ const s=setup();publish(s);const entry=await readWorkbench(s,workbenchRecord({messages:[{state:'unknown',request_id:'f'.repeat(32)}],unknown_reissues:[
+ {enabled:false,unknown_reissue_of:'f'.repeat(32),reused_model_calls:155},
+ {enabled:true,unknown_reissue_of:'native-private-token',reused_model_calls:155},
+ {enabled:true,unknown_reissue_of:'f'.repeat(32),reused_model_calls:0}]}));
+ assert.equal(find(entry,n=>n.textContent==='仅重发已核对的断点（保留成功答复）'),undefined);assert.equal(s.calls.length,1);
+});

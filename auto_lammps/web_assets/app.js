@@ -2967,15 +2967,16 @@ function appendWorkbenchEntry(box){
   const activeJobs=(record.jobs||[]).filter(job=>['queued','dispatching'].includes(job.state));
   const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state))||(record.jobs||[]).some(job=>['queued','dispatching','interrupted','unknown','failed_or_unknown'].includes(job.state));
   const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state)||message.model_request_ids?.length>0);
-  const runButton=(label,options={},style='quiet')=>{
+  const runButton=(label,options={},style='quiet',endpoint='extract',confirmed=()=>true)=>{
    const run=node('button',label,style);run.disabled=pending;content.append(run);
    run.onclick=()=>action(async()=>{
-    if(!active()||pending||pendingRequest||latestRecord!==record)return;
+    if(!active()||pending||pendingRequest||latestRecord!==record||!confirmed())return;
     const request={request_id:crypto.randomUUID().replaceAll('-',''),source_sha256:record.source_sha256};
     pending=true;run.disabled=true;pendingRequest={...request,...options};draw(record);
-    try{const reply=await api(`/api/tasks/${id}/workbench/extract`,pendingRequest);if(terminal.includes(reply.state)||['queued','dispatching'].includes(reply.state))pendingRequest=null;}
+    try{const reply=await api(`/api/tasks/${id}/workbench/${endpoint}`,pendingRequest);if(terminal.includes(reply.state)||['queued','dispatching'].includes(reply.state))pendingRequest=null;}
     finally{pending=false;if(active())await entry.loadWorkbench();}
    });
+   return run;
   };
   if(record.enabled&&!uncertain){
    const resumable=(record.recoveries||[]).filter(item=>item.enabled===true&&/^[a-f0-9]{32}$/.test(item.resume_of));
@@ -2993,7 +2994,21 @@ function appendWorkbenchEntry(box){
     if((record.messages||[]).some(message=>['completed_with_limitations','no_evidence_published'].includes(message.state)||message.visual_evidence_ready===false))runButton('修复图表提取（新增模型调用）',{repair_visuals:true});
    }
   }
-  if(pending){const progress=node('p',pendingRequest?.resume_of?'应用 AI 正从保存阶段继续核验，成功答复不会重新收费。可以关闭浏览器后再查看记录；不会提交 HPC。':'应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
+  if(record.enabled&&!sourceChanged&&!pending&&!pendingRequest&&!activeJobs.length){
+   for(const option of record.unknown_reissues||[]){
+    if(option.enabled!==true||!/^[a-f0-9]{32}$/.test(option.unknown_reissue_of)||!Number.isInteger(option.reused_model_calls)||option.reused_model_calls<1)continue;
+    content.append(node('p',`核对供应商后，可仅重发这处断点并复用 ${option.reused_model_calls} 次成功答复。旧未知请求及费用永久保留；不重扫全文，不提交 HPC，每个旧未知请求仅允许一次显式恢复。`,'form-note'));
+    if(option.reason)content.append(node('p',option.reason,'form-note'));
+    const label=node('label'),check=node('input');check.type='checkbox';
+    const confirmation='我已核对供应商记录，批准仅重发此断点，并保留旧未知调用及费用';
+    check.setAttribute('aria-label',confirmation);label.append(check,node('span',confirmation));content.append(label);
+    const run=runButton('仅重发已核对的断点（保留成功答复）',{
+     unknown_reissue_of:option.unknown_reissue_of,supplier_checked:true,retain_unknown_charge:true
+    },'primary','reissue-unknown',()=>check.checked===true);
+    run.disabled=true;check.onchange=()=>{run.disabled=pending||check.checked!==true;};
+   }
+  }
+  if(pending){const progress=node('p',pendingRequest?.resume_of||pendingRequest?.unknown_reissue_of?'应用 AI 正从保存阶段继续核验，复用已保存的成功答复，新增调用仍会记账。可以关闭浏览器后再查看记录；不会提交 HPC。':'应用 AI 正在提取并自动核验全文。可以关闭浏览器后再查看记录；不会提交 HPC。','form-note');progress.setAttribute('role','status');content.append(progress);}
   if(activeJobs.length)content.append(node('p','文献工作台正在后台提取；可以离开本页或关闭浏览器，稍后查看已有请求的进度。','form-note'));
   else if(uncertain)content.append(node('p','已有请求尚未得到终态；先核对原回执，不能换编号自动重提。','form-note'));
   const refresh=node('button','查看提取进度与已保存数据','quiet');refresh.onclick=()=>action(entry.loadWorkbench);content.append(refresh);
@@ -3351,6 +3366,19 @@ async function renderAuthorResourceSelections(id,parent,state){
     catch(error){state.selectionError=error.message;}
     finally{state.selectedFetchPending=null;if(alive())await renderAuthorResourceSelections(id,parent,state);}
    };panel.append(fetch);
+  }
+  if(acquired?.selected_complete){
+   const read=node('button',state.selectedReadPending?'正在读取所选补充原件…':'读取所选补充原件（不调用模型）','quiet');read.disabled=Boolean(state.selectedReadPending)||Boolean(state.selectedFetchPending)||Boolean(state.selectionPending);
+   read.onclick=async()=>{
+    if(!alive()||state.selectedReadPending)return;
+    state.selectedReadPending=true;read.disabled=true;feedback.textContent='正在核对原件字节与读取证明；只读文本，保留二进制/大文件未读标记，不消耗方案轮次。';
+    try{state.resourceRead=await api(`/api/tasks/${id}/author-resources/read`,{});state.selectionError='';}
+    catch(error){state.selectionError=error.message;}
+    finally{state.selectedReadPending=false;if(alive())await renderAuthorResourceSelections(id,parent,state);}
+   };panel.append(read);
+  }
+  if(state.resourceRead){const value=state.resourceRead;panel.append(node('p',`已读取 ${value.read_files}/${value.files} 个原件，保存 ${value.source_fragments} 个来源片段。`,'form-note'));
+   for(const [label,names] of [['未读文件',value.unread_files],['截断文件',value.truncated_files]])if(names?.length)panel.append(node('p',`${label}：${names.join('、')}`,'form-note'));
   }
  }catch(error){if(alive())panel.replaceChildren(node('p','原件选择尚不可用：'+error.message,'form-note'));}
 }

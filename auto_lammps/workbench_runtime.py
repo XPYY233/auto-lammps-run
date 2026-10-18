@@ -103,6 +103,74 @@ class _ProjectCheckpointSealer:
             self._DOMAIN + associated_data)
 
 
+
+class _ReissueCheckpointService:
+    """Route explicitly authorized new native identities; never alter old stores."""
+    def __init__(self, service, *, root, sealer, store_type, service_type):
+        self.original, self.root, self.sealer = service, root, sealer
+        self.store_type, self.service_type = store_type, service_type
+
+    def reissue_store(self, request_id):
+        from .tasks import task_id
+        task_id(request_id)
+        base = self.root/'explicit-reissues'; base.mkdir(mode=0o700, exist_ok=True)
+        _private_root(str(base))
+        folder = base/request_id; folder.mkdir(mode=0o700, exist_ok=True)
+        _private_root(str(folder))
+        return self.store_type(data_root=folder, sealer=self.sealer)
+
+    def register(self, native_id, request_id, authorization_sha256):
+        record = canonical(dict(version=1, native_task_id=native_id,
+            request_id=request_id, authorization_sha256=authorization_sha256))
+        routes = self.root/'explicit-reissue-routes'; routes.mkdir(mode=0o700, exist_ok=True)
+        _private_root(str(routes))
+        path = routes/(sha256(native_id.encode())+'.json')
+        try: _write_once(path, record)
+        except FileExistsError:
+            if read_regular(path, 2048, private=True) != record: raise _denied()
+
+    def _service(self, native_id):
+        path = self.root/'explicit-reissue-routes'/(sha256(native_id.encode())+'.json')
+        if not path.exists() and not path.is_symlink(): return self.original
+        route = _json(read_regular(path, 2048, private=True))
+        if (set(route) != {'version','native_task_id','request_id','authorization_sha256'}
+                or route['version'] != 1 or route['native_task_id'] != native_id): raise _denied()
+        # Reopening an existing per-authorization store restores the native CAS
+        # and cancellation semantics; the browser cannot choose this directory.
+        return self.service_type(store=self.reissue_store(route['request_id']))
+
+    def __getattr__(self, name):
+        original = getattr(self.original, name)
+        if not callable(original): return original
+        def routed(*args, **kwargs):
+            value = args[0] if args else kwargs.get('task_id', kwargs.get('manifest'))
+            if hasattr(value, 'manifest'): value = value.manifest
+            if hasattr(value, 'task_id'): value = value.task_id
+            service = self._service(value) if isinstance(value, str) else self.original
+            if (service is not self.original and name in {'plan_call','begin_call','complete_call',
+                    'mark_call_outcome_unknown','advance_stage','complete_task','release'}
+                    and isinstance(value,str) and 'expected_revision' in kwargs and 'owner_id' in kwargs):
+                # Renew at native tool boundaries, never inside the provider
+                # transport and never after expiry. The native operation then
+                # consumes the new CAS revision and returns it to its caller.
+                import time
+                from auto_research.evidence.literature_task_checkpoint import (
+                    MAX_LEASE_SECONDS, checkpoint_owner_digest)
+                current=service.load(value); now=int(time.time())
+                if (current.revision == kwargs['expected_revision']
+                        and current.state == 'running'
+                        and current.lease_owner_digest == checkpoint_owner_digest(kwargs['owner_id'])
+                        and current.lease_expires_at is not None
+                        and now < current.lease_expires_at <= now+MAX_LEASE_SECONDS//2
+                        and now < current.manifest.expires_at
+                        and not service.cancellation_requested(value)):
+                    renewed=service.acquire(value,expected_revision=current.revision,
+                        owner_id=kwargs['owner_id'],lease_seconds=MAX_LEASE_SECONDS)
+                    kwargs={**kwargs,'expected_revision':renewed.revision}
+            return getattr(service, name)(*args, **kwargs)
+        return routed
+
+
 def assemble_private_workbench(papers, config_path):
     """Return ``(bridge, {paper_id: trusted_binding})`` for a private JSON config.
 
@@ -192,9 +260,12 @@ def assemble_private_workbench(papers, config_path):
         database.init()
         blobs = blob_type(data_root=root/'snapshots', sealer=sealer)
         store = store_type(data_root=root/'checkpoints', sealer=sealer)
-        checkpoints = checkpoint_type(service_type(store=store))
+        routed = _ReissueCheckpointService(service_type(store=store), root=root, sealer=sealer,
+            store_type=store_type, service_type=service_type)
+        checkpoints = checkpoint_type(routed)
         runtime = installed_workbench_runtime(database=database, snapshot_blobs=blobs,
-            checkpoint_runtime=checkpoints, session_id=config['session_id'])
+            checkpoint_runtime=checkpoints, session_id=config['session_id'],
+            explicit_reissue_store=routed)
         runtime = replace(runtime, pdf_intake_root=root/'imports')
         return WorkbenchExtractionBridge(papers, runtime, recoveries=recoveries), bindings
     except WorkbenchRuntimeError:
