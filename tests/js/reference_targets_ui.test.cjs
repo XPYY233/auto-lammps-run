@@ -12,7 +12,7 @@ function fixture(history=[],unknown_reissues=[]){
  const c={node,researchContent:v=>node('div',v),current:{id:ID},renderPaperEvidence:{generation:1},crypto:{randomUUID:()=> 'cccccccc-cccc-cccc-cccc-cccccccccccc'},api:async(path,data)=>{calls.push({path,data});return {task_id:ID,history,unknown_reissues};}};
  vm.createContext(c);vm.runInContext(code,c);
  const all=()=>{function walk(item){return [item,...item.children.flatMap(v=>walk(v))];}return walk(panel);};
- return {c,panel,calls,all,render:()=>c.renderReferenceTargetAnalysis(panel,{task_id:ID},ID+':'+SHA)};
+ return {c,panel,calls,all,render:(options)=>c.renderReferenceTargetAnalysis(panel,{task_id:ID},ID+':'+SHA,options)};
 }
 test('opening P reads target history without generating, selecting or submitting',async()=>{
  const f=fixture();await f.render();assert.equal(f.calls.length,1);assert.equal(f.calls[0].data,undefined);
@@ -71,5 +71,12 @@ test('disabled recovery never exposes a paid action and resolved unknown preserv
   [{unknown_reissue_of:parent,enabled:false,reason:'原请求已有一次恢复'}]);await f.render();
  assert.equal(f.all().some(x=>x.textContent==='按原内容恢复这次目标核定（一次）'),false);
  assert.equal(f.all().find(x=>x.textContent===BUTTON).disabled,false);
+ assert.equal(f.calls.filter(x=>x.data).length,0);
+});
+test('stale inventory preserves original recovery controls but prohibits a fresh target generation',async()=>{
+ const parent='d'.repeat(32),f=fixture([{state:'unknown',request_id:parent}],
+  [{unknown_reissue_of:parent,enabled:true}]);await f.render({historyOnly:true});
+ assert.equal(f.all().find(x=>x.textContent===BUTTON).disabled,true);
+ assert.ok(f.all().some(x=>x.textContent==='按原内容恢复这次目标核定（一次）'));
  assert.equal(f.calls.filter(x=>x.data).length,0);
 });
