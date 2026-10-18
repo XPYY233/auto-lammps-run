@@ -24,6 +24,7 @@ MAX_PREVIEW_BYTES = 6144
 MAX_PREVIEW_LINES = 12
 MAX_OUTPUT_BYTES = tables.MAX_OUTPUT_BYTES
 METHODS = {'summary', 'last', 'linear_fit', coordination.METHOD}
+RAW_FORMATS = {'whitespace', 'csv'}
 AnalysisError = analysis.AnalysisError
 
 
@@ -152,6 +153,52 @@ def is_mixed(plan):
     return isinstance(plan, dict) and plan.get('mode') == MODE
 
 
+def _raw_declaration(table, files):
+    """Bind exact bytes and reuse the existing raw-table declaration validator."""
+    bound = deepcopy(table)
+    if set(bound) == {'id','file','format','header_lines','columns'}:
+        bound['sha256'] = sha256(files[bound['file']])
+    tables._fields(bound, {'id','file','sha256','format','header_lines','columns'})
+    tables._columns(bound['columns'])
+    if bound['sha256'] != sha256(files[bound['file']]):
+        raise AnalysisError('retained_mixed_raw_sha256_mismatch')
+    # Validation only, not an executed statistic or an added scientific action.
+    operation = dict(id='SourceCheck' if bound['id']=='SourceValidation' else 'SourceValidation',
+        method='summary',table=bound['id'],column=bound['columns'][0]['name'])
+    tables.validate_plan(dict(version=tables.VERSION,tables=[bound],operations=[operation]),
+        {bound['file']:files[bound['file']]})
+    return bound
+
+
+def bind_source_digests(plan, files):
+    """The service binds SHA values; model-supplied different SHAs are rejected."""
+    for index, table in enumerate(plan['plan']['tables']):
+        if isinstance(table,dict) and table.get('format') in RAW_FORMATS:
+            if not isinstance(table.get('file'),str) or table['file'] not in files:
+                raise AnalysisError('retained_mixed_raw_source_not_declared')
+            plan['plan']['tables'][index] = _raw_declaration(table,files)
+    return plan
+
+
+def _validate_native_declarations(native, files):
+    if not isinstance(native,dict) or not isinstance(native.get('tables'),list):
+        analysis_v2.validate_plan(native,files)
+    projected = deepcopy(native)
+    for index, table in enumerate(projected.get('tables',[])):
+        if isinstance(table,dict) and table.get('format') in RAW_FORMATS:
+            if not isinstance(table.get('file'),str) or table['file'] not in files:
+                raise AnalysisError('retained_mixed_raw_source_not_declared')
+            bound = _raw_declaration(table,files)
+            # Raw units (including unknown/compound declarations) have already
+            # passed their mature validator. analysis_v2 owns source counts,
+            # names, methods, x/y and window validation, not the raw parser's
+            # wider unit vocabulary. This dimensionless validation placeholder
+            # never enters parsing, arithmetic, the retained plan or a receipt.
+            projected['tables'][index] = dict(file=bound['file'],
+                columns=[dict(name=c['name'],unit='1') for c in bound['columns']])
+    analysis_v2.validate_plan(projected,files)
+
+
 def _output_columns(operation):
     if operation['method'] == coordination.METHOD:
         return [dict(name=name, unit='step' if name=='timestep' else '1') for name in
@@ -187,7 +234,7 @@ def validate_plan(plan, files):
         raise AnalysisError('retained_mixed_explicit_mode_and_fields_required')
     check_files(files)
     native = plan['plan']
-    analysis_v2.validate_plan(native, files)
+    _validate_native_declarations(native, files)
     if {table['file'] for table in native['tables']} != set(files):
         raise AnalysisError('retained_mixed_every_source_must_be_declared')
     if any(operation['method'] not in METHODS for operation in native['operations']):
@@ -195,7 +242,7 @@ def validate_plan(plan, files):
     # The bridge is post-hoc, user-requested analysis. No fake frozen manifest or
     # scheduler success is manufactured to call analyze_collected.
     for table in native['tables']:
-        if table.get('format') not in (None, scalar.FORMAT, coordination.FORMAT):
+        if table.get('format') not in (None, scalar.FORMAT, coordination.FORMAT, *RAW_FORMATS):
             raise AnalysisError('retained_mixed_parser_not_exposed')
         if not any(operation['file']==table['file'] for operation in native['operations']):
             raise AnalysisError('retained_mixed_source_operation_required')
@@ -286,6 +333,9 @@ def plan_schema():
     unit=dict(type='string',enum=sorted(analysis.UNITS))
     column=obj(dict(name=name,unit=unit))
     numeric=obj(dict(file=file,columns=array(column,2,16)))
+    raw_schema=deepcopy(tables.tool_context()['plan_schema']['properties']['tables']['items'])
+    del raw_schema['properties']['sha256'];raw_schema['required'].remove('sha256')
+    raw_schema['properties']['columns']['minItems']=analysis.MIN_COLUMNS
     scalar_column=obj(dict(name=name,unit=unit,source=dict(type='string',pattern=r'^[A-Za-z_][A-Za-z0-9_\[\]]{0,127}$')))
     scalar_table=obj(dict(file=file,format=dict(const=scalar.FORMAT),
         headers=array(dict(type='string',pattern='^# ',maxLength=4096),2,2),
@@ -315,7 +365,7 @@ def plan_schema():
     bounded=deepcopy(structural)
     bounded.update(neighbor_selection=dict(const='bounded_shell'),
         max_distance=dict(type='number',exclusiveMinimum=0),shell_gap=dict(type='number',exclusiveMinimum=0))
-    native=obj(dict(tables=array(dict(oneOf=[numeric,scalar_table,trajectory]),1,analysis_v2.MAX_V3_SOURCES),
+    native=obj(dict(tables=array(dict(oneOf=[numeric,scalar_table,trajectory,raw_schema]),1,analysis_v2.MAX_V3_SOURCES),
         operations=array(dict(oneOf=[numeric_operation,obj(structural),obj(bounded)]),1,analysis.MAX_OPERATIONS)))
     plot=obj(dict(id=name,method=dict(enum=['line','scatter']),table=dict(type='string',pattern=r'^result[1-9][0-9]?$'),x=name,y=name))
     evidence=obj(dict(target=file,citations=array(dict(type='string',minLength=1,maxLength=80),1,16)))
@@ -325,13 +375,23 @@ def plan_schema():
 def tool_context():
     """Existing parser/operator contracts, with a small explicit mode wrapper."""
     return dict(mode=MODE, adapter_identity=adapter_identity(),plan_schema=plan_schema(),
-        wrapper_fields=dict(mode=MODE, plan='unchanged analysis_v2 {tables,operations} contract',
+        wrapper_fields=dict(mode=MODE, plan='analysis_v2 {tables,operations}; numeric sources may additionally use the existing explicit postprocess_tables whitespace/csv declaration',
             figures='list of existing {id,method:line|scatter,table:resultN,x,y} selections; [] renders no plots',
             method_evidence='one {target,citations:[citation ids]} per source file and operation id'),
         numeric_table_forms=[dict(file='source1', columns=[dict(name='step',unit='step'),dict(name='value',unit='1')]),
+            dict(id='raw_samples',file='source1',format='whitespace',header_lines=0,
+                columns=[dict(name='step',unit='step'),dict(name='value',unit='unknown')]),
             dict(file='source1',format=scalar.FORMAT,headers=['# Synthetic scalar data','# TimeStep v_value'],
                 columns=[dict(name='step',unit='step',source='TimeStep'),dict(name='value',unit='1',source='v_value')],
                 steps=dict(first=0,last=2,stride=1))],
+        parser_selection=dict(labeled='No format field: exact # columns: / # units: headers must actually exist.',
+            raw='format whitespace or csv: full existing {id,file,format,header_lines,columns}; header_lines=0 explicitly selects headerless numeric input. Do not add or invent headers. Service binds sha256; omit sha256 in model output.',
+            scalar='format lammps_ave_time_scalar: both real headers, source labels and exact steps are required.'),
+        minimal_headerless_example=dict(mode=MODE,
+            plan=dict(tables=[dict(id='raw_samples',file='source1',format='whitespace',header_lines=0,
+                columns=[dict(name='step',unit='step'),dict(name='value',unit='unknown')])],
+                operations=[dict(id='description',method='summary',file='source1',x='step',y='value',window=[0,2])]),
+            figures=[],method_evidence=[dict(target='source1',citations=['raw_method']),dict(target='description',citations=['raw_method'])]),
         numeric_operations=dict(methods=['summary','last','linear_fit'],
             fields=['id','method','file','x','y','window'], window='explicit inclusive [low,high]; no automatic selection'),
         structural_contract=coordination.GUIDE,
@@ -344,12 +404,16 @@ def tool_context():
             native_mixed_sources=analysis_v2.MAX_V3_SOURCES,numeric_sources=analysis_v2.MAX_TABLES,
             structural_sources=analysis_v2.MAX_TABLES,numeric_rows_per_file=analysis.MAX_ROWS,
             numeric_bytes_per_file=analysis.MAX_TABLE_BYTES,
+            raw_table_bytes_per_file=tables.MAX_INPUT_BYTES,raw_table_rows_per_file=tables.MAX_ROWS,
+            raw_table_cells_per_file=tables.MAX_CELLS,
             numeric_cells_per_file=500000,operations=analysis.MAX_OPERATIONS,figures=16),
         contract=['Previews are for method/column selection only. Full retained source bytes are parsed for all calculations.',
             'Every input must have an explicit parser and operation; no silently skipped input, automatic frame/window, unit inference or source reduction.',
             'Empty files remain in the source inventory and verified bytes with their SHA and zero lines. Current ready plans do not accept empty numeric/trajectory tables or provide an empty-source exclusion: return needs_evidence rather than omit an empty source or invent samples.',
             'The plan is selected after collection and is not a pre-execution frozen analysis or scientific acceptance.',
             'Numeric labeled tables require exact # columns: and # units: headers. Native scalar tables require both exact headers and complete integer cadence.',
+            'Headerless inputs must explicitly choose format whitespace/csv and header_lines=0. This reuses postprocess_tables.parse_table unchanged, including SHA, finite-cell and physical-line checks. Header selection never rewrites source bytes.',
+            'Raw columns retain the original declared units (including unknown); numeric unit meanings are not inferred from values or replaced by validation placeholders.',
             'Source parser/mapping and every operation require authenticated method_evidence. Quotations establish provenance, not scientific correctness.',
             'Fixed OVITO worker, one source at a time. No generated code, energy, force, minimization, dynamics, HPC submission or network tool.'])
 
@@ -370,6 +434,7 @@ def _csv_table(identifier, columns, rows, references, operation):
 def execute_plan(plan, files):
     plan = deepcopy(plan)
     files = dict(files)
+    bind_source_digests(plan,files)
     validate_plan(plan, files)
     inventory = check_files(files)
     declarations = {table['file']:table for table in plan['plan']['tables']}
@@ -415,7 +480,19 @@ def execute_plan(plan, files):
                     selections.append(selection)
                 path.unlink()
             else:
-                rows = scalar.parse_scalar(data,table) if 'format' in table else analysis.parse_table(data,table)
+                if table.get('format') in RAW_FORMATS:
+                    parsed = tables.parse_table(data,table)
+                    rows = list(zip(parsed['line_numbers'],parsed['rows']))
+                    source.update(parser_adapter_identity=tables.adapter_identity(),
+                        source_line_ranges=[[parsed['line_numbers'][0],parsed['line_numbers'][-1]]])
+                    del parsed
+                elif 'format' in table:rows = scalar.parse_scalar(data,table)
+                else:
+                    try:rows = analysis.parse_table(data,table)
+                    except AnalysisError as error:
+                        if str(error)=='Table labels or units differ from the frozen plan':
+                            raise AnalysisError('retained_mixed_labeled_headers_mismatch: no-format declarations require actual # columns: and # units: headers; for headerless numeric bytes explicitly select format whitespace with header_lines=0, without rewriting data') from error
+                        raise
                 total_numeric_rows += len(rows)
                 if total_numeric_rows > MAX_ROWS:
                     raise AnalysisError('retained_mixed_aggregate_row_limit')
@@ -423,12 +500,16 @@ def execute_plan(plan, files):
                     source_lines_sha256=sha256(canonical([number for number,_ in rows])))
                 for index, operation in operations:
                     result = analysis.calculate(rows,table,operation)
-                    if 'format' in table:
+                    if table.get('format') in RAW_FORMATS:
+                        result['units_origin']='declared_only_not_verified_in_raw_table'
+                    elif 'format' in table:
                         result['units_origin']='declared_only_not_present_in_scalar_header'
                     numeric.append(result)
                     selection = dict(operation_id=operation['id'],file=file,source_sha256=identity['sha256'],
                         full_source_line_count=identity['line_count'],parsed_row_count=len(rows),
                         sample_count=result['sample_count'],source_line_ranges=result['source_line_ranges'],parameters=operation)
+                    if table.get('format') in RAW_FORMATS:
+                        selection.update(parser=deepcopy(table),parser_adapter_identity=tables.adapter_identity())
                     out_columns = columns['result'+str(index)]
                     values = [[result['sample_count'] if c['name']=='sample_count' else result['values'][c['name']]
                         for c in out_columns]]

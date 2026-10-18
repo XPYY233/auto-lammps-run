@@ -121,7 +121,7 @@ class AuthorReferenceWorkspace:
             raise TaskError('任务已暂停或结束；旧方案仍可查看。')
         return binding,paper,receipt,scope
 
-    def _source(self,identifier,binding,receipt):
+    def _source(self,identifier,binding,receipt,*,cached_only=False):
         reader=binding['reader'];legacy=binding['format']=='legacy_selected_resource_v3'
         selected=binding['format']=='selected_acquisition_v1'
         intent=binding['load_intent']() if legacy else None
@@ -143,6 +143,8 @@ class AuthorReferenceWorkspace:
             if sha256(canonical(value))!=row[1]:raise TaskError('已保存作者读取证据摘要不一致。')
             author_source_inputs(value,identifier)
             return value
+        if cached_only:
+            raise TaskError('作者原件文本缓存尚未就绪；请先使用读取原件入口，未自动访问HPC。')
         with self.tasks.transaction() as db:
             used=db.execute('SELECT count(*) FROM author_source_evidence WHERE task_id=?',(identifier,)).fetchone()[0]
             if used>=32:raise TaskError('参考源码证据版本容量已用完；已有版本和费用保留。')
@@ -164,14 +166,14 @@ class AuthorReferenceWorkspace:
             db.execute('INSERT INTO author_source_evidence VALUES(?,?,?,?,?)',(key,identifier,data.decode(),sha256(data),datetime.now(timezone.utc).isoformat()))
         return value
 
-    def _sources(self,identifier,binding,receipt):
+    def _sources(self,identifier,binding,receipt,*,cached_only=False):
         """Retain the original package and append separately pinned new text.
 
         File-type selection is a bounded reading tool, not a scientific scope
         decision. Unread or truncated files remain explicit in the returned
         inventory and are never interpreted as fully inspected source.
         """
-        original=self._source(identifier,binding,receipt)
+        original=self._source(identifier,binding,receipt,cached_only=cached_only)
         packages=[original]
         completed=self.resources.completed(identifier) if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport) else None
         previous={row['path'] for row in receipt['files']}
@@ -189,8 +191,11 @@ class AuthorReferenceWorkspace:
                     acquisition_id=report['id'],receipt_sha256=sha256(canonical(report)),
                     inventory_sha256=report['inventory_sha256'],license_approved=True,
                     license_approval_sha256=context['license_approval_sha256'])
-                reader=AuthorSourceReader(self.resources.audit/'source-reads',policy,transport=binding['reader'].transport)
-                packages.append(self._source(identifier,dict(reader=reader,format='acquisition_v1',selections=selections),report))
+                audit=self.resources.audit/'source-reads'
+                if cached_only and (audit.is_symlink() or not audit.is_dir()):
+                    raise TaskError('补充作者原件文本缓存尚未就绪；未自动访问HPC。')
+                reader=AuthorSourceReader(audit,policy,transport=binding['reader'].transport)
+                packages.append(self._source(identifier,dict(reader=reader,format='acquisition_v1',selections=selections),report,cached_only=cached_only))
                 previous.update(row['path'] for row in report['files'])
         if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport):
             from .selected_author_source_reader import SelectedAuthorSourceReader
@@ -200,15 +205,54 @@ class AuthorReferenceWorkspace:
                     reference_task_id=identifier,repository=source['repository'],commit=source['commit'],
                     license_approved=True,license_approval_sha256=source['license_approval_sha256'],
                     selection_request_sha256=sha256(canonical(context['request'])),receipt_sha256=sha256(canonical(report)))
-                reader=SelectedAuthorSourceReader(self.resources.audit/'selected-source-reads',policy,
+                audit=self.resources.audit/'selected-source-reads'
+                if cached_only and (audit.is_symlink() or not audit.is_dir()):
+                    raise TaskError('所选作者原件文本缓存尚未就绪；未自动访问HPC。')
+                reader=SelectedAuthorSourceReader(audit,policy,
                     selection_request=context['request'],tree_inventory=context['inventory'],
                     original_receipt=context['acquisition_receipt'],transport=binding['reader'].transport)
-                packages.append(self._source(identifier,dict(reader=reader,format='selected_acquisition_v1',selections=choices(report)),report))
+                packages.append(self._source(identifier,dict(reader=reader,format='selected_acquisition_v1',selections=choices(report)),report,cached_only=cached_only))
                 previous.update(row['path'] for row in report['files'])
         if len(packages)==1:return original
         combined=dict(source_packages=packages)
         author_source_inputs(combined,identifier)
         return combined
+
+    def _cached_sources(self,identifier,binding,receipt):
+        return self._sources(identifier,binding,receipt,cached_only=True)
+
+    def cached_analysis_sources(self,identifier):
+        """Reference-only retained text; never read remote files or invoke AI."""
+        task_id(identifier)
+        result=dict(task_id=identifier,paper_id=None,paper=None,scope='reference_only',B_input=False,
+            available=False,sources=[],source_binding=None,missing=[],calls_model=False,
+            reads_remote=False,submits_HPC=False)
+        try:
+            binding,paper,receipt,_=self._metadata(identifier,require_scope=False)
+            result.update(paper_id=paper['id'],paper={key:paper[key] for key in ('title','doi')})
+            retained=self._cached_sources(identifier,binding,receipt)
+            checked=author_source_inputs(retained,identifier)
+            from .condition_generation import source_bundle
+            sources=[{key:row[key] for key in ('id','locator','text')} | dict(origin='code')
+                for row in checked['sources']]
+            # Validate the shared input envelope without stripping byte-proven
+            # source text; a downstream normalized view is a separate value.
+            source_bundle(sources)
+            if not sources:raise TaskError('作者原件缓存没有可核验文本；未自行补充方法或元素映射。')
+            source_binding=dict(kind='cached_author_method_sources',task_id=identifier,paper_id=paper['id'],
+                role='author_reference_human_only',B_input=False,
+                original_receipt_sha256=sha256(canonical(receipt)),
+                original_receipt_file_sha256=binding['receipt_file_sha256'],
+                retained_evidence_sha256=sha256(canonical(retained)),
+                capability_sha256=sha256(canonical(checked['capability'])),
+                files_sha256=sha256(canonical(checked['files'])),
+                read_proofs_sha256=sha256(canonical(checked['reads'])),
+                sources_sha256=sha256(canonical(sources)))
+            result.update(available=True,sources=sources,source_binding=source_binding)
+        except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
+            result['missing']=[str(error) if isinstance(error,TaskError)
+                else '作者方法的固定原件、许可或读取回执尚未通过核验；未自动访问HPC。']
+        return result
 
     def collect_sources(self,identifier):
         """Ordinary reference action; read pinned data without a model call."""

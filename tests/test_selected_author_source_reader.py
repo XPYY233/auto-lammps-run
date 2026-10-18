@@ -176,6 +176,54 @@ class SelectedAuthorSourceReaderTests(unittest.TestCase):
                 self.assertEqual(report['state'], 'rejected'); self.assertEqual(report['files'], [])
             path.chmod(0o600); path.write_bytes(old); path.chmod(0o400)
 
+    def test_resumed_49_originals_use_exact_chained_receipt_and_keep_initial_19(self):
+        # Match the observed large-blob size without using author content.
+        fixture=SelectedResourceTests()
+        fixture.synthetic_contents={f'files/text-{index:03d}.txt':f'synthetic {index}\n'.encode() for index in range(48)}
+        fixture.synthetic_contents['logs/large.log']=b'x'*11_205_503
+        fixture.setUp();self.addCleanup(fixture.doCleanups)
+        selection=fixture.request(49)
+        fixture.blobs.change=lambda value,count:value.update(sha='f'*40) if count==20 else None
+        partial=fixture.run_worker(selection)
+        self.assertEqual(len(partial['files']),19)
+        folder=Path(partial['remote_directory']);old=(folder/'result.json').read_bytes()
+        fixture.blobs.change=None
+        complete=fixture.run_worker(selection,action='resume',previous_bundle_sha256='e'*64)
+        self.assertEqual(len(complete['files']),49)
+        self.assertEqual(complete['files'][:19],partial['files'])
+        policy=dict(self.policy,remote_directory=str(fixture.hpc),
+            selection_request_sha256=sha256(canonical(selection)),receipt_sha256=sha256(canonical(complete)))
+        reader=SelectedAuthorSourceReader(fixture.root/'source-audit',policy,selection_request=selection,
+            tree_inventory=fixture.inventory,original_receipt=fixture.old,transport=fixture.transport,
+            capture=lambda *args,**kwargs:self.fail('no actual transport'))
+        choices=[dict(path=row['path'],start_line=1,end_line=20) for row in complete['files'][:8]]
+        request=reader.selection_request(complete,choices)
+        with self.hpc():report=worker.read_source_report(request)
+        self.assertEqual(report['state'],'read');self.assertEqual(len(report['files']),8)
+        self.assertEqual((folder/'result.json').read_bytes(),old)
+        stale=dict(request,receipt_sha256=sha256(old))
+        with self.hpc():rejected=worker.read_source_report(stale)
+        self.assertEqual(rejected['state'],'rejected')
+        self.assertEqual(rejected['rejection_reason'],'selected_source_saved_receipt_changed')
+        resume=folder/'resume-001-intent.json';saved=resume.read_bytes()
+        wrong=json.loads(saved);wrong['previous_receipt_sha256']='0'*64
+        resume.chmod(0o600);resume.write_bytes(canonical(wrong));resume.chmod(0o400)
+        with self.hpc():rejected=worker.read_source_report(request)
+        self.assertEqual(rejected['state'],'rejected')
+        self.assertEqual(rejected['rejection_reason'],'selected_source_resume_chain_changed')
+        self.assertEqual(rejected['files'],[])
+
+    def test_missing_or_nonsequential_resume_cannot_fall_back_to_older_receipt(self):
+        request=self.reader.selection_request(self.receipt,self.choices())
+        folder=Path(self.receipt['remote_directory'])
+        intent=dict(request_sha256=sha256(canonical(self.selection)),
+            previous_receipt_sha256=sha256(canonical(self.receipt)),previous_bundle_sha256='e'*64)
+        path=folder/'resume-002-intent.json';path.write_bytes(canonical(intent));path.chmod(0o400)
+        with self.hpc():report=worker.read_source_report(request)
+        self.assertEqual(report['state'],'rejected')
+        self.assertEqual(report['rejection_reason'],'selected_source_resume_chain_changed')
+        self.assertEqual(report['files'],[])
+
     def test_original_size_sha_blob_and_symlink_tampering_cannot_return_text(self):
         request = self.reader.selection_request(self.receipt, self.choices())
         path = Path(self.receipt['remote_directory'])/'source'/self.receipt['files'][0]['path']

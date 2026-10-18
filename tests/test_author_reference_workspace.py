@@ -137,6 +137,70 @@ class AuthorWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.http.post(url+'/read',json={},headers=HEADERS).status_code,200)
         self.assertEqual(self.fx.reader.calls,1)  # Retained source proof, not another read.
 
+    def test_cached_analysis_source_miss_does_not_read_or_call_model(self):
+        before=self.workspace.planner.status(self.task)['used_rounds']
+        result=self.workspace.cached_analysis_sources(self.task)
+        self.assertFalse(result['available']);self.assertEqual(result['sources'],[])
+        self.assertIsNone(result['source_binding']);self.assertTrue(result['missing'])
+        self.assertIn('缓存尚未就绪',result['missing'][0])
+        self.assertFalse(result['reads_remote']);self.assertFalse(result['calls_model'])
+        self.assertEqual(self.fx.reader.calls,0);self.assertEqual(self.fx.sent,[])
+        self.assertEqual(self.workspace.planner.status(self.task)['used_rounds'],before)
+        with self.fx.tasks.transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM author_source_evidence').fetchone()[0],0)
+
+    def test_cached_analysis_sources_reuse_exact_proofs_as_reference_only_code(self):
+        from auto_lammps.author_reference_plan import author_source_inputs
+        from auto_lammps.condition_generation import source_bundle
+        self.workspace.collect_sources(self.task)
+        self.source.capture=Mock(side_effect=AssertionError('cached analysis must not access HPC'))
+        result=self.workspace.cached_analysis_sources(self.task)
+        self.assertTrue(result['available']);self.assertEqual(result['missing'],[])
+        self.assertEqual(result['scope'],'reference_only');self.assertFalse(result['B_input'])
+        self.assertEqual(len(source_bundle(result['sources'])),len(result['sources']))
+        with self.fx.tasks.transaction() as db:
+            row=db.execute('SELECT document,sha256 FROM author_source_evidence WHERE task_id=?',(self.task,)).fetchone()
+        import json
+        retained=json.loads(row['document']);checked=author_source_inputs(retained,self.task)
+        self.assertEqual([(s['id'],s['text'],s['locator']) for s in result['sources']],
+            [(s['id'],s['text'],s['locator']) for s in checked['sources']])
+        self.assertTrue(all(s['origin']=='code' for s in result['sources']))
+        proof=result['source_binding']
+        self.assertEqual(proof['task_id'],self.task);self.assertEqual(proof['paper_id'],self.fx.paper['id'])
+        self.assertEqual(proof['retained_evidence_sha256'],row['sha256'])
+        self.assertEqual(proof['read_proofs_sha256'],sha256(canonical(checked['reads'])))
+        self.assertEqual(proof['sources_sha256'],sha256(canonical(result['sources'])))
+        self.assertEqual(self.fx.reader.calls,1);self.source.capture.assert_not_called()
+        self.assertEqual(self.fx.sent,[]);self.assertEqual(self.workspace.planner.status(self.task)['used_rounds'],0)
+
+    def test_cached_analysis_sources_reject_corruption_or_changed_paper_and_license_without_fallback(self):
+        self.workspace.collect_sources(self.task)
+        self.source.capture=Mock(side_effect=AssertionError('must not reread'))
+        self.association['paper']['title']='another paper'
+        result=self.workspace.cached_analysis_sources(self.task)
+        self.assertFalse(result['available']);self.assertEqual(result['sources'],[])
+        self.assertIn('关联回执',result['missing'][0])
+        self.association['paper']['title']=self.fx.paper['title']
+        self.binding['verify_license'].side_effect=TaskError('license unavailable')
+        self.assertIn('license unavailable',self.workspace.cached_analysis_sources(self.task)['missing'])
+        self.binding['verify_license'].side_effect=None
+        with self.fx.tasks.transaction() as db:
+            db.execute('DROP TRIGGER immutable_author_source_evidence_UPDATE')
+            db.execute('UPDATE author_source_evidence SET document=?',('{}',))
+        result=self.workspace.cached_analysis_sources(self.task)
+        self.assertFalse(result['available']);self.assertEqual(result['sources'],[])
+        self.assertIn('摘要不一致',result['missing'][0])
+        self.source.capture.assert_not_called();self.assertEqual(self.fx.sent,[])
+
+    def test_cached_analysis_sources_cannot_borrow_another_tasks_proof(self):
+        self.workspace.collect_sources(self.task)
+        other=self.fx.tasks.create('Independent ordinary research','No author answers','research')['id']
+        self.source.capture=Mock(side_effect=AssertionError('must not read'))
+        result=self.workspace.cached_analysis_sources(other)
+        self.assertFalse(result['available']);self.assertEqual(result['sources'],[])
+        self.assertIsNone(result['source_binding']);self.assertTrue(result['missing'])
+        self.source.capture.assert_not_called();self.assertEqual(self.fx.sent,[])
+
     def test_resource_routes_reject_browser_supplied_paths_pins_or_execution_permission(self):
         url='/api/tasks/'+self.task+'/author-resources'
         for payload in ({'repository':'someone/else'},{'commit':'a'*40},{'remote_directory':'/tmp'},{'execution_authorized':True}):

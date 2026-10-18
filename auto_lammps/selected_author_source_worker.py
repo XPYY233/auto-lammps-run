@@ -6,6 +6,7 @@ Original acquisition/cache/selection receipts are checked before reading files.
 import hashlib
 import json
 import os
+import re
 import sys
 
 from . import author_source_worker as original
@@ -60,6 +61,39 @@ def response_identity(request, state):
         transport_binding_sha256=request['transport_binding_sha256'], source_complete=False)
 
 
+def _saved_receipt(directory, selection):
+    """Follow immutable same-operation receipts in explicit sequence, not time."""
+    raw=original._read_regular(directory,'result.json',selected.MAX_REPORT)
+    previous=selected.validate_selected_report(selection,json.loads(raw))
+    resumes=sorted(name for name in os.listdir(directory)
+        if re.fullmatch(r'resume-[0-9]{3}-intent\.json',name))
+    if len(resumes)>selected.MAX_RESUMES:
+        raise AuthorSourceError('selected_source_resume_chain_limit')
+    for index,name in enumerate(resumes,1):
+        if name!=f'resume-{index:03d}-intent.json':
+            raise AuthorSourceError('selected_source_resume_chain_changed')
+        intent=json.loads(original._read_regular(directory,name,2048))
+        if (not isinstance(intent,dict) or set(intent)!={'request_sha256',
+                'previous_receipt_sha256','previous_bundle_sha256'}
+                or intent['request_sha256']!=original.digest(original.canonical(selection))
+                or intent['previous_receipt_sha256']!=original.digest(original.canonical(previous))
+                or not isinstance(intent['previous_bundle_sha256'],str)
+                or not original._HASH.fullmatch(intent['previous_bundle_sha256'])
+                or previous['state']!='partial'):
+            raise AuthorSourceError('selected_source_resume_chain_changed')
+        raw=original._read_regular(directory,name.replace('-intent.json','-result.json'),selected.MAX_REPORT)
+        current=selected.validate_selected_report(selection,json.loads(raw))
+        retained={row['path']:row for row in current['files']}
+        if (any(retained.get(row['path'])!=row for row in previous['files'])
+                or current['request_count']<previous['request_count']
+                or current['received_bytes']<previous['received_bytes']
+                or current.get('received_budget_bytes',current['received_bytes'])
+                    <previous.get('received_budget_bytes',previous['received_bytes'])):
+            raise AuthorSourceError('selected_source_resume_chain_changed')
+        previous=current
+    return raw
+
+
 def read_pinned_text(request):
     validate_request(request)
     if sys.platform != 'linux' or not os.environ.get('SSH_CONNECTION'):
@@ -78,7 +112,7 @@ def read_pinned_text(request):
         intent = json.loads(original._read_regular(parent, 'intent.json', selected.MAX_REQUEST))
         if intent != selection:
             raise AuthorSourceError('selected_source_original_intent_changed')
-        raw = original._read_regular(parent, 'result.json', selected.MAX_REPORT)
+        raw = _saved_receipt(parent, selection)
         if original.digest(raw) != request['receipt_sha256']:
             raise AuthorSourceError('selected_source_saved_receipt_changed')
         files = validate_receipt(json.loads(raw), request)

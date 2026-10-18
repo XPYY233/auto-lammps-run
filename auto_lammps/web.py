@@ -545,8 +545,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return dict(client=client,enabled=connections.assistant_enabled and connections.available('deepseek-official'),
             connection_revision=max(1,revision),credential_generation=max(1,revision))
     from .output_analysis import OutputAnalysis
+    def cached_author_method_sources(identifier):
+        # Resolve only after the workspace below has been assembled. Reference
+        # analysis consumes retained proofs, never an implicit remote read.
+        reader=getattr(author_workspace,'cached_analysis_sources',None)
+        if not callable(reader):
+            raise TaskError('作者方法缓存入口尚未连接；未自动读取原件。')
+        return reader(identifier)
     output_analyses=output_analysis_service or OutputAnalysis(raw_outputs,
         connection_provider=output_analysis_connection,reference_sources=reference_target_sources,
+        reference_method_sources=cached_author_method_sources,
         model_calls=model_client.calls if model_client else None)
     if output_analyses.tasks.path!=store.path:raise ValueError('Output analysis must share the task store')
     from .reference_scope import ReferenceScopeService

@@ -10,7 +10,7 @@ from auto_lammps import coordination_analysis as coordination
 from auto_lammps import retained_analysis_bridge as bridge
 from auto_lammps.analysis import AnalysisError
 from auto_lammps.manifest import canonical, sha256
-from auto_lammps.output_analysis import _validate_output, selection_context
+from auto_lammps.output_analysis import _validate_output, selection_context, REFERENCE_METHODS_CONTEXT
 import test_coordination_analysis as geometry
 import test_output_analysis as fixture
 
@@ -47,6 +47,115 @@ def mixed_plan(files, count=60001, *, with_figure=False):
         index=next(i for i,op in enumerate(operations,1) if op['method']==coordination.METHOD)
         plan['figures']=[dict(id='selected_ordering',method='scatter',table='result'+str(index),x='type_i',y='alpha_ij')]
     return plan
+
+
+def headerless_plan(files, count=60001):
+    plan=mixed_plan(files,count)
+    for index,table in enumerate(plan['plan']['tables'],1):
+        if table.get('format')=='lammps_ave_time_scalar':
+            plan['plan']['tables'][index-1]=dict(id='raw'+str(index),file=table['file'],
+                sha256=sha256(files[table['file']]),format='whitespace',header_lines=0,
+                columns=[dict(name='step',unit='step'),dict(name='signal',unit='unknown'),dict(name='other',unit='1')])
+    return plan
+
+
+class HeaderlessMixedBridgeTests(unittest.TestCase):
+    def test_nine_headerless_60001_by_three_sources_use_full_existing_parser_in_eighteen_source_plan(self):
+        data=scalar_data().split(b'\n',2)[2];dump=geometry.synthetic_bcc_dump()
+        files={**{f'source{i+1}':data for i in range(9)},**{f'source{i+10}':dump for i in range(9)}}
+        plan=headerless_plan(files)
+        def fixed_worker_boundary(path,table,operation,source):
+            self.assertEqual(path.read_bytes(),dump)
+            self.assertEqual(source['sha256'],sha256(dump))
+            return dict(id=operation['id'],method=coordination.METHOD,parameters=operation,
+                source=dict(file=table['file'],sha256=source['sha256'],size=source['size']),
+                source_frame_count=1,selected_frame_count=1,
+                frames=[dict(frame=0,timestep=0,atom_count=54,
+                    directed=[[1,1,0,27,27,0.,.5,1.],[1,2,216,27,27,1.,.5,-1.],
+                        [2,1,216,27,27,1.,.5,-1.],[2,2,0,27,27,0.,.5,1.]],
+                    symmetric=[[1,1,1.],[1,2,-1.],[2,2,1.]])],
+                worker_receipt=dict(mode='synthetic_boundary_no_geometry_reexecution'),scientific_status='not_evaluated')
+        with patch.object(coordination,'analyze_isolated',side_effect=fixed_worker_boundary) as worker, \
+                patch.object(bridge.tables,'parse_table',wraps=bridge.tables.parse_table) as parser:
+            result=bridge.execute_plan(plan,files)
+        self.assertEqual(parser.call_count,9)
+        self.assertEqual(worker.call_count,9)
+        self.assertEqual(result['parsed_numeric_row_count'],540009)
+        self.assertEqual(len(result['sources']),18)
+        self.assertEqual(len(result['structural_results']),9)
+        for row in result['results']:
+            self.assertEqual(row['sample_count'],60001)
+            self.assertAlmostEqual(row['values']['mean'],30000.25+1000000/60001)
+            self.assertEqual(row['values']['max'],1030000.25)
+            self.assertEqual(row['source_line_ranges'],[[1,60001]])
+            self.assertEqual(row['value_units']['mean'],'unknown')
+            self.assertEqual(row['units_origin'],'declared_only_not_verified_in_raw_table')
+        for source in result['sources'][:9]:
+            self.assertEqual(source['parser']['format'],'whitespace')
+            self.assertEqual(source['parser']['header_lines'],0)
+            self.assertEqual(source['parser']['sha256'],sha256(data))
+            self.assertEqual(source['parser']['columns'][1]['unit'],'unknown')
+            self.assertEqual(source['source_line_extent'],[1,60001])
+        for selection in result['operation_sources'][:9]:
+            self.assertEqual(selection['source_sha256'],sha256(data))
+            self.assertEqual(selection['parser']['header_lines'],0)
+            self.assertEqual(selection['source_line_ranges'],[[1,60001]])
+
+    def test_labeled_and_scalar_parsers_remain_distinct_and_header_mismatch_names_the_raw_parser(self):
+        scalar=scalar_data(5)
+        headerless=scalar.split(b'\n',2)[2]
+        plan=mixed_plan({'source1':headerless},5)
+        plan['plan']['tables'][0]=dict(file='source1',columns=[dict(name='step',unit='step'),
+            dict(name='signal',unit='1'),dict(name='other',unit='1')])
+        with self.assertRaisesRegex(AnalysisError,'headerless.*format whitespace.*header_lines=0'):
+            bridge.execute_plan(plan,{'source1':headerless})
+        labeled=b'# columns: step signal other\n# units: step 1 1\n'+headerless
+        result=bridge.execute_plan(plan,{'source1':labeled})
+        self.assertEqual(result['results'][0]['source_line_ranges'],[[3,7]])
+        self.assertEqual(result['results'][0]['units_origin'],'declared_and_header_matched')
+        native=bridge.execute_plan(mixed_plan({'source1':scalar},5),{'source1':scalar})
+        self.assertEqual(native['results'][0]['values'],result['results'][0]['values'])
+        self.assertEqual(native['results'][0]['units_origin'],'declared_only_not_present_in_scalar_header')
+
+    def test_mixed_raw_parser_keeps_strict_SHA_lines_and_numeric_cell_checks(self):
+        data=scalar_data(5).split(b'\n',2)[2]
+        plan=headerless_plan({'source1':data},5)
+        for kind in ('sha','header','nonfinite','columns'):
+            changed=deepcopy(plan);values=data
+            if kind=='sha':changed['plan']['tables'][0]['sha256']='0'*64
+            if kind=='header':changed['plan']['tables'][0]['header_lines']=1
+            if kind=='nonfinite':
+                values=data.replace(b'1.2500000000000000e+00',b'nan',1)
+                changed['plan']['tables'][0]['sha256']=sha256(values)
+            if kind=='columns':changed['plan']['tables'][0]['columns'].pop()
+            if kind=='header':
+                result=bridge.execute_plan(changed,{'source1':values})
+                self.assertEqual(result['results'][0]['sample_count'],4)
+                self.assertEqual(result['results'][0]['source_line_ranges'],[[2,5]])
+            else:
+                with self.subTest(kind=kind),self.assertRaises(ValueError):
+                    bridge.execute_plan(changed,{'source1':values})
+
+    def test_service_binds_raw_SHA_without_mutating_model_proposal_or_inventing_headers(self):
+        files={'source1':scalar_data(5).split(b'\n',2)[2]}
+        plan=headerless_plan(files,5)
+        del plan['plan']['tables'][0]['sha256']
+        original=deepcopy(plan)
+        value=dict(status='ready',summary='Synthetic raw parser',limitations=['Units unknown'],plan=plan,
+            citations=[dict(id='method',source_id='request',quote='Synthetic data')],
+            column_evidence=[dict(table=t,column=c,meaning='Synthetic',unit=u,citations=['method'])
+                for (t,c),u in bridge.column_units(plan,files).items()])
+        evidence=dict(input_representation=bridge.REPRESENTATION,
+            sources=[dict(id='request',origin='user',locator='request',text='Synthetic data')])
+        bound,_=_validate_output(evidence,value,files)
+        self.assertEqual(value['plan'],original)
+        self.assertNotIn('sha256',value['plan']['plan']['tables'][0])
+        self.assertEqual(bound['plan']['tables'][0]['sha256'],sha256(files['source1']))
+        self.assertEqual(bound['plan']['tables'][0]['header_lines'],0)
+        self.assertNotIn('headers',bound['plan']['tables'][0])
+        menu=selection_context(dict(role='reference',input_representation=bridge.REPRESENTATION))
+        self.assertEqual(menu['mixed_native_tool']['minimal_headerless_example']['plan']['tables'][0]['header_lines'],0)
+        self.assertIn('headerless',menu['mixed_native_tool']['parser_selection']['raw'])
 
 
 class RetainedBridgeContractTests(unittest.TestCase):
@@ -272,13 +381,14 @@ class RetainedInputCompatibilityTests(unittest.TestCase):
 
     def test_completed_legacy_full_text_context_remains_readable_after_preview_upgrade(self):
         original=self.fx.service._input
-        def legacy(identifier,request,question,representation=None):
-            return original(identifier,request,question,None)
+        def legacy(identifier,request,question,representation=None,methods_context=None):
+            return original(identifier,request,question,None,None)
         with patch.object(self.fx.service,'_input',side_effect=legacy):
             record=self.fx.post().json()
         self.assertEqual(record['state'],'completed',record)
         context=self.fx.service._stored(self.fx.task,'a'*32)[0]
         self.assertNotIn('input_representation',context['input'])
+        self.assertNotIn('methods_context',context['input'])
         self.assertEqual(self.fx.service.get(self.fx.task,'a'*32)['result'],record['result'])
         self.assertEqual(self.fx.transport.call_count,1)
 
@@ -313,6 +423,132 @@ class RetainedInputCompatibilityTests(unittest.TestCase):
         self.assertEqual(evidence['files'][0]['sha256'],sha256(data))
         self.assertLess(len(canonical(evidence)),64000)
         self.assertTrue(all(s['preview']['only_preview'] for s in evidence['sources'] if s['origin']=='output'))
+        self.fx.transport.assert_not_called()
+
+
+class ReferenceMethodSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.fx=fixture.OutputAnalysisTests();self.fx.setUp();self.addCleanup(self.fx.doCleanups)
+        self.code=[dict(id='author-method1',origin='code',locator='Synthetic author method',
+            text='  # Synthetic dimensionless values\r\n  # Exact retained source only\r\n')]
+        binding=dict(kind='cached_author_method_sources',task_id=self.fx.task,paper_id='synthetic-paper',
+            role='author_reference_human_only',B_input=False,original_receipt_sha256='1'*64,
+            original_receipt_file_sha256='2'*64,retained_evidence_sha256='3'*64,capability_sha256='4'*64,
+            files_sha256='5'*64,read_proofs_sha256='6'*64,sources_sha256=sha256(canonical(self.code)))
+        self.cached=dict(task_id=self.fx.task,paper_id='synthetic-paper',paper=dict(title='Synthetic'),
+            scope='reference_only',B_input=False,available=True,sources=deepcopy(self.code),
+            source_binding=binding,missing=[],calls_model=False,reads_remote=False,submits_HPC=False)
+        self.provider=Mock(return_value=self.cached)
+        self.fx.service.reference_method_sources=self.provider
+
+    def test_new_reference_input_retains_original_code_whitespace_SHA_and_paper_binding(self):
+        self.fx.proposal['citations'][0]['source_id']='author-method1'
+        record=self.fx.post().json()
+        self.assertEqual(record['state'],'completed',record)
+        evidence=self.fx.service._stored(self.fx.task,'a'*32)[0]['input']
+        self.assertEqual(evidence['methods_context'],REFERENCE_METHODS_CONTEXT)
+        self.assertEqual(next(s for s in evidence['sources'] if s['origin']=='code'),self.code[0])
+        self.assertEqual(evidence['source_binding']['author_methods'],self.cached['source_binding'])
+        self.assertEqual(evidence['source_binding']['paper'],self.fx.reference.return_value['source_binding'])
+        self.assertEqual(record['result']['citations'][0]['source_sha256'],sha256(canonical(self.code[0])))
+        payload=json.loads(self.fx.transport.call_args.args[0])
+        sent=json.loads(payload['messages'][-1]['content'])
+        self.assertEqual(next(s for s in sent['sources'] if s['origin']=='code')['text'],self.code[0]['text'])
+        self.assertEqual(self.fx.transport.call_count,1)
+
+    def test_missing_optional_cache_preserves_missing_message_and_supported_raw_statistics(self):
+        self.cached.update(available=False,sources=[],source_binding=None,missing=['Synthetic cache not approved'])
+        record=self.fx.post().json()
+        self.assertEqual(record['state'],'completed',record)
+        evidence=self.fx.service._stored(self.fx.task,'a'*32)[0]['input']
+        self.assertTrue(any('Synthetic cache not approved' in text for text in evidence['missing']))
+        self.assertIsNone(evidence['source_binding']['author_methods'])
+        self.assertFalse(any(s['origin']=='code' for s in evidence['sources']))
+        self.assertEqual(record['result']['numeric_results'][0]['values']['mean'],2)
+
+    def test_research_never_calls_paper_or_author_method_provider(self):
+        snapshot=self.fx.ledger.evaluation_snapshot
+        def research_snapshot(*args,**kwargs):
+            value=snapshot(*args,**kwargs);value['identity']['role']='agent';return value
+        with patch.object(self.fx.ledger,'evaluation_snapshot',side_effect=research_snapshot):
+            evidence,_=self.fx.service._input(self.fx.task,self.fx.source,'Synthetic research only')
+        self.provider.assert_not_called();self.fx.reference.assert_not_called()
+        self.fx.transport.assert_not_called()
+        self.assertNotIn('methods_context',evidence)
+        self.assertIsNone(evidence['source_binding'])
+        self.assertFalse(any(s['origin'] in {'paper','code'} for s in evidence['sources']))
+
+    def _paper_only_input(self):
+        original=self.fx.service._input
+        def old_input(identifier,request,question,representation=bridge.REPRESENTATION,methods_context=None):
+            return original(identifier,request,question,representation,None)
+        return patch.object(self.fx.service,'_input',side_effect=old_input)
+
+    def test_completed_old_context_is_not_reinterpreted_when_author_provider_is_added_or_changed(self):
+        with self._paper_only_input():record=self.fx.post().json()
+        self.assertEqual(record['state'],'completed',record)
+        context=deepcopy(self.fx.service._stored(self.fx.task,'a'*32)[0])
+        self.assertNotIn('methods_context',context['input'])
+        self.provider.assert_not_called()
+        self.cached['source_binding']['read_proofs_sha256']='f'*64
+        self.assertEqual(self.fx.service.get(self.fx.task,'a'*32)['result'],record['result'])
+        self.assertEqual(self.fx.post().json()['result'],record['result'])
+        self.assertEqual(self.fx.service._stored(self.fx.task,'a'*32)[0],context)
+        self.provider.assert_not_called();self.assertEqual(self.fx.transport.call_count,1)
+
+    def test_old_technical_replay_keeps_P_only_context_and_reuses_the_paid_answer(self):
+        with self._paper_only_input(),patch('auto_lammps.postprocess_figures.render_figures',side_effect=OSError('synthetic')):
+            record=self.fx.post().json()
+        self.assertEqual(record['state'],'analysis_execution_failed',record)
+        original=deepcopy(self.fx.service._stored(self.fx.task,'a'*32)[0])
+        recovered=self.fx.post().json()
+        self.assertEqual(recovered['state'],'completed',recovered)
+        self.assertEqual(self.fx.service._stored(self.fx.task,'a'*32)[0],original)
+        self.assertNotIn('methods_context',original['input'])
+        self.provider.assert_not_called();self.assertEqual(self.fx.transport.call_count,1)
+
+    def test_cache_binding_change_during_answer_pauses_without_publishing_or_resending(self):
+        original_send=self.fx.transport.side_effect
+        def changed(*args):
+            answer=original_send(*args)
+            self.cached['source_binding']['read_proofs_sha256']='e'*64
+            return answer
+        self.fx.transport.side_effect=changed
+        record=self.fx.post().json()
+        self.assertEqual(record['state'],'paused',record)
+        self.assertIsNone(record['result'])
+        self.assertEqual(self.fx.post().json()['state'],'paused')
+        self.assertEqual(self.fx.transport.call_count,1)
+
+    def test_new_revision_adds_method_context_without_resetting_source_scope_or_round(self):
+        self.fx.proposal['citations'][0]['quote']='NOT_AN_ALLOWED_QUOTE'
+        failed=deepcopy(self.fx.proposal)
+        with self._paper_only_input():first=self.fx.post().json()
+        self.assertEqual(first['state'],'invalid_output',first)
+        self.fx.proposal['citations'][0]['quote']='dimensionless values'
+        second=self.fx.post('b'*32).json()
+        self.assertEqual(second['state'],'completed',second)
+        self.assertEqual(second['round'],2)
+        self.assertEqual(second['source_request_id'],first['source_request_id'])
+        self.assertEqual(second['question'],first['question'])
+        old=self.fx.service._stored(self.fx.task,'a'*32)[0]['input']
+        new=self.fx.service._stored(self.fx.task,'b'*32)[0]['input']
+        self.assertNotIn('methods_context',old)
+        self.assertEqual(new['methods_context'],REFERENCE_METHODS_CONTEXT)
+        payload=json.loads(self.fx.transport.call_args.args[0])
+        self.assertEqual(json.loads(payload['messages'][-1]['content'])['previous']['complete_previous_answer'],failed)
+        self.assertEqual(self.fx.calls.status()['used_requests'],2)
+
+    def test_mismatched_cached_source_SHA_or_cache_exception_returns_explicit_missing_only(self):
+        self.cached['sources'][0]['text']+='Changed without binding update'
+        evidence,_=self.fx.service._input(self.fx.task,self.fx.source,'Synthetic source validation')
+        self.assertFalse(any(s['origin']=='code' for s in evidence['sources']))
+        self.assertIsNone(evidence['source_binding']['author_methods'])
+        self.assertTrue(any('核验' in message for message in evidence['missing']))
+        self.provider.side_effect=OSError('PRIVATE_CACHE_PATH_CANARY')
+        evidence,_=self.fx.service._input(self.fx.task,self.fx.source,'Synthetic source validation')
+        self.assertNotIn('PRIVATE_CACHE_PATH_CANARY',canonical(evidence).decode())
+        self.assertFalse(any(s['origin']=='code' for s in evidence['sources']))
         self.fx.transport.assert_not_called()
 
 
