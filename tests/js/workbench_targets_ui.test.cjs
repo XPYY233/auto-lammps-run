@@ -25,6 +25,16 @@ test('opening the P inventory panel never creates a paid request',async()=>{
  const f=fixture();assert.equal(f.calls.length,0);await f.load();
  assert.equal(f.calls.length,1);assert.equal(f.calls[0].data,undefined);
 });
+test('approved refinement shares its bounded allowance and never resets the original rounds',async()=>{
+ const recovery={authorized:true,used_requests:0,maximum_additional_requests:3,remaining_requests:3,parent_inventory_request:REQUEST};
+ const f=fixture({status:{blocked:false,used_rounds:1,maximum_rounds:3,remaining_rounds:2,development_recovery:recovery}});await f.load();
+ const label='让应用 AI 细分子图与表列（开发恢复）',button=f.all().find(x=>x.textContent===label);
+ assert.equal(button.disabled,false);assert.equal(f.calls.filter(x=>x.data).length,0);
+ await button.onclick();assert.equal(f.calls.filter(x=>x.data).length,1);
+ const stopped=fixture({status:{blocked:false,used_rounds:1,maximum_rounds:3,remaining_rounds:2,
+  development_recovery:{...recovery,used_requests:3,remaining_requests:0}}});await stopped.load();
+ assert.equal(stopped.all().find(x=>x.textContent===label).disabled,true);
+});
 test('incomplete P unknown calls and the three round cap block generation',async()=>{
  for(const value of [{published_P_ready:false},{status:{blocked:true,used_rounds:1,maximum_rounds:3,remaining_rounds:2}},
    {status:{blocked:false,used_rounds:3,maximum_rounds:3,remaining_rounds:0}}]){

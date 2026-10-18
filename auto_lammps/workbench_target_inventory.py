@@ -226,6 +226,7 @@ class WorkbenchTargetInventory:
             raise TaskError('工作台目标库存服务配置无效。')
         self.tasks,self.papers,self.reference_provider=tasks,papers,reference_provider
         self.connection_provider=connection_provider
+        self.development_recovery=None
         self.locks=private_directory(tasks.path.parent/'workbench-target-locks')
         with tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS workbench_target_scopes(task_id TEXT PRIMARY KEY REFERENCES tasks(id),cap INTEGER NOT NULL)')
@@ -289,7 +290,50 @@ class WorkbenchTargetInventory:
         rows=self.history(identifier)
         return dict(**FLAGS,used_rounds=len(rows),maximum_rounds=MAX_ROUNDS,remaining_rounds=max(0,MAX_ROUNDS-len(rows)),
             blocked=any(r['state'] in {'prepared','dispatching','unknown'} for r in rows),
-            available=any(r['state']=='completed' for r in rows))
+            available=any(r['state']=='completed' for r in rows),
+            development_recovery=(self.development_recovery.development_status(identifier)
+                if self.development_recovery is not None else dict(authorized=False)))
+
+    def _refinement(self,identifier,evidence,client,model):
+        if self.development_recovery is None:return None
+        grant=self.development_recovery.development_status(identifier)
+        if not grant['authorized']:return None
+        parent_id=grant['parent_inventory_request'];saved=self._stored(identifier,parent_id)
+        if saved is None or not saved[1] or saved[1]['state']!='completed':
+            raise TaskError('细分需保留原完整库存，不能替换旧请求或从头重建。')
+        parent,record,_=saved;old=parent['model_binding']
+        if (parent['input']['paper_id']!=evidence['paper_id'] or parent['input']['paper']!=evidence['paper']
+                or parent['input']['source_binding']['pdf_sha256']!=evidence['source_binding']['pdf_sha256']
+                or parent['input']['sources']!=evidence['sources']
+                or not ReferenceTargetAnalysis._revision_binding_matches(old,model,client)):
+            raise TaskError('库存细分的原论文、全文或模型绑定已变化，未发送。')
+        call=client.calls.lookup(parent_id) or {};receipt=call.get('receipt') or {}
+        if (receipt.get('state')!='completed' or receipt.get('http_status')!=200
+                or receipt.get('finish_reason')!='stop' or receipt.get('transport_attempts')!=1
+                or receipt.get('output_sha256')!=sha256(canonical(receipt.get('structured_output')))
+                or {k:v for k,v in receipt.items() if k in _MODEL_RECEIPT_FIELDS}!=record['model_receipt']
+                or call.get('request_sha256')!=parent['request_sha256']
+                or sha256(request_body(DeepSeekConfig(**old['config']),parent['messages'],model=old['model'],
+                    thinking=old['thinking']))!=parent['request_sha256']):
+            raise TaskError('原完整库存答复或费用回执未通过核验，未修订。')
+        target=self.development_recovery._stored(identifier,grant['parent_target_request'])
+        if target is None or not target[2] or target[2]['state']!='completed':
+            raise TaskError('原目标核定的完整前稿尚未保留。')
+        return dict(parent_request=parent_id,complete_previous_answer=deepcopy(receipt['structured_output']),
+            source_output_sha256=receipt['output_sha256'],development_grant_id=grant['grant_id'],
+            previous_source_binding=deepcopy(parent['input']['source_binding']),
+            complete_previous_dependency_report=deepcopy(target[2]['report']),
+            feedback=dict(operation='refine_mixed_method_subfigures_and_table_columns',
+                scope_reduction_allowed=False,automatic_scientific_repair=False,
+                instruction='Use the complete original paper to split mixed-method panels and table columns. '
+                    'Preserve all original coverage and all native item/visual mappings. Retain existing IDs as '
+                    'grouping parents where appropriate. Distinguish LAMMPS evaluations and direct MD postprocessing '
+                    'from experiments, ML training/SHAP, analytical and cited results. Mark a non-LAMMPS target '
+                    'not_simulation even when its ML dataset originally came from MD. Never make an experimental '
+                    'sample or ML model a prerequisite for reproducing an independently reported MD value. '
+                    'Use existing output fields only; identify exact panels/columns in locator and label, use '
+                    'subfigure kind for panels, and keep tables/columns as table targets with explicit parent. '
+                    'If a split is not supported by original evidence, state the specific unresolved gap.'))
 
     def source_report(self,identifier,request=None):
         """Read a current complete P inventory; preserve stale history separately.
@@ -323,15 +367,22 @@ class WorkbenchTargetInventory:
 
     def _context(self,identifier,request,client,connection_revision,credential_generation):
         evidence=self._input(identifier)
+        recovery=(self.development_recovery.development_status(identifier)
+            if self.development_recovery is not None else dict(authorized=False))
+        model=(self._model(identifier,client,connection_revision,credential_generation)
+            if recovery['authorized'] else None)
+        refinement=self._refinement(identifier,evidence,client,model) if recovery['authorized'] else None
         with self.tasks.transaction() as db:
             complete=[r[0] for r in db.execute('SELECT i.id FROM workbench_target_intents i JOIN workbench_target_receipts r '
                 'ON r.id=i.id WHERE i.task_id=? AND i.id<>? AND json_extract(r.document,"$.state")="completed"',
                 (identifier,request))]
         for parent_id in complete:
-            if self._stored(identifier,parent_id)[0]['input']==evidence:
+            if (self._stored(identifier,parent_id)[0]['input']==evidence
+                    and not (refinement and parent_id==refinement['parent_request'])):
                 raise TaskError('同一已发布 P 已有完整库存；请复用原结果，不换编号重新收费生成。')
-        model=self._model(identifier,client,connection_revision,credential_generation)
+        if model is None:model=self._model(identifier,client,connection_revision,credential_generation)
         payload={**evidence,'workbench_target_inventory_menu':target_inventory_context(evidence)}
+        if refinement:payload['workbench_inventory_revision']=refinement
         with self.tasks.transaction() as db:
             prior=[r[0] for r in db.execute('SELECT i.id FROM workbench_target_intents i JOIN workbench_target_receipts r '
                 'ON r.id=i.id WHERE i.task_id=? AND i.id<>? ORDER BY i.at DESC,i.id DESC',(identifier,request))]
@@ -356,6 +407,7 @@ class WorkbenchTargetInventory:
             payload['workbench_inventory_revision']=dict(parent_request=parent_id,
                 complete_previous_answer=deepcopy(answer),source_output_sha256=receipt['output_sha256'],
                 feedback=inventory_revision_feedback(evidence,answer))
+            if refinement:payload['workbench_inventory_refinement']=refinement
             break
         messages=[dict(role='system',content=(
             'Return JSON matching workbench_target_inventory_menu.output_types. Build the COMPLETE paper target '
@@ -440,6 +492,9 @@ class WorkbenchTargetInventory:
                     raise TaskError('已发布 P、完整输入包络、模型连接或主动 Adapter 尚未通过发送前检查。') from None
                 with self.tasks.transaction() as db:
                     self._task(db,identifier,active=True)
+                    if (self.development_recovery is not None
+                            and self.development_recovery.development_status(identifier,db=db)['authorized']):
+                        self.development_recovery.assert_development_request(db,identifier)
                     db.execute('INSERT OR IGNORE INTO workbench_target_scopes VALUES(?,?)',(identifier,MAX_ROUNDS))
                     cap=db.execute('SELECT cap FROM workbench_target_scopes WHERE task_id=?',(identifier,)).fetchone()[0]
                     count=db.execute('SELECT count(*) FROM workbench_target_intents WHERE task_id=?',(identifier,)).fetchone()[0]

@@ -3077,8 +3077,11 @@ function appendWorkbenchTargetInventory(container,id,parentActive){
    if(item.receipt?.message)row.append(node('p',item.receipt.message));
    if(Number.isInteger(item.usage?.total_tokens))row.append(node('small','已记录模型用量 '+item.usage.total_tokens));history.append(row);
   }area.append(history);
-  const run=node('button','让应用 AI 整理完整 P 为图表目标','primary');
-  run.disabled=pending||Boolean(report)||!data.published_P_ready||data.status.blocked||data.status.remaining_rounds===0;
+  const recovery=data.status.development_recovery||{},refining=recovery.authorized===true;
+  const run=node('button',refining?'让应用 AI 细分子图与表列（开发恢复）':'让应用 AI 整理完整 P 为图表目标','primary');
+  run.disabled=pending||(Boolean(report)&&(!refining||saved.request_id!==recovery.parent_inventory_request))||!data.published_P_ready||data.status.blocked||data.status.remaining_rounds===0||
+    (refining&&recovery.remaining_requests===0);
+  if(refining)area.append(node('p',`同任务开发恢复已使用 ${recovery.used_requests}/${recovery.maximum_additional_requests} 次；目标细分与依赖核定共用额度，原记录及费用保留。`,'form-note'));
   const note=node('p',`已使用 ${data.status.used_rounds}/${data.status.maximum_rounds} 轮；保留完整前稿、错误和费用。`,'form-note');
   run.onclick=async()=>{if(!alive()||run.disabled)return;pending=true;run.disabled=true;note.textContent='应用 AI 正在整理完整 P；可以离开页面，返回后查看同一请求记录。';
    try{await api(`/api/tasks/${id}/workbench/targets`,{request_id:crypto.randomUUID().replaceAll('-','')});}
@@ -3502,9 +3505,11 @@ function renderAuthorDiscussion(box,report,identity){
 let targetPreviewGeneration=0;
 function referenceLammpsTargetIds(answer){
  const dependencies=new Map(answer.dependencies.map(row=>[row.id,row]));
+ const inventory=new Map((answer.inventory?.targets||[]).map(row=>[row.id,row]));
  const usesLammps=(id,seen=new Set())=>{if(seen.has(id))return false;seen.add(id);const row=dependencies.get(id);
   return Boolean(row&&(row.data_class==='raw_lammps'||row.requires.some(parent=>usesLammps(parent,seen))));};
- return answer.targets.filter(row=>row.data_class==='raw_lammps'||row.dependency_ids.some(id=>usesLammps(id))).map(row=>row.target_id);
+ return answer.targets.filter(row=>inventory.get(row.target_id)?.availability!=='not_simulation'&&
+   (row.data_class==='raw_lammps'||row.dependency_ids.some(id=>usesLammps(id)))).map(row=>row.target_id);
 }
 async function renderReferenceScopeSelection(box,id,record,answer,review,alive){
  const form=node('section',undefined,'reference-scope-selection');box.append(form);
@@ -3565,7 +3570,8 @@ async function renderReferenceTargetAnalysis(panel,report,identity,{historyOnly=
   try{result=await api(`/api/tasks/${id}/reference-target-analysis`);}
   catch(error){if(alive())content.replaceChildren(node('p','目标核定记录暂不可读取：'+error.message,'error'));return;}
   if(!alive()||result.task_id!==id)return;
-  const records=result.history||[];content.replaceChildren();
+  const records=result.history||[],development=result.development_recovery||{};content.replaceChildren();
+  if(development.authorized)content.append(node('p',`同任务开发恢复已使用 ${development.used_requests}/${development.maximum_additional_requests} 次；与 P 子图/表列细分共用，原三稿及费用保留，不算三轮内成功。`,'form-note'));
   const pending=records.some(r=>r.blocking!==false&&['prepared','dispatching','reserved','calling','unknown'].includes(r.state));
   const latest=records.at(-1),review=latest?.reviews?.filter(r=>r.state==='completed').at(-1),answer=latest?.state==='completed'?latest.report:review?.report;
   if(answer){
@@ -3627,8 +3633,9 @@ async function renderReferenceTargetAnalysis(panel,report,identity,{historyOnly=
     }
    }
    history.append(item);}content.append(history);
-  const run=node('button','让应用 AI 核定全部 P 目标与共享计算依赖','primary');run.disabled=historyOnly||pending||records.length>=3;
-  const note=node('p',historyOnly?'当前 P 库存尚未就绪；仍可查看原核定历史，并在核对供应商后恢复原请求。':pending?'原请求仍待核对，不新发或重建。':records.length>=3?'本任务三次建议已用完，原产物与费用保留。':`已使用 ${records.length}/3 次目标建议；仅明确点击后调用已配置模型。`,'form-note');
+  const exhausted=development.authorized?development.remaining_requests===0:records.length>=3;
+  const run=node('button',development.authorized?'让应用 AI 修订细分目标与依赖（开发恢复）':'让应用 AI 核定全部 P 目标与共享计算依赖','primary');run.disabled=historyOnly||pending||exhausted;
+  const note=node('p',historyOnly?'当前 P 库存尚未就绪；仍可查看原核定历史，并在核对供应商后恢复原请求。':pending?'原请求仍待核对，不新发或重建。':exhausted?'本任务已批准的建议次数已用完，原产物与费用保留。':`已使用 ${records.length} 次目标建议；仅明确点击后调用已配置模型。`,'form-note');
   const reload=node('button','刷新目标核定记录');reload.onclick=refresh;
   run.onclick=async()=>{if(!alive()||run.disabled)return;run.disabled=true;note.textContent='应用 AI 正在核定完整 P；可以查看其他任务，回来刷新原请求。';
    try{await api(`/api/tasks/${id}/reference-target-analysis`,{request_id:crypto.randomUUID().replaceAll('-','')});if(alive())await refresh();}

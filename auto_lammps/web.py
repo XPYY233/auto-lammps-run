@@ -346,7 +346,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None, author_execution_config=None):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None, author_execution_config=None, reference_target_recovery_authorizations=()):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -584,6 +584,9 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
         connection_provider=reference_target_connection,
         historical_reference_provider=historical_reference_target_sources)
+    for grant in reference_target_recovery_authorizations:
+        reference_targets.authorize_development_recovery(grant)
+    workbench_targets.development_recovery=reference_targets
     def output_analysis_connection(identifier):
         store.get(identifier)
         if model_client is None:raise TaskError('本项目模型调用账本尚未配置。')
@@ -1653,7 +1656,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 if not row.get('unknown_reissue') else '这笔请求已有一次恢复记录，不能再次重发。'))
             for row in history if row['original_state']=='unknown']
         return {'task_id': identifier, 'history':history,
-            'unknown_reissues':options,'execution_authorized': False, 'B_input': False}
+            'unknown_reissues':options,'development_recovery':reference_targets.development_status(identifier),
+            'execution_authorized': False, 'B_input': False}
 
     @app.post('/api/tasks/{identifier}/reference-target-analysis/unknown-reissue')
     def reissue_unknown_reference_target(identifier: str,data: ReferenceTargetUnknownReissueInput):
@@ -2187,6 +2191,8 @@ def main():
     parser.add_argument('--author-reference-config',type=Path,help='Private reference-only source, license and deployment bindings; plan preparation is not submission')
     parser.add_argument('--author-execution-config',type=Path,help='Explicit private author A accounted execution deployment; user approval remains required')
     parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
+    parser.add_argument('--reference-target-recovery-config',type=Path,
+        help='Private explicit same-task P refinement approvals; no execution or unknown-request authorization')
     parser.add_argument('--resource-discoveries', type=Path, help='Operator-only discovery handoff; no execution permission')
     parser.add_argument('--resource-discovery-reviews', type=Path, help='Controller conflict/missing-resource annotations')
     parser.add_argument('--reports-directory',help='Existing private analysis report directory for read-only results')
@@ -2256,6 +2262,15 @@ def main():
         from .workbench_runtime import assemble_private_workbench
         workbench_bridge, workbench_bindings = assemble_private_workbench(papers, args.workbench_config)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
+    recovery_authorizations=()
+    if args.reference_target_recovery_config:
+        recovery_path=args.reference_target_recovery_config.absolute()
+        with root_descriptor(recovery_path.parent) as root:
+            recovery=json.loads(read_file(root,recovery_path.name,262144))
+        if (not isinstance(recovery,dict) or set(recovery)!={'version','authorizations'}
+                or recovery['version']!=1 or not isinstance(recovery['authorizations'],list)):
+            parser.error('Invalid private P refinement approval configuration')
+        recovery_authorizations=recovery['authorizations']
     from .discovery_library import DiscoveryLibrary
     uvicorn.run(create_app(store, port=args.port, papers=papers, model_client=model_client,
                           candidate_service=candidate_service,results_reader=results_reader,
@@ -2266,6 +2281,7 @@ def main():
                           reference_output_config=args.reference_output_config,
                           author_reference_config=args.author_reference_config,
                           author_execution_config=args.author_execution_config,
+                          reference_target_recovery_authorizations=recovery_authorizations,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,
                 proxy_headers=False, access_log=False, server_header=False)

@@ -3,6 +3,15 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const source=fs.readFileSync('auto_lammps/web_assets/app.js','utf8');
 const code=source.slice(source.indexOf('function referenceLammpsTargetIds('),source.indexOf('async function renderReferenceTargetAnalysis('));
 const ID='a'.repeat(32),REQ='b'.repeat(32),SHA='c'.repeat(64);
+test('AI-marked non-LAMMPS outputs stay visible but are not automatically selected through MD ancestry',()=>{
+ const c={};vm.createContext(c);vm.runInContext(code,c);
+ const value={inventory:{targets:[{id:'direct',availability:'new_calculation'},{id:'ml',availability:'not_simulation'}]},
+  targets:[{target_id:'direct',data_class:'raw_lammps',dependency_ids:['md']},
+   {target_id:'ml',data_class:'postprocessing',dependency_ids:['training']}],
+  dependencies:[{id:'md',data_class:'raw_lammps',requires:[]},{id:'training',data_class:'postprocessing',requires:['md']}]};
+ assert.deepEqual(JSON.parse(JSON.stringify(c.referenceLammpsTargetIds(value))),['direct']);
+ assert.equal(value.targets.length,2);
+});
 const answer={inventory:{targets:[{id:'raw',label:'Table 1'},{id:'derived',label:'Fig. 2'},{id:'analytic',label:'Fig. 3'},{id:'cited',label:'Cited value'}]},
  targets:[{target_id:'raw',data_class:'raw_lammps',dependency_ids:['raw']},{target_id:'derived',data_class:'postprocessing',dependency_ids:['stats']},{target_id:'analytic',data_class:'analytical',dependency_ids:['stats']},{target_id:'cited',data_class:'cited',dependency_ids:[]}],
  dependencies:[{id:'raw',label:'Shared raw calculation',data_class:'raw_lammps',requires:[]},{id:'stats',label:'Shared statistics',data_class:'postprocessing',requires:['raw']}]};
