@@ -94,6 +94,14 @@ class ReferenceTargetDevelopmentBudgetTests(unittest.TestCase):
         self.assertEqual(payload['sources'],self.original['sources'])
         self.assertEqual(payload['reference_target_revision']['inventory_refinement']['current_target_ids'],
             ['fig1a','table1-column'])
+        menu=payload['verified_inventory_citations']
+        inventory_context,inventory_receipt,_=self.inventory._stored(self.task,'3'*32)
+        self.assertEqual(menu['inventory_request_id'],'3'*32)
+        self.assertEqual(menu['target_evidence'],inventory_receipt['report']['target_evidence'])
+        self.assertEqual(menu['citation_check'],'exact_paper_source_membership')
+        self.assertEqual(menu['context_sha256'],sha256(canonical(inventory_context)))
+        self.assertEqual(menu['receipt_sha256'],sha256(canonical(inventory_receipt)))
+        self.assertIn('do not reconstruct captions',context['messages'][0]['content'])
         validate_prepared_messages('reference_target_analysis',context['messages'],context['input'])
         self.assertEqual(self.service.development_status(self.task)['remaining_requests'],1)
         last=self.analyze('6'*32);self.assertEqual(last['state'],'completed',last)
@@ -200,3 +208,19 @@ class ReferenceTargetDevelopmentBudgetTests(unittest.TestCase):
         other=self.f.tasks.create('Synthetic separate research','Synthetic request','research')
         with self.assertRaises(TaskError):self.authorize(task_id=other['id'])
         self.assertEqual(self.service.development_status(self.task)['used_requests'],0)
+
+    def test_verified_citation_menu_refuses_changed_model_output_or_wrong_publication(self):
+        self.authorize();self.refine();evidence=self.inventory.reference_target_source(self.task)
+        calls=self.f.calls.lookup
+        def altered(identifier):
+            call=deepcopy(calls(identifier))
+            if identifier=='3'*32:
+                call['receipt']['structured_output']['target_evidence'][0]['citations'][0]['quote']='Reconstructed caption.'
+            return call
+        with patch.object(self.f.calls,'lookup',side_effect=altered),self.assertRaises(TaskError):
+            self.service._verified_inventory_citations(self.task,evidence,self.f.client)
+        changed=deepcopy(evidence);changed['source_binding']['source_receipt_sha256']='0'*64
+        with self.assertRaises(TaskError):self.service._verified_inventory_citations(self.task,changed,self.f.client)
+        with patch('auto_lammps.workbench_target_inventory.validate_inventory_output',return_value={}),self.assertRaises(TaskError):
+            self.service._verified_inventory_citations(self.task,evidence,self.f.client)
+        self.assertEqual(self.service.development_status(self.task)['used_requests'],1)

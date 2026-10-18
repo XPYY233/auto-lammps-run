@@ -209,8 +209,11 @@ class WorkbenchTargetInventoryTests(unittest.TestCase):
         self.assertEqual(revision['parent_request'],'d'*32)
         self.assertEqual(revision['source_output_sha256'],sha256(canonical(first)))
         paths=[r['path'] for r in revision['feedback']['errors']]
-        self.assertIn(['target_evidence',0,'citations'],paths)
-        self.assertIn(['coverage','items',0,'citations'],paths)
+        self.assertIn(['target_evidence',0,'citations',0],paths)
+        self.assertIn(['coverage','items',0,'citations',0],paths)
+        self.assertEqual(next(r for r in revision['feedback']['errors']
+            if r['path']==['target_evidence',0,'citations',0])['original_citation'],
+            first['target_evidence'][0]['citations'][0])
         self.value['coverage']['items'][0]['citations'][0]['quote']=self.quote
         self.value['target_evidence'][0]['citations'][0]['quote']=self.quote
         self.assertEqual(self.generate('f'*32,service=self.make_service())['state'],'completed')
