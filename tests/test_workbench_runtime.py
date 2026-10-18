@@ -79,10 +79,22 @@ class WorkbenchRuntimeTests(unittest.TestCase):
         with self.assertRaises(WorkbenchRuntimeError):
             self.assemble()
 
+    def test_completed_native_capability_allowlist_rejects_invalid_operator_config_before_storage(self):
+        for value in ('a'*64, ['a'*64]*2, ['A'*64], ['f'*63], [None], [{}],
+                [format(i,'064x') for i in range(9)]):
+            self.config['completed_native_capability_allowlist']=value;self.save()
+            with self.subTest(value=value),self.assertRaises(WorkbenchRuntimeError):self.assemble()
+        self.assertEqual(list(self.storage.iterdir()),[])
+
 
 @unittest.skipUnless(importlib.util.find_spec('auto_research') is not None,
     'separately installed literature workbench is optional')
 class InstalledWorkbenchRuntimeTests(WorkbenchRuntimeTests):
+    def test_completed_native_capability_allowlist_is_private_immutable_runtime_configuration(self):
+        self.config['completed_native_capability_allowlist']=['a'*64,'b'*64];self.save()
+        bridge,_=self.assemble()
+        self.assertEqual(bridge.runtime.completed_native_capability_allowlist,('a'*64,'b'*64))
+
     def test_dedicated_storage_has_original_exports_and_persistent_snapshot_key(self):
         import fitz
         bridge, bindings = self.assemble()

@@ -83,6 +83,28 @@ class WebWorkbenchTests(unittest.TestCase):
             self.assertFalse(status['enabled'])
             self.assertIsNone(status['evidence'])
 
+    def test_completed_continuation_proofs_are_read_only_status_not_cost_settlement(self):
+        proof=dict(unknown_request_id='d'*32,superseded_by='e'*32,
+            task_id=self.task['id'],source_sha256=self.binding.pdf_sha256,
+            data_continuation_completed=True,unknown_charge_unsettled=True,
+            repair_visuals_only=True,automatic_retry=False)
+        self.bridge.completed_unknown_reissues=lambda identifier:[proof] if identifier==self.task['id'] else []
+        before=self.tasks.get(self.task['id'])
+        status=self.client.get(self.base)
+        self.assertEqual(status.status_code,200,status.text)
+        self.assertEqual(status.json()['completed_unknown_reissues'],[proof])
+        self.assertEqual(self.tasks.get(self.task['id']),before)
+        self.assertEqual(self.outgoing,[])
+
+    def test_invalid_completed_continuation_proof_fails_closed_without_hiding_saved_status(self):
+        from auto_lammps.tasks import TaskError
+        def invalid(identifier):raise TaskError('Synthetic sealed proof mismatch')
+        self.bridge.completed_unknown_reissues=invalid
+        response=self.client.get(self.base)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['completed_unknown_reissues'],[])
+        self.assertEqual(self.outgoing,[])
+
     def test_invalid_workbench_source_does_not_hide_other_reference_routes(self):
         from auto_lammps.tasks import TaskError
         def unavailable(*args):

@@ -17,12 +17,14 @@ import sys
 VERSION = 1
 MAX_FILES = 32
 MAX_FILE_BYTES = 4 * 1024 * 1024
-MAX_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_REQUEST_BYTES = 64 * 1024
 _ID = re.compile(r'[a-f0-9]{32}')
 _HASH = re.compile(r'[a-f0-9]{64}')
 _JOB = re.compile(r'[0-9]{1,32}')
-_PART = re.compile(r'[A-Za-z0-9_.-]{1,255}')
+# Relative paths are passed to dir-fd operations, never interpolated into a
+# shell. Retain spaces and '=' used by original LAMMPS output directories.
+_PART = re.compile(r'[A-Za-z0-9_.= \-]{1,255}')
 _NAME = re.compile(r'[A-Za-z0-9_.-]{1,160}')
 
 
@@ -85,6 +87,20 @@ def validate_request(request):
     if total > MAX_TOTAL_BYTES or len(canonical(request)) > MAX_REQUEST_BYTES:
         raise ReferenceOutputError('reference_output_request_limit')
     return request
+
+
+
+def response_limit(request):
+    """Bound actual SSH stdout plus stderr for the pinned byte selection.
+
+    Each file is base64 inside one canonical JSON response. The local capture
+    utility encodes its return value again only after enforcing this bound.
+    """
+    validate_request(request)
+    empty = {key: request[key] for key in ('version','request_id','job_id','manifest_sha256')}
+    empty['files'] = [dict(item,data='') for item in request['files']]
+    encoded = sum(4*((item['size']+2)//3) for item in request['files'])
+    return len(canonical(empty))+encoded+65536
 
 
 def _directory(name, parent=None, *, owned=False):

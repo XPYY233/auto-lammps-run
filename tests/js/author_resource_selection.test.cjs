@@ -192,3 +192,23 @@ test('empty clarified and invalid nonempty selections never offer fetching',asyn
   const s=setup();await open(s,status({used_rounds:1,history:[row],latest:row}));assert.equal(button(s,FETCH),undefined);
  }
 });
+
+test('known partial fetch continues missing files under the original operation without another selection',async()=>{
+ const s=setup(),row=selected(),partial={operation_id:OPERATION,selection_request_id:REQUEST,
+  state:'partial',recoverable:false,resumable:true,resume_reason:'Original files and cumulative budgets are retained.',
+  report:{files:[{path:'scripts/helper.py',size:200,sha256:'f'.repeat(64)}],failures:[]}};
+ await open(s,status({used_rounds:1,history:[row],latest:row,acquisitions:{history:[partial],latest:partial}}));
+ const pending=button(s,'继续原请求未完成的原件').onclick();
+ assert.deepEqual(plain(s.calls.at(-1).body),{request_id:OPERATION,selection_request_id:REQUEST});
+ assert.equal(s.calls.at(-1).path,`/api/tasks/${TASK}/author-resources/selected-files`);assert.equal(s.uuids(),0);
+ const done={...partial,state:'selected_complete',resumable:false,selected_complete:true};
+ await finish(s,pending,{latest:done},status({used_rounds:1,history:[row],latest:row,acquisitions:{history:[partial,done],latest:done}}));
+ assert.equal(button(s,'继续原请求未完成的原件'),undefined);
+});
+test('exhausted partial does not create another fetch with a new identity',async()=>{
+ const s=setup(),row=selected(),partial={operation_id:OPERATION,selection_request_id:REQUEST,
+ state:'partial',recoverable:false,resumable:false,resume_reason:'Original cumulative transfer budget is exhausted.',report:{}};
+ await open(s,status({used_rounds:1,history:[row],latest:row,acquisitions:{history:[partial],latest:partial}}));
+ assert.equal(button(s,'继续原请求未完成的原件'),undefined);assert.equal(button(s,FETCH).disabled,true);
+ assert.equal(s.calls.filter(call=>call.body!==undefined).length,0);assert.equal(s.uuids(),0);
+});

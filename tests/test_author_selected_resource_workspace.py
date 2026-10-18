@@ -126,6 +126,7 @@ class AuthorSelectedWorkspaceTests(unittest.TestCase):
 
     def test_unknown_reuses_original_operation_for_reconcile_without_model_or_new_download(self):
         self.lose_response=True;value=self.acquire();self.assertEqual(value['latest']['state'],'unknown')
+        self.assertFalse(value['latest']['resumable'])
         count=len(self.fx.blobs.calls);self.selected.reset_mock()
         self.workspace._resource_selection_input.reset_mock()
         with self.assertRaisesRegex(TaskError,'待核对'):
@@ -167,8 +168,37 @@ class AuthorSelectedWorkspaceTests(unittest.TestCase):
     def test_partial_and_forged_selected_receipts_never_enter_completed(self):
         self.fx.blobs.change=lambda value,count:value.update(sha='f'*40) if count==2 else None
         partial=self.acquire();self.assertEqual(partial['latest']['state'],'partial')
+        self.assertTrue(partial['latest']['resumable']);self.assertTrue(partial['latest']['can_resume'])
+        before=len(self.fx.blobs.calls)
+        self.assertTrue(self.service.status(self.task)['latest']['resumable'])
+        self.assertEqual(len(self.fx.blobs.calls),before)
         self.assertEqual(self.service.completed(self.task),[]);self.assertEqual(self.actions,['acquire'])
-        self.assertEqual(self.acquire()['latest']['state'],'partial');self.assertEqual(self.actions,['acquire'])
+        resumed=self.acquire()
+        self.assertEqual(resumed['latest']['state'],'selected_complete')
+        self.assertFalse(resumed['latest']['resumable'])
+        self.assertEqual(self.actions,['acquire','resume'])
+        self.assertEqual(len(self.service.status(self.task)['history']),1)
+
+    def test_partial_resume_projection_requires_original_connection_and_remaining_budget(self):
+        from unittest.mock import patch
+        from auto_lammps import reference_selected_resource_worker as worker
+        self.fx.blobs.change=lambda value,count:value.update(sha='f'*40) if count==2 else None
+        self.assertTrue(self.acquire()['latest']['resumable'])
+        before=len(self.fx.blobs.calls)
+        with patch.object(worker,'MAX_CALLS',2):
+            projection=self.service.status(self.task)['latest']
+            self.assertFalse(projection['resumable'])
+            self.assertEqual(projection['resume_reason'],'selected_request_limit')
+        with patch.object(worker,'blob_response_limit',return_value=worker.MAX_TRANSFER):
+            projection=self.service.status(self.task)['latest']
+            self.assertFalse(projection['resumable'])
+            self.assertEqual(projection['resume_reason'],'selected_transfer_budget_exceeded')
+        self.source_context['transport_identity_sha256']='f'*64
+        projection=self.service.status(self.task)['latest']
+        self.assertFalse(projection['resumable'])
+        self.assertEqual(projection['resume_reason'],'selected_operation_binding_unverified')
+        self.assertEqual(len(self.fx.blobs.calls),before)
+        self.assertEqual(self.actions,['acquire'])
 
     def test_forged_whole_repository_receipt_becomes_unknown_and_keeps_remote_originals(self):
         self.invalid_response=True;result=self.acquire()

@@ -9,6 +9,8 @@ from copy import deepcopy
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import io
+import zipfile
 import json
 import os
 from pathlib import Path
@@ -30,6 +32,9 @@ MAX_FILES = 128
 BATCH_FILES = 16
 MAX_CALLS = 128
 MAX_OPERATIONS = 8
+MAX_RESUMES = 8
+# Reviewed legacy reader: real urllib reads at most maximum_bytes+1.
+_LEGACY_READER_SHA256 = 'c2eeae07851bcba8ea9b3daa40b8845debbe894a1caf92dbddb65a1a85e42eeb'
 MAX_REPORT = 500_000
 MAX_REQUEST = 150_000
 FLAGS = dict(scope='reference_only', B_input=False, source_complete=False,
@@ -101,15 +106,18 @@ def _report(request, state='unknown'):
         request_sha256=sha256(canonical(request)), location='hpc',
         remote_directory=original['directory']+'/'+original['id']+'/selected-resources/'+request['id'],
         state=state, selected_complete=False, files=[], missing=deepcopy(request['selected']), failures=[],
-        source_bytes=0, request_count=0, received_bytes=0, transfer_accounting_complete=False,
+        source_bytes=0, request_count=0, received_bytes=0, received_budget_bytes=0,
+        accounting_mode='unknown', transfer_accounting_complete=False,
         inventory_sha256=sha256(canonical([])), **FLAGS)
 
 
 def validate_selected_report(request, report):
     expected = _report(request)
     mutable = {'state','selected_complete','files','missing','failures','source_bytes','request_count',
-               'received_bytes','transfer_accounting_complete','inventory_sha256'}
-    if (not isinstance(report, dict) or set(report) != set(expected)
+               'received_bytes','received_budget_bytes','accounting_mode',
+               'transfer_accounting_complete','inventory_sha256'}
+    legacy=set(expected)-{'received_budget_bytes','accounting_mode'}
+    if (not isinstance(report, dict) or set(report) not in (set(expected),legacy)
             or len(canonical(report)) > MAX_REPORT
             or any(report[k] != expected[k] or type(report[k]) is not type(expected[k]) for k in set(expected)-mutable)
             or report['state'] not in {'selected_complete','partial','unknown'}
@@ -121,6 +129,13 @@ def validate_selected_report(request, report):
             or not isinstance(report['files'], list) or len(report['files']) > MAX_FILES
             or not isinstance(report['failures'], list) or len(report['failures']) > 1):
         raise AcquisitionError('invalid_selected_resource_receipt')
+    budget=report.get('received_budget_bytes',report['received_bytes'])
+    mode=report.get('accounting_mode','exact' if report['transfer_accounting_complete'] else 'unknown')
+    if (type(budget) is not int or not report['received_bytes']<=budget<=MAX_TRANSFER
+            or mode not in {'exact','conservative_upper_bound','unknown'}
+            or (mode=='exact' and (not report['transfer_accounting_complete'] or budget!=report['received_bytes']))
+            or (mode=='conservative_upper_bound' and (report['transfer_accounting_complete'] or budget==report['received_bytes']))):
+        raise AcquisitionError('invalid_selected_transfer_accounting')
     selected = {row['path']:row for row in request['selected']}; seen=set()
     for row in report['files']:
         if (not isinstance(row,dict) or set(row) != {'path','blob_sha1','size','git_mode','sha256'}
@@ -249,28 +264,17 @@ def _saved(parent, request):
         _private_directory(folder)
         if _json(_read(folder,'intent.json',MAX_REQUEST)) != request:
             raise AcquisitionError('selected_operation_identity_conflict')
-        try: report=validate_selected_report(request,_json(_read(folder,'result.json',MAX_REPORT)))
+        resumes=sorted(name for name in os.listdir(folder) if re.fullmatch(r'resume-[0-9]{3}-intent\.json',name))
+        if len(resumes)>MAX_RESUMES:raise AcquisitionError('selected_resume_limit')
+        final='result.json' if not resumes else resumes[-1].replace('-intent.json','-result.json')
+        try: report=validate_selected_report(request,_json(_read(folder,final,MAX_REPORT)))
         except FileNotFoundError:
             progress=[name for name in os.listdir(folder) if re.fullmatch(r'progress-[0-9]{3}\.json',name)]
             if len(progress)>MAX_FILES: raise AcquisitionError('selected_progress_limit')
             report=validate_selected_report(request,_json(_read(folder,sorted(progress)[-1],MAX_REPORT))) if progress else _report(request)
             report=deepcopy(report);report['state']='unknown';report['selected_complete']=False
-            attempted=sorted(name for name in os.listdir(folder) if re.fullmatch(r'fetch-[0-9]{3}-intent\.json',name))
-            if len(attempted)>MAX_CALLS: raise AcquisitionError('selected_request_limit')
-            received=0;complete=True
-            for index,name in enumerate(attempted,1):
-                if name!=f'fetch-{index:03d}-intent.json':
-                    raise AcquisitionError('selected_fetch_accounting_gap')
-                try: outcome=_json(_read(folder,f'fetch-{index:03d}-result.json',1024))
-                except FileNotFoundError:
-                    complete=False;continue
-                if (not isinstance(outcome,dict) or set(outcome)!={'bytes','sha256'}
-                        or type(outcome['bytes']) is not int or not 0<=outcome['bytes']<=MAX_RESPONSE
-                        or not isinstance(outcome['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',outcome['sha256'])):
-                    raise AcquisitionError('selected_fetch_accounting_invalid')
-                received+=outcome['bytes']
-            report.update(request_count=len(attempted),received_bytes=received,
-                transfer_accounting_complete=complete)
+            accounting=_fetch_accounting(folder)
+            report.update(**accounting)
             validate_selected_report(request,report)
         if report['files']:
             source=os.open('source',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=folder);_private_directory(source)
@@ -281,10 +285,136 @@ def _saved(parent, request):
         os.close(folder)
 
 
+def blob_response_limit(size):
+    """Base64 plus JSON-escaped LF/CRLF every 60 characters and metadata.
+
+    GitHub's content string contains wrapping; JSON encodes LF as two bytes
+    and CRLF as four. The fixed 8KiB remainder bounds all non-content fields.
+    """
+    if type(size) is not int or not 0<=size<=MAX_BLOB:raise AcquisitionError('invalid_selected_blob_size')
+    encoded=4*((size+2)//3)
+    return encoded+4*((encoded+59)//60)+8192
+
+
+def _exists(folder,name):
+    try:os.stat(name,dir_fd=folder,follow_symlinks=False);return True
+    except FileNotFoundError:return False
+
+
+def _fetch_accounting(folder):
+    attempted=sorted(name for name in os.listdir(folder) if re.fullmatch(r'fetch-[0-9]{3}-intent\.json',name))
+    if len(attempted)>MAX_CALLS:raise AcquisitionError('selected_request_limit')
+    received=budget=0;complete=True;estimated=False
+    for index,name in enumerate(attempted,1):
+        if name!=f'fetch-{index:03d}-intent.json':raise AcquisitionError('selected_fetch_accounting_gap')
+        intent=_json(_read(folder,name,2048))
+        if (not isinstance(intent,dict) or set(intent)!={'endpoint','maximum_bytes'}
+                or not isinstance(intent['endpoint'],str) or type(intent['maximum_bytes']) is not int
+                or not 0<intent['maximum_bytes']<=MAX_RESPONSE):
+            raise AcquisitionError('selected_fetch_accounting_invalid')
+        try:outcome=_json(_read(folder,f'fetch-{index:03d}-result.json',1024))
+        except FileNotFoundError:
+            try:upper=_json(_read(folder,f'fetch-{index:03d}-upper-bound.json',1024))
+            except FileNotFoundError:complete=False;continue
+            if (not isinstance(upper,dict) or set(upper)!={'bytes_upper_bound','maximum_bytes',
+                    'reason','legacy_reader_sha256','legacy_result_sha256'}
+                    or upper['reason']!='legacy_selected_transfer_envelope'
+                    or upper['legacy_reader_sha256']!=_LEGACY_READER_SHA256
+                    or upper['maximum_bytes']!=intent['maximum_bytes']
+                    or type(upper['bytes_upper_bound']) is not int
+                    or upper['bytes_upper_bound']!=intent['maximum_bytes']+1
+                    or upper['bytes_upper_bound']>MAX_RESPONSE
+                    or upper['legacy_result_sha256']!=sha256(_read(folder,'result.json',MAX_REPORT))):
+                raise AcquisitionError('selected_fetch_accounting_invalid')
+            budget+=upper['bytes_upper_bound'];complete=False;estimated=True;continue
+        if (not isinstance(outcome,dict) or set(outcome)!={'bytes','sha256'}
+                or type(outcome['bytes']) is not int or not 0<=outcome['bytes']<=MAX_RESPONSE
+                or not isinstance(outcome['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',outcome['sha256'])):
+            raise AcquisitionError('selected_fetch_accounting_invalid')
+        received+=outcome['bytes'];budget+=outcome['bytes']
+    if budget>MAX_TRANSFER:raise AcquisitionError('selected_transfer_budget_exceeded')
+    unresolved=any(not _exists(folder,f'fetch-{index:03d}-result.json')
+                   and not _exists(folder,f'fetch-{index:03d}-upper-bound.json') for index in range(1,len(attempted)+1))
+    mode='unknown' if unresolved else 'conservative_upper_bound' if estimated else 'exact'
+    return dict(request_count=len(attempted),received_bytes=received,received_budget_bytes=budget,
+                transfer_accounting_complete=complete,accounting_mode=mode)
+
+
+def _operation_storage_bytes(folder):
+    """Bound bytes in the original reservation, including immutable retries."""
+    stack=[os.dup(folder)];total=count=0
+    try:
+        while stack:
+            current=stack.pop()
+            try:
+                for name in os.listdir(current):
+                    count+=1
+                    if count>4096:raise AcquisitionError('selected_storage_inventory_limit')
+                    info=os.stat(name,dir_fd=current,follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        if len(stack)>=128:raise AcquisitionError('selected_storage_inventory_limit')
+                        child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
+                        try:_private_directory(child)
+                        except BaseException:os.close(child);raise
+                        stack.append(child)
+                    elif (stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid()
+                            and info.st_nlink==1 and not info.st_mode&0o077):total+=info.st_size
+                    else:raise AcquisitionError('unsafe_selected_storage_member')
+            finally:os.close(current)
+        return total
+    finally:
+        for current in stack:os.close(current)
+
+
+def _resume_accounting(root,folder,request,report,previous_bundle_sha256):
+    accounting=_fetch_accounting(folder)
+    if accounting['accounting_mode']!='unknown':return accounting
+    # Only the reviewed legacy size-envelope failure ended in a known partial
+    # result. A missing/uncertain transport outcome cannot use this exception.
+    if (report['state']!='partial' or len(report['failures'])!=1
+            or report['failures'][0]['reason']!='selected_transfer_budget_exceeded'
+            or not isinstance(previous_bundle_sha256,str)
+            or not re.fullmatch('[a-f0-9]{64}',previous_bundle_sha256)):
+        raise AcquisitionError('selected_transfer_accounting_unknown')
+    old_bytes=_read(folder,'result.json',MAX_REPORT)
+    old=validate_selected_report(request,_json(old_bytes))
+    if (old['state']!='partial' or old['failures']!=report['failures']
+            or old['files']!=report['files'] or old['request_count']!=accounting['request_count']):
+        raise AcquisitionError('selected_transfer_accounting_unknown')
+    bundle=_read(root,'reader-tools-'+previous_bundle_sha256+'.zip',1024**2)
+    if sha256(bundle)!=previous_bundle_sha256:raise AcquisitionError('selected_legacy_reader_unverified')
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        info=archive.getinfo('auto_lammps/reference_selected_resource_worker.py')
+        if info.file_size>65536 or sha256(archive.read(info))!=_LEGACY_READER_SHA256:
+            raise AcquisitionError('selected_legacy_reader_unverified')
+    index=accounting['request_count']
+    missing=[i for i in range(1,index+1) if not _exists(folder,f'fetch-{i:03d}-result.json')
+             and not _exists(folder,f'fetch-{i:03d}-upper-bound.json')]
+    if missing!=[index]:raise AcquisitionError('selected_transfer_accounting_unknown')
+    intent=_json(_read(folder,f'fetch-{index:03d}-intent.json',2048))
+    selected=next((row for row in request['selected'] if row['path']==old['failures'][0]['path']),None)
+    endpoint='repos/'+request['inventory_request']['acquisition_request']['repository']+'/git/blobs/'
+    if (selected is None or intent['endpoint']!=endpoint+selected['blob_sha1']
+            or intent['maximum_bytes']!=min(MAX_RESPONSE,MAX_TRANSFER-accounting['received_bytes'],
+                4*((selected['size']+2)//3)+8192)
+            or intent['maximum_bytes']>=MAX_RESPONSE
+            or accounting['received_budget_bytes']+intent['maximum_bytes']+1>MAX_TRANSFER):
+        raise AcquisitionError('selected_transfer_budget_exceeded')
+    _write(folder,f'fetch-{index:03d}-upper-bound.json',dict(
+        bytes_upper_bound=intent['maximum_bytes']+1,maximum_bytes=intent['maximum_bytes'],
+        reason='legacy_selected_transfer_envelope',legacy_reader_sha256=_LEGACY_READER_SHA256,
+        legacy_result_sha256=sha256(old_bytes)))
+    return _fetch_accounting(folder)
+
+
 class _BoundedBlobTransport:
-    def __init__(self,request,folder,*,transport=None):
+    def __init__(self,request,folder,*,transport=None,accounting=None):
         self.request,self.folder,self.transport=request,folder,transport
-        self.calls=0;self.received=0;self.complete=True;self.cache={};self.failure=None
+        accounting=accounting or {}
+        self.calls=accounting.get('request_count',0);self.received=accounting.get('received_bytes',0)
+        self.budget=accounting.get('received_budget_bytes',self.received)
+        self.complete=accounting.get('transfer_accounting_complete',True)
+        self.mode=accounting.get('accounting_mode','exact');self.cache={};self.failure=None
         self.sizes={row['blob_sha1']:row['size'] for row in request['selected']}
 
     def get(self,endpoint):
@@ -299,8 +429,12 @@ class _BoundedBlobTransport:
             raise AcquisitionError('blob_endpoint_outside_selected_repository')
         if endpoint in self.cache: return self.cache[endpoint]
         if self.calls>=MAX_CALLS: raise AcquisitionError('selected_request_limit')
-        limit=min(MAX_RESPONSE,MAX_TRANSFER-self.received,4*((self.sizes[endpoint[len(prefix):]]+2)//3)+8192)
-        if limit<=0: raise AcquisitionError('selected_transfer_budget_exceeded')
+        limit=blob_response_limit(self.sizes[endpoint[len(prefix):]])
+        if limit>=MAX_RESPONSE or limit+1>MAX_TRANSFER-self.budget:
+            raise AcquisitionError('selected_transfer_budget_exceeded')
+        required=4*((limit+3)//3)+self.sizes[endpoint[len(prefix):]]+2*MAX_REPORT+8192
+        if _operation_storage_bytes(self.folder)+required>_reservation(self.request):
+            raise AcquisitionError('selected_storage_reservation_limit')
         self.calls+=1
         _write(self.folder,f'fetch-{self.calls:03d}-intent.json',dict(endpoint=endpoint,maximum_bytes=limit))
         try:
@@ -317,26 +451,32 @@ class _BoundedBlobTransport:
                 if result.get('returncode')!=0 or result.get('failure') or result.get('stderr'):
                     raise AcquisitionError('selected_github_request_failed')
                 raw=base64.b64decode(result['stdout'],validate=True)
-            if len(raw)>limit: raise AcquisitionError('selected_transfer_budget_exceeded')
-            self.received+=len(raw)
+            if len(raw)>limit+1:
+                self.complete=False;self.mode='unknown'
+                raise AcquisitionError('selected_transfer_budget_exceeded')
+            self.received+=len(raw);self.budget+=len(raw)
             _write(self.folder,f'fetch-{self.calls:03d}-result.json',dict(bytes=len(raw),sha256=sha256(raw)))
+            if len(raw)>limit:raise AcquisitionError('selected_transfer_budget_exceeded')
+            result=dict(returncode=0,failure='',stdout=base64.b64encode(raw).decode(),stderr='')
             self.cache[endpoint]=result
             return result
         except (OSError,ValueError,KeyError,TypeError):
-            self.complete=False
+            if not isinstance(sys.exc_info()[1],AcquisitionError) or not (
+                    self.calls and _exists(self.folder,f'fetch-{self.calls:03d}-result.json')):
+                self.complete=False;self.mode='unknown'
             raise
 
 
-def selected_resources(request, *, action, transport=None):
+def selected_resources(request, *, action, transport=None, previous_bundle_sha256=None):
     """Acquire once, or reconcile only; all original bytes remain on HPC."""
     validate_selection_request(request)
-    if action not in {'acquire','reconcile'}: raise AcquisitionError('invalid_selected_resource_action')
+    if action not in {'acquire','reconcile','resume'}: raise AcquisitionError('invalid_selected_resource_action')
     if sys.platform!='linux' or not os.environ.get('SSH_CONNECTION'):
         raise AcquisitionError('selected_acquisition_requires_HPC')
     inventory=inspect_cached_tree(request['inventory_request'])
     validate_selection_inventory(request,inventory)
     original=request['inventory_request']['acquisition_request']
-    root=original_fd=parent=folder=source=None
+    root=original_fd=parent=folder=source=execution_lock=None
     try:
         root=_directory(original['directory'])
         original_fd=os.open(original['id'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root);_private_directory(original_fd)
@@ -353,15 +493,43 @@ def selected_resources(request, *, action, transport=None):
         # Include the unchanged acquisition's originals and encoded API caches,
         # rather than treating selective acquisition as a fresh storage quota.
         existing_bytes=original_receipt['source_bytes']+2*original_receipt['received_bytes']+1024**2
-        if not _register(parent,request,existing_bytes=existing_bytes): return _saved(parent,request)
-        folder=_mkdir(parent,request['id']);_write(folder,'intent.json',request)
-        source=_mkdir(folder,'source');report=_report(request)
-        bounded=_BoundedBlobTransport(request,folder,transport=transport)
+        if action=='resume':
+            try:saved_binding=_json(_read(parent,selection_identity(request)+'.binding.json',MAX_REQUEST+1024))
+            except FileNotFoundError:raise AcquisitionError('selected_resume_requires_existing_operation') from None
+            if saved_binding!=request:raise AcquisitionError('selected_set_already_bound_to_original_operation')
+            registered=False
+        else:
+            registered=_register(parent,request,existing_bytes=existing_bytes)
+            if not registered:return _saved(parent,request)
+        folder=_mkdir(parent,request['id'])
+        execution_lock=os.open('execution.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=folder)
+        lock_info=os.fstat(execution_lock)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=os.getuid()
+                or lock_info.st_nlink!=1 or lock_info.st_mode&0o077):
+            raise AcquisitionError('unsafe_selected_control_lock')
+        try:fcntl.flock(execution_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise AcquisitionError('selected_operation_busy') from None
+        final='result.json';accounting=None
+        if registered:
+            _write(folder,'intent.json',request);report=_report(request)
+        else:
+            report=_saved(parent,request)
+            if report['state']!='partial':return report
+            accounting=_resume_accounting(root,folder,request,report,previous_bundle_sha256)
+            resumptions=sorted(name for name in os.listdir(folder) if re.fullmatch(r'resume-[0-9]{3}-intent\.json',name))
+            if len(resumptions)>=MAX_RESUMES:raise AcquisitionError('selected_resume_limit')
+            prefix=f'resume-{len(resumptions)+1:03d}'
+            _write(folder,prefix+'-intent.json',dict(request_sha256=sha256(canonical(request)),
+                previous_receipt_sha256=sha256(canonical(report)),previous_bundle_sha256=previous_bundle_sha256))
+            final=prefix+'-result.json';report=deepcopy(report);report.update(failures=[],state='unknown',selected_complete=False)
+        source=_mkdir(folder,'source')
+        bounded=_BoundedBlobTransport(request,folder,transport=transport,accounting=accounting)
         for start in range(0,len(request['selected']),BATCH_FILES):
-            name=f'batch-{start//BATCH_FILES:02d}';batch=_mkdir(folder,name);os.close(batch)
+            name=(f'batch-{start//BATCH_FILES:02d}' if final=='result.json' else f'{final[:-12]}-batch-{start//BATCH_FILES:02d}');batch=_mkdir(folder,name);os.close(batch)
             batch_path=Path(report['remote_directory'])/name
             reader=PublicGitHubReader(original['repository'],batch_path,transport=bounded)
             for row in request['selected'][start:start+BATCH_FILES]:
+                if any(saved['path']==row['path'] for saved in report['files']):continue
                 try:
                     response=reader.get('repos/'+original['repository']+'/git/blobs/'+row['blob_sha1'])
                     blob=_json(base64.b64decode(response['stdout'],validate=True))
@@ -376,6 +544,8 @@ def selected_resources(request, *, action, transport=None):
                     report['files'].append(dict(row,sha256=checksum))
                     report.update(source_bytes=sum(item['size'] for item in report['files']),
                         request_count=bounded.calls,received_bytes=bounded.received,
+                        received_budget_bytes=bounded.budget,accounting_mode=bounded.mode,
+                        transfer_accounting_complete=bounded.complete,
                         inventory_sha256=sha256(canonical(report['files'])),
                         missing=[item for item in request['selected'] if item['path'] not in {entry['path'] for entry in report['files']}])
                     _write(folder,f'progress-{len(report["files"]):03d}.json',report)
@@ -385,11 +555,13 @@ def selected_resources(request, *, action, transport=None):
                     report['failures']=[dict(path=row['path'],reason=reason)]
                     break
             if report['failures']: break
-        report.update(state='partial' if report['failures'] else 'selected_complete',
+        report.update(state=('unknown' if report['failures'] and bounded.mode=='unknown'
+            else 'partial' if report['failures'] else 'selected_complete'),
             selected_complete=not report['failures'],request_count=bounded.calls,received_bytes=bounded.received,
+            received_budget_bytes=bounded.budget,accounting_mode=bounded.mode,
             transfer_accounting_complete=bounded.complete)
-        validate_selected_report(request,report);_write(folder,'result.json',report)
+        validate_selected_report(request,report);_write(folder,final,report)
         return report
     finally:
-        for descriptor in (source,folder,parent,original_fd,root):
+        for descriptor in (execution_lock,source,folder,parent,original_fd,root):
             if descriptor is not None: os.close(descriptor)

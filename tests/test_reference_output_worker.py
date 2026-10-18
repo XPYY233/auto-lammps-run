@@ -60,6 +60,29 @@ class ReferenceOutputWorkerTests(unittest.TestCase):
         self.assertEqual(worker._stamp(before), worker._stamp(file.stat()))
         self.assertNotIn(str(self.root), json.dumps(result))
 
+    def test_original_paths_with_temperature_equals_and_spaces_are_byte_preserved(self):
+        file=self.add_file('temperatures/T=350K/Potential Energy vs step T_350.txt',b'0 1 350\n')
+        self.request['files'][0]['name']='CoCrNi-T350-energy.txt'
+        self.add_file('temperatures/T=350K/dump.mc.60000',b'ITEM: TIMESTEP\n180000\n')
+        self.request['files'][1]['name']='CoCrNi-T350-terminal-dump.dat'
+        before=copy.deepcopy(self.request)
+        result=worker.read_outputs(self.request)
+        self.assertEqual(result['files'][0]['path'],before['files'][0]['path'])
+        self.assertEqual(base64.b64decode(result['files'][0]['data']),file.read_bytes())
+        self.assertEqual(self.request,before)
+        self.assertLessEqual(len(worker.canonical(result)),worker.response_limit(before))
+
+    def test_response_bound_tracks_declared_base64_bytes_not_fixed_legacy_cap(self):
+        self.add_file('synthetic.dat',b'')
+        item=self.request['files'][0]
+        self.request['files']=[dict(item,path=str(i),name=str(i),size=worker.MAX_FILE_BYTES)
+                               for i in range(worker.MAX_TOTAL_BYTES//worker.MAX_FILE_BYTES)]
+        limit=worker.response_limit(self.request)
+        self.assertGreater(limit,36*1024*1024)
+        self.assertLess(limit,2*worker.MAX_TOTAL_BYTES)
+        self.request['files'].append(dict(item,path='overflow',name='overflow',size=1))
+        with self.assertRaises(worker.ReferenceOutputError):worker.response_limit(self.request)
+
     def test_author_python_is_returned_as_bytes_and_never_executed(self):
         canary = self.root / 'must-not-exist'
         data = ("from pathlib import Path\nPath(%r).touch()\n" % str(canary)).encode()
@@ -83,7 +106,8 @@ class ReferenceOutputWorkerTests(unittest.TestCase):
         self.add_file()
         for path in ('', '.', '..', '/output', '../output', 'a/../output', './output',
                      'a//output', 'a/./output', 'a/', 'a\\output', 'a\x00b', 'a\nb',
-                     'a b', 'a/' + 'b' * 256, 'a/' * 600):
+                     'a*', 'a?', 'a[1]', 'a{b}', 'a;$x', 'a|b', 'a$(id)', 'a`id`',
+                     'a/' + 'b' * 256, 'a/' * 600):
             request = copy.deepcopy(self.request)
             request['files'][0]['path'] = path
             with self.subTest(path=repr(path)):
@@ -145,7 +169,7 @@ class ReferenceOutputWorkerTests(unittest.TestCase):
         worker.validate_request(self.request)
         self.request['files'].append(dict(item, path='extra', name='extra'))
         self.assert_rejected()
-        self.request['files'] = [dict(item, path=str(i), name=str(i), size=worker.MAX_FILE_BYTES) for i in range(4)]
+        self.request['files'] = [dict(item, path=str(i), name=str(i), size=worker.MAX_FILE_BYTES) for i in range(worker.MAX_TOTAL_BYTES//worker.MAX_FILE_BYTES)]
         worker.validate_request(self.request)
         self.request['files'].append(dict(item, path='fifth', name='fifth', size=1))
         self.assert_rejected()

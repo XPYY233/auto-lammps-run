@@ -23,7 +23,7 @@ from test_web import ORIGIN, HEADERS
 class ReferenceOutputsTests(unittest.TestCase):
     def setUp(self):
         self.fx=fixture.WorkspaceTests()
-        with patch.object(fixture,'POLICY',replace(fixture.POLICY,total_storage_bytes=2*1024*1024)):
+        with patch.object(fixture,'POLICY',replace(fixture.POLICY,total_storage_bytes=128*1024*1024)):
             self.fx.setUp()
         self.addCleanup(self.fx.doCleanups)
         self.root=self.fx.root
@@ -42,12 +42,12 @@ class ReferenceOutputsTests(unittest.TestCase):
             work_directory=str(self.root),partition='compute',account='',authentication='agent'),0)
         self.transport=SavedHPCTransport(hpc,1,'synthetic-hpc')
         self.raw=RawOutputs(self.fx.tasks,self.fx.papers)
-        self.captured=[]
+        self.captured=[];self.capture_limits=[]
         self.service=ReferenceOutputs(self.raw,self.root/'retrieved',[self.binding],
             transport=self.transport,capture=self.capture)
 
     def capture(self,command,**kwargs):
-        self.captured.append(command)
+        self.captured.append(command);self.capture_limits.append(kwargs['max_bytes'])
         request=json.loads(b''.join(kwargs['input_chunks']))
         return dict(returncode=0,failure='',stdout=base64.b64encode(canonical(read_outputs(request))).decode(),stderr='')
 
@@ -75,6 +75,45 @@ class ReferenceOutputsTests(unittest.TestCase):
         self.assertEqual(after['actual_core_seconds'],before['actual_core_seconds'])
         self.assertEqual(after['state'],before['state'])
         self.assertEqual(after['charge_storage_bytes'],before['charge_storage_bytes']+len(self.data)+262144)
+
+    def test_full_eighteen_original_outputs_are_retrieved_with_exact_bytes_and_one_charge(self):
+        sizes=[1662110]*9+[768975]*8
+        sizes.append(22000941-sum(sizes))
+        pins=[]
+        for index,size in enumerate(sizes):
+            temperature=350+(index%9)*100
+            path=(f'temperatures/T={temperature}K/Potential Energy vs step T_{temperature}.txt'
+                  if index<9 else f'temperatures/T={temperature}K/dump.mc.60000')
+            file=self.remote/path;file.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+            data=(f'Synthetic original byte record {index}\n'.encode()+b'x'*size)[:size]
+            file.write_bytes(data)
+            pins.append(dict(path=path,name=f'T{temperature}-'+('energy.txt' if index<9 else 'terminal-dump.dat'),
+                size=size,sha256=sha256(data)))
+        inventory=self.root/'observed-output-inventory.json'
+        inventory.write_bytes(canonical(dict(files=pins)))
+        binding={**self.binding,'files':pins,'inventory_receipt_sha256':sha256(inventory.read_bytes())}
+        service=ReferenceOutputs(self.raw,self.root/'retrieved-large',[binding],
+            transport=self.transport,capture=self.capture)
+        before=self.fx.ledger.get(self.fx.req['id'])
+        first=service.collect(self.fx.task['id'],self.fx.req['id'])
+        second=service.collect(self.fx.task['id'],self.fx.req['id'])
+        self.assertEqual(first,second)
+        self.assertEqual(first['runs'][0]['state'],'retained')
+        self.assertEqual(first['runs'][0]['total_bytes'],22000941)
+        self.assertEqual(len(self.captured),1)
+        self.assertEqual(len(self.raw.listing(self.fx.task['id'])['files']),18)
+        self.assertLess(self.capture_limits[0],2*22000941)
+        by_name={item['name']:item for item in pins}
+        for saved in self.raw.listing(self.fx.task['id'])['files']:
+            original=by_name[saved['name']]
+            _,_,stream=self.raw.download(self.fx.task['id'],saved['id'])
+            with stream:content=stream.read()
+            self.assertEqual(len(content),original['size'])
+            self.assertEqual(sha256(content),original['sha256'])
+        after=self.fx.ledger.get(self.fx.req['id'])
+        self.assertEqual(after['charge_storage_bytes'],before['charge_storage_bytes']+22000941+262144)
+        for key in ('actual_core_seconds','dispatch_claimed','job_id','state','manifest_sha256'):
+            self.assertEqual(after[key],before[key])
 
     def test_failed_A_data_remains_failed_and_scientifically_unverified(self):
         with self.fx.ledger._transaction() as db:

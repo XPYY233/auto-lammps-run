@@ -25,6 +25,7 @@ from .runtime_launcher import read_regular
 from .scientific_adapters import prepare_stage_messages, validate_prepared_messages
 from .tasks import TaskError, task_id, text
 from . import postprocess_tables as tables
+from . import retained_analysis_bridge as mixed
 
 VERSION=1
 STAGE='output_postprocessing'
@@ -90,7 +91,7 @@ def selection_context(evidence):
     example=deepcopy(tool['minimal_example'])
     for table in example['tables']:del table['sha256']
     from .postprocess_figures import tool_context as figure_context
-    return dict(tool='retained_output_analysis',version=VERSION,
+    context=dict(tool='retained_output_analysis',version=VERSION,
         source_sha256=sha256(Path(__file__).read_bytes()),numeric_tool=tool,figure_tool=figure_context(),
         model_plan_schema=model_schema,synthetic_model_plan_example=example,
         output_fields=dict(status='ready or needs_evidence',summary='brief rationale, not observed results',
@@ -102,6 +103,14 @@ def selection_context(evidence):
         constants='literal.evidence must name a citation that contains that exact numeric value',
         role=evidence['role'],scientific_status='not_evaluated',physical_evaluation_performed=False,
         new_HPC_action=False,scope_reduction_allowed=False)
+    if evidence.get('input_representation')==mixed.REPRESENTATION:
+        context['model_plan_schema']=dict(oneOf=[model_schema,mixed.plan_schema()],
+            **{'$defs':model_schema.get('$defs',{}),'$schema':model_schema['$schema']})
+        context.update(mixed_native_tool=mixed.tool_context(),
+            alternative_plan='Existing version=1 plan, OR explicit mixed_native_v1 wrapper described by mixed_native_tool; no automatic dispatch by guessed file semantics.',
+            source_view='Bounded previews plus full-source SHA/physical line counts. All computations use complete retained files; never compute from previews.',
+            intake_limits=dict(files=mixed.MAX_FILES,input_bytes=mixed.MAX_BYTES,physical_lines=mixed.MAX_ROWS))
+    return context
 
 
 def _validate_output(evidence,value,files):
@@ -125,7 +134,11 @@ def _validate_output(evidence,value,files):
             if source['origin']=='paper':layout=_pdf_layout_quote(source['text'],quote)
             if layout is None:
                 raise TaskError(f'分析出处 {key} 未逐字匹配允许来源 {row["source_id"]}；PDF排版之外的改写不能通过。')
+        if source['origin']=='output' and quote.encode('ascii') not in files.get(source['id'],b''):
+            raise TaskError('原始数据引用必须逐字存在于完整源文件；预览间隔标记不是原文。')
         citations[key]=dict(row,source_sha256=sha256(canonical(source)),locator=source['locator'],**(layout or {}))
+        if source.get('complete_source_sha256'):
+            citations[key]['complete_source_sha256']=source['complete_source_sha256']
     if value['status']=='needs_evidence':
         if value['plan'] is not None or value['column_evidence']!=[]:
             raise TaskError('缺少依据时不能同时执行分析方案。')
@@ -133,14 +146,22 @@ def _validate_output(evidence,value,files):
     if value['status']!='ready' or not isinstance(value['plan'],dict):
         raise TaskError('分析状态或方案无效。')
     plan=deepcopy(value['plan'])
-    for table in plan.get('tables',[]):
-        if not isinstance(table,dict) or table.get('file') not in files:
-            raise TaskError('分析表必须选择本次已核验的原始文件。')
-        digest=sha256(files[table['file']])
-        if table.get('sha256',digest)!=digest:raise TaskError('模型不能改变原始文件摘要。')
-        table['sha256']=digest
-    tables.validate_plan(plan,files)
-    expected=tables.column_units(plan,files)
+    if mixed.is_mixed(plan):
+        if evidence.get('input_representation')!=mixed.REPRESENTATION:
+            raise TaskError('原请求的固定工具菜单没有混合分析模式，不能在恢复时更换契约。')
+        mixed.validate_plan(plan,files)
+        expected=mixed.column_units(plan,files)
+        if any(ref not in citations for item in plan['method_evidence'] for ref in item['citations']):
+            raise TaskError('原始解析、元素映射与每项分析方法需要允许来源的引用。')
+    else:
+        for table in plan.get('tables',[]):
+            if not isinstance(table,dict) or table.get('file') not in files:
+                raise TaskError('分析表必须选择本次已核验的原始文件。')
+            digest=sha256(files[table['file']])
+            if table.get('sha256',digest)!=digest:raise TaskError('模型不能改变原始文件摘要。')
+            table['sha256']=digest
+        tables.validate_plan(plan,files)
+        expected=tables.column_units(plan,files)
     seen=set()
     if not isinstance(value['column_evidence'],list):raise TaskError('每列分析数据都需要说明与出处。')
     for row in value['column_evidence']:
@@ -205,19 +226,22 @@ class OutputAnalysis:
             return False
         finally:os.close(fd)
 
-    def _input(self,identifier,request,question):
+    def _input(self,identifier,request,question,representation=mixed.REPRESENTATION):
         row=self.raw._request(identifier,request)
         identity=self.raw.ledger.evaluation_snapshot(row['evaluation'])['identity']
         role='reference' if identity['role']=='reference' else 'research'
         listing=[f for f in self.raw.listing(identifier)['files'] if f['request_id']==request]
-        if not 1<=len(listing)<=tables.MAX_TABLES:raise TaskError('本次作业须先回收完整且符合数值工具容量的原始输出清单；未调用模型。')
+        bounded=representation==mixed.REPRESENTATION
+        maximum=mixed.MAX_FILES if bounded else tables.MAX_TABLES
+        if not 1<=len(listing)<=maximum:raise TaskError('本次作业须先回收完整且符合分析工具容量的原始输出清单；未调用模型。')
         files={};sources=[dict(id='user-request',origin='user',locator='analysis request',text=question)]
-        inventory=[];total=0
+        inventory=[];total=0;line_count=0
         for index,item in enumerate(sorted(listing,key=lambda f:f['name'])):
-            if Path(item['name']).suffix.lower() not in {'.txt','.csv','.dat'}:
+            if not bounded and Path(item['name']).suffix.lower() not in {'.txt','.csv','.dat'}:
                 raise TaskError('本次输出包含尚未支持的原始格式；未静默跳过文件或调用模型。')
             total+=item['size']
-            if item['size']>tables.MAX_INPUT_BYTES or total>tables.MAX_INPUT_BYTES:
+            limit=mixed.MAX_BYTES if bounded else tables.MAX_INPUT_BYTES
+            if item['size']>limit or total>limit:
                 raise TaskError('完整原始数据超过分析容量；未截断或发送模型。')
             _,_,stream=self.raw.download(identifier,item['id'])
             with stream:data=stream.read(item['size']+1)
@@ -226,8 +250,20 @@ class OutputAnalysis:
             try:content=data.decode('ascii')
             except UnicodeError:raise TaskError('本分析入口只接收完整的 ASCII 数值文本。') from None
             key='source'+str(index+1);files[key]=data
-            sources.append(dict(id=key,origin='output',locator=item['name'],text=content))
-            inventory.append(dict(id=key,name=item['name'],size=len(data),sha256=sha256(data)))
+            if bounded:
+                metadata,content=mixed.describe(data)
+                line_count+=metadata['line_count']
+                if line_count>mixed.MAX_ROWS:raise TaskError('完整源文件总行数超过分析容量；未静默抽样。')
+                # Excerpts have one owner in the model input. The inventory keeps
+                # complete-source identity and counts, avoiding duplicate text.
+                preview=metadata.pop('preview')
+                sources.append(dict(id=key,origin='output',locator=item['name'],text=content,
+                    preview=preview,complete_source_sha256=metadata['sha256'],
+                    complete_source_line_count=metadata['line_count']))
+                inventory.append(dict(id=key,name=item['name'],**metadata))
+            else:
+                sources.append(dict(id=key,origin='output',locator=item['name'],text=content))
+                inventory.append(dict(id=key,name=item['name'],size=len(data),sha256=sha256(data)))
         methods=[];paper=None;source_binding=None;missing=[]
         if role=='reference' and self.reference_sources is not None:
             try:
@@ -242,6 +278,9 @@ class OutputAnalysis:
             scheduler_state=row['state'],accounted=True,manifest_sha256=row['manifest_sha256'],
             files=inventory,sources=sources,paper=paper,source_binding=source_binding,missing=missing,
             scientific_status='not_evaluated',question=question)
+        if bounded:evidence.update(input_representation=mixed.REPRESENTATION,
+            full_source_bytes=total,full_source_physical_lines=line_count,
+            preview_is_analysis_input=False)
         return evidence,files
 
     def _event(self,identifier,state):
@@ -278,7 +317,8 @@ class OutputAnalysis:
         if receipt:state=receipt['state']
         if state=='completed':
             try:
-                evidence,_=self._input(identifier,context['input']['source_request_id'],context['input']['question'])
+                evidence,_=self._input(identifier,context['input']['source_request_id'],context['input']['question'],
+                    context['input'].get('input_representation'))
                 if evidence!=context['input']:raise TaskError('source changed')
                 folder=self.directory/request
                 result=json.loads(read_regular(folder/'result.json',64*1024*1024,private=True))
@@ -337,7 +377,8 @@ class OutputAnalysis:
                 if context['input']['source_request_id']!=source_request or context['input']['question']!=question:
                     raise TaskError('同一分析标识已用于其他内容。')
                 if receipt:return self.get(identifier,request)
-            evidence,files=self._input(identifier,source_request,question)
+            representation=context['input'].get('input_representation') if saved else mixed.REPRESENTATION
+            evidence,files=self._input(identifier,source_request,question,representation)
             scope=sha256(canonical(dict(task=identifier,request=source_request,question=question)))
             connection=self.connection_provider(identifier)
             if not connection.get('enabled'):raise TaskError('请先配置并启用本项目模型连接。')
@@ -373,7 +414,9 @@ class OutputAnalysis:
                 payload=dict(evidence,retained_output_analysis=selection_context(evidence),previous=previous)
                 messages=[dict(role='system',content=(
                     'You are the application scientific AI selecting a complete bounded numeric postprocessing plan. '
-                    'Return exactly JSON matching retained_output_analysis. Read ALL supplied raw bytes and method sources. '
+                    'Return exactly JSON matching retained_output_analysis. Read every supplied source inventory, bounded preview and method source. '
+                    'Previews are incomplete and only support method/column selection; trusted tools always compute from full retained bytes. '
+                    'Choose either the existing version=1 numeric plan or the explicit mixed_native_v1 wrapper and unchanged native contracts. '
                     'Use all supplied files; do not omit failed-run limitations or invent missing results. '
                     'Declare each raw/derived column meaning and unit with exact source citations. '
                     'For a genuinely unknown unit use "unknown" with a citation to the raw header and state this limitation. '
@@ -416,7 +459,7 @@ class OutputAnalysis:
             if receipt.get('output_sha256')!=sha256(canonical(proposal)):
                 return self._finish(identifier,request,'unknown',receipt=receipt,message='模型答复摘要不符，未执行分析。')
             try:
-                if self._input(identifier,source_request,question)[0]!=evidence:
+                if self._input(identifier,source_request,question,representation)[0]!=evidence:
                     return self._finish(identifier,request,'paused',receipt=receipt,proposal=proposal,message='原始来源在返回期间改变；原答复与费用保留，未执行分析。')
                 current=self.connection_provider(identifier)
                 if (not current.get('enabled') or dict(model=current['client'].model,ledger=model_ledger_identity(current['client']),
@@ -428,13 +471,15 @@ class OutputAnalysis:
             try:
                 plan,citations=_validate_output(evidence,proposal,files)
                 if plan is None:return self._finish(identifier,request,'needs_evidence',receipt=receipt,proposal=proposal,message=proposal['summary'])
-                numeric=tables.execute_plan(plan,files)
+                numeric=mixed.execute_plan(plan,files) if mixed.is_mixed(plan) else tables.execute_plan(plan,files)
                 from .postprocess_figures import render_figures
+            except (mixed.NativeExecutionError,OSError):
+                return self._execution_failure(identifier,request,'模型完整答复已保留；固定分析工具或本地环境未完成。请恢复原执行，不新增模型调用。')
             except (ValueError,TypeError,KeyError) as error:
-                message=str(error) if isinstance(error,(TaskError,tables.PostprocessError)) else '分析方案或来源未通过检查，未发布结果。'
+                message=str(error) if isinstance(error,(TaskError,tables.PostprocessError,mixed.AnalysisError)) else '分析方案或来源未通过检查，未发布结果。'
                 return self._finish(identifier,request,'invalid_output',receipt=receipt,proposal=proposal,message=message)
             try:
-                plots=render_figures(numeric,role=evidence['role'],job_id=evidence['job_id'])
+                plots=render_figures(numeric.get('figure_report',numeric),role=evidence['role'],job_id=evidence['job_id'])
                 artifacts=dict(plots['files']);plot_metadata={k:v for k,v in plots.items() if k!='files'}
                 for derived in numeric['derived_tables']:artifacts[derived['id']+'.csv']=derived['csv'].encode('ascii')
                 artifacts['numeric-report.json']=canonical(numeric)
@@ -442,10 +487,14 @@ class OutputAnalysis:
                     source_request_id=source_request,job_id=evidence['job_id'],scheduler_state=evidence['scheduler_state'],
                     input_sha256=sha256(canonical(evidence)),source_identity=evidence['files'],
                     proposal=proposal,citations=citations,scientific_adapter=context['scientific_adapter'],
-                    plan_sha256=numeric['plan_sha256'],numeric_results=numeric['results'],figures=plot_metadata,
+                    plan_sha256=numeric['plan_sha256'],numeric_results=mixed.display_results(numeric),figures=plot_metadata,
                     files=[dict(name=name,size=len(data),sha256=sha256(data)) for name,data in sorted(artifacts.items())],
                     scientific_status='not_evaluated',new_physical_evaluation=False,
                     limitations=proposal['limitations']+numeric['limitations'])
+                if mixed.is_mixed(plan):result.update(analysis_mode=mixed.MODE,
+                    native_numeric_results=numeric['results'],
+                    structural_results=numeric['structural_results'],operation_sources=numeric['operation_sources'],
+                    analysis_sources=numeric['sources'],parsed_numeric_row_count=numeric['parsed_numeric_row_count'])
                 data=canonical(result)
                 self.raw.ledger.reserve_raw_export(source_request,sha256(canonical(dict(request=request,input_sha256=result['input_sha256']))),
                     sum(len(content) for content in artifacts.values())+len(data)+262144)

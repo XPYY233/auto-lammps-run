@@ -436,16 +436,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                     if workbench_jobs and binding and model_client and callable(history_reader)
                     else workbench_bridge.history(identifier) if workbench_jobs and binding else [])
         unknown_reissues = []
+        completed_unknown_reissues = []
         if enabled and callable(getattr(workbench_jobs, 'unknown_reissue_options', None)):
             try:
                 unknown_reissues = workbench_jobs.unknown_reissue_options(identifier)
             except (TaskError, ValueError, OSError):
                 unknown_reissues = []
+        if enabled and callable(getattr(workbench_jobs, 'completed_unknown_reissues', None)):
+            try:
+                completed_unknown_reissues = workbench_jobs.completed_unknown_reissues(identifier)
+            except (TaskError, ValueError, OSError):
+                completed_unknown_reissues = []
         return dict(task_id=identifier, enabled=enabled, disabled_reason=reason,
             source_sha256=binding.pdf_sha256 if binding else None,
             messages=messages,
             jobs=workbench_jobs.history(identifier) if workbench_jobs and binding else [],
             evidence=evidence, recoveries=recoveries, unknown_reissues=unknown_reissues,
+            completed_unknown_reissues=completed_unknown_reissues,
             execution_authorized=False)
     def workbench_context(identifier):
         binding = workbench_binding(identifier)

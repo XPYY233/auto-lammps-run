@@ -54,7 +54,7 @@ class SelectedResourceTests(unittest.TestCase):
         self.root=Path(self.temp.name).resolve();self.hpc=self.root/'hpc';self.hpc.mkdir(mode=0o700)
         self.original=dict(id='a'*32,repository=NAME,commit=COMMIT,directory=str(self.hpc),
             bundle_sha256='b'*64,storage_bytes=512*1024**2)
-        self.data={f'code/group/file-{index:03d}.txt':f'synthetic original {index}\n'.encode() for index in range(40)}
+        self.data=getattr(self,'synthetic_contents',None) or {f'code/group/file-{index:03d}.txt':f'synthetic original {index}\n'.encode() for index in range(40)}
         self.entries=[entry(path,size=len(data),identity=blob_hash(data)) for path,data in self.data.items()]
         self.entries.extend([entry('large-unselected.log',size=MAX_BLOB+1),entry('linked',mode='120000'),
             entry('code',kind='tree',mode='040000',size=None)])
@@ -81,15 +81,16 @@ class SelectedResourceTests(unittest.TestCase):
 
     def request(self,count=1,identifier='c'*32): return self.service.selection_request(identifier,self.choices(count))
 
-    def run_worker(self,request=None,action='acquire'):
+    def run_worker(self,request=None,action='acquire',**kwargs):
         with self.hpc_session():
-            return worker.selected_resources(request or self.request(),action=action,transport=self.blobs)
+            return worker.selected_resources(request or self.request(),action=action,transport=self.blobs,**kwargs)
 
     def capture(self,command,**options):
         envelope=json.loads(b''.join(options['input_chunks']));self.actions.append(envelope['action'])
         self.assertEqual(command[0],'ssh');self.assertIn('-I',command[-1]);self.assertEqual(options['max_bytes'],worker.MAX_REPORT)
         bundle=base64.b64decode(envelope['bundle']);self.assertEqual(sha256(bundle),envelope['bundle_sha256'])
-        report=self.run_worker(envelope['request'],envelope['action'])
+        report=self.run_worker(envelope['request'],envelope['action'],
+            previous_bundle_sha256=envelope.get('previous_bundle_sha256'))
         return dict(returncode=0,failure='',stdout=base64.b64encode(canonical(report)).decode(),stderr='')
 
     def test_exact_selected_blobs_preserve_nested_paths_and_leave_old_failure_unchanged(self):
@@ -121,9 +122,59 @@ class SelectedResourceTests(unittest.TestCase):
         self.assertEqual(result['failures'][0]['reason'],'selected_request_limit')
 
     def test_global_transfer_cap_does_not_reset_at_batch_boundary(self):
-        with patch.object(worker,'MAX_TRANSFER',3500): result=self.run_worker(self.request(40))
+        # The fake small JSON has a known 250-byte bound; isolate cumulative
+        # accounting from the production 8KiB metadata headroom.
+        with patch.object(worker,'MAX_TRANSFER',3500),patch.object(worker,'blob_response_limit',return_value=250):
+            result=self.run_worker(self.request(40))
         self.assertEqual(result['state'],'partial');self.assertLessEqual(result['received_bytes'],3500)
         self.assertLess(len(result['files']),40);self.assertGreater(result['request_count'],1)
+
+    def test_original_request_counter_is_not_reset_by_partial_resume(self):
+        self.blobs.change=lambda value,count:value.update(sha='f'*40) if count==2 else None
+        first=self.service.acquire('c'*32,self.choices(3));before=len(self.blobs.calls)
+        self.assertEqual(first['request_count'],2)
+        self.blobs.change=None
+        with patch.object(worker,'MAX_CALLS',2):final=self.service.resume('c'*32)
+        self.assertEqual(final['state'],'partial')
+        self.assertEqual(final['request_count'],2)
+        self.assertEqual(final['failures'][0]['reason'],'selected_request_limit')
+        self.assertEqual(final['files'],first['files'])
+        self.assertEqual(len(self.blobs.calls),before)
+
+    def test_small_remaining_transfer_budget_is_refused_before_new_GET(self):
+        with patch.object(worker,'MAX_TRANSFER',3500):result=self.run_worker(self.request(40))
+        self.assertEqual(result['state'],'partial')
+        self.assertEqual(result['request_count'],0)
+        self.assertEqual(self.blobs.calls,[])
+
+    def test_known_partial_resumes_only_missing_files_in_original_operation(self):
+        self.blobs.change=lambda value,count:value.update(sha='f'*40) if count==2 else None
+        first=self.service.acquire('c'*32,self.choices(3))
+        self.assertEqual(first['state'],'partial');self.assertEqual(len(first['files']),1)
+        remote=Path(first['remote_directory']);old=(remote/'result.json').read_bytes()
+        retained=(remote/'source'/first['files'][0]['path']).read_bytes()
+        self.blobs.change=None
+        final=self.service.resume('c'*32)
+        self.assertEqual(final['state'],'selected_complete',final)
+        self.assertEqual(final['request_count'],4)
+        self.assertEqual(len(self.blobs.calls),4)
+        self.assertEqual(final['files'][0],first['files'][0])
+        self.assertEqual((remote/'result.json').read_bytes(),old)
+        self.assertEqual((remote/'source'/first['files'][0]['path']).read_bytes(),retained)
+        self.assertEqual(self.actions,['acquire','resume'])
+        self.assertEqual(self.service.resume('c'*32),final)
+        self.assertEqual(len(self.blobs.calls),4)
+
+    def test_original_storage_reservation_refuses_missing_file_retry_without_new_GET(self):
+        self.blobs.change=lambda value,count:value.update(sha='f'*40) if count==2 else None
+        first=self.service.acquire('c'*32,self.choices(3))
+        self.assertEqual(first['state'],'partial');before=len(self.blobs.calls)
+        with patch.object(worker,'_operation_storage_bytes',return_value=worker._reservation(self.request(3))):
+            final=self.service.resume('c'*32)
+        self.assertEqual(final['state'],'partial')
+        self.assertEqual(final['failures'][0]['reason'],'selected_storage_reservation_limit')
+        self.assertEqual(len(self.blobs.calls),before)
+        self.assertEqual(final['files'],first['files'])
 
     def test_same_operation_and_reconcile_never_download_again(self):
         first=self.service.acquire('c'*32,self.choices(3));count=len(self.blobs.calls)
@@ -150,6 +201,7 @@ class SelectedResourceTests(unittest.TestCase):
         unknown=self.service.acquire('c'*32,self.choices(2));self.assertEqual(unknown['state'],'unknown')
         count=len(self.blobs.calls)
         self.assertEqual(self.service.acquire('c'*32,self.choices(2))['state'],'unknown')
+        self.assertEqual(self.service.resume('c'*32)['state'],'unknown')
         self.service.capture=capture
         self.assertEqual(self.service.reconcile('c'*32)['state'],'selected_complete')
         self.assertEqual(len(self.blobs.calls),count)
@@ -296,6 +348,73 @@ class SelectedResourceTests(unittest.TestCase):
         self.assertEqual(errors.getvalue(),'')
         report=json.loads(output.getvalue());self.assertEqual(report['state'],'unknown')
         self.assertEqual(report['files'],[]);self.assertEqual(self.blobs.calls,[])
+
+
+class LargeBlobResumeTests(unittest.TestCase):
+    def setUp(self):
+        self.fx=SelectedResourceTests()
+        self.fx.synthetic_contents={f'code/group/file-{i:03d}.txt':
+            (b'x'*1000000 if i==19 else f'synthetic original {i}\n'.encode()) for i in range(40)}
+        self.fx.setUp();self.addCleanup(self.fx.doCleanups)
+
+    def test_large_wrapped_base64_and_multiple_batches_use_bounded_correct_envelope(self):
+        def wrap(value,count):
+            content=value['content'];value['content']='\n'.join(content[i:i+60] for i in range(0,len(content),60))+'\n'
+        self.fx.blobs.change=wrap
+        result=self.fx.run_worker(self.fx.request(40))
+        self.assertEqual(result['state'],'selected_complete',result.get('failures'))
+        self.assertEqual(len(result['files']),40);self.assertEqual(result['request_count'],40)
+        self.assertEqual(result['accounting_mode'],'exact')
+        self.assertLessEqual(result['received_budget_bytes'],worker.MAX_TRANSFER)
+        self.assertEqual(len(list(Path(result['remote_directory']).glob('batch-*'))),3)
+
+    def test_legacy_known_partial_resumes_with_conservative_cost_and_immutable_prefix(self):
+        request=self.fx.request(40)
+        with patch.object(worker,'MAX_CALLS',19):first=self.fx.run_worker(request)
+        folder=Path(first['remote_directory']);old=deepcopy(first)
+        old.pop('received_budget_bytes');old.pop('accounting_mode')
+        selected=request['selected'][19]
+        maximum=4*((selected['size']+2)//3)+8192
+        old.update(request_count=20,transfer_accounting_complete=False,
+            failures=[dict(path=selected['path'],reason='selected_transfer_budget_exceeded')])
+        (folder/'result.json').unlink();(folder/'result.json').write_bytes(canonical(old));(folder/'result.json').chmod(0o400)
+        original=(folder/'result.json').read_bytes()
+        (folder/'fetch-020-intent.json').write_bytes(canonical(dict(
+            endpoint='repos/'+self.fx.original['repository']+'/git/blobs/'+selected['blob_sha1'],maximum_bytes=maximum)))
+        (folder/'fetch-020-intent.json').chmod(0o400)
+        retained={r['path']:(folder/'source'/r['path']).read_bytes() for r in old['files']}
+        legacy=b'reviewed synthetic urllib response.read(limit+1) hard bound'
+        buffer=io.BytesIO()
+        with zipfile.ZipFile(buffer,'w') as archive:
+            archive.writestr('auto_lammps/reference_selected_resource_worker.py',legacy)
+        bundle=buffer.getvalue();bundle_sha=sha256(bundle)
+        target=self.fx.hpc/('reader-tools-'+bundle_sha+'.zip');target.write_bytes(bundle);target.chmod(0o400)
+        self.fx.blobs.calls.append('synthetic previous failed bounded GET')
+        def wrap(value,count):
+            content=value['content'];value['content']='\n'.join(content[i:i+60] for i in range(0,len(content),60))+'\n'
+        self.fx.blobs.change=wrap
+        with patch.object(worker,'_LEGACY_READER_SHA256',sha256(legacy)):
+            # Unknown exact old bytes are conservatively charged, never reset.
+            cap=old['received_bytes']+maximum+1+100
+            before_calls=len(self.fx.blobs.calls)
+            with patch.object(worker,'MAX_TRANSFER',cap):
+                exhausted=self.fx.run_worker(request,action='resume',previous_bundle_sha256=bundle_sha)
+            self.assertEqual(exhausted['state'],'partial')
+            self.assertEqual(exhausted['request_count'],20)
+            self.assertEqual(len(self.fx.blobs.calls),before_calls)
+            self.assertEqual(exhausted['accounting_mode'],'conservative_upper_bound')
+            self.assertLessEqual(exhausted['received_budget_bytes'],cap)
+            result=self.fx.run_worker(request,action='resume',previous_bundle_sha256=bundle_sha)
+            self.assertEqual(result['state'],'selected_complete',result.get('failures'))
+            self.assertEqual(result['request_count'],41)
+            self.assertEqual(len(self.fx.blobs.calls),41)
+            self.assertFalse(result['transfer_accounting_complete'])
+            self.assertEqual(result['accounting_mode'],'conservative_upper_bound')
+            self.assertEqual(result['received_budget_bytes']-result['received_bytes'],maximum+1)
+            self.assertEqual(result,self.fx.run_worker(request,action='reconcile'))
+        self.assertEqual((folder/'result.json').read_bytes(),original)
+        for path,data in retained.items():self.assertEqual((folder/'source'/path).read_bytes(),data)
+        self.assertEqual(len(result['files']),40)
 
 
 if __name__=='__main__': unittest.main()

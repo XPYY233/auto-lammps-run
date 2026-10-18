@@ -296,3 +296,38 @@ test('unknown recovery ignores disabled malformed or zero-prefix grants',async()
  {enabled:true,unknown_reissue_of:'f'.repeat(32),reused_model_calls:0}]}));
  assert.equal(find(entry,n=>n.textContent==='仅重发已核对的断点（保留成功答复）'),undefined);assert.equal(s.calls.length,1);
 });
+
+const completedContinuationRecord=(changes={})=>{
+ const old='f'.repeat(32),child='d'.repeat(32);
+ return workbenchRecord({messages:[{request_id:old,source_sha256:SHA,state:'failed_or_unknown'},
+  {request_id:child,source_sha256:SHA,state:'completed_with_limitations',visual_evidence_ready:false}],
+ jobs:[{request_id:old,state:'failed_or_unknown'},{request_id:child,state:'completed_with_limitations'}],
+ completed_unknown_reissues:[{unknown_request_id:old,superseded_by:child,task_id:TASK,paper_id:'b'.repeat(32),source_sha256:SHA,
+ data_continuation_completed:true,unknown_charge_unsettled:true,repair_visuals_only:true,automatic_retry:false}],...changes});
+};
+test('proved completed continuation unlocks only explicit visual repair while retaining unknown history and costs',async()=>{
+ const s=setup();publish(s);const entry=await readWorkbench(s,completedContinuationRecord());
+ assert.match(text(entry),/旧未知调用及未结费用仍保留/);
+ assert.match(text(entry),/请求未完成或状态待核对/);
+ assert.equal(find(entry,n=>n.textContent==='重新扫描全文（新增模型调用）'),undefined);
+ assert.equal(find(entry,n=>n.textContent==='从已保存的阶段继续核验'),undefined);
+ const repair=find(entry,n=>n.textContent==='修复图表提取（新增模型调用）');assert.ok(repair);
+ assert.equal(s.calls.filter(call=>call.data).length,0);
+ const request=repair.onclick();await flush();
+ assert.deepEqual(JSON.parse(JSON.stringify(s.calls[1].data)),{request_id:'e'.repeat(32),source_sha256:SHA,repair_visuals:true});
+ s.pending[1].resolve({state:'queued'});await flush();s.pending[2].resolve(completedContinuationRecord({jobs:[{request_id:'e'.repeat(32),state:'dispatching'}]}));await request;
+ assert.equal(find(entry,n=>n.textContent==='修复图表提取（新增模型调用）'),undefined);
+});
+test('incomplete, different-source and foreign-task continuation claims cannot unlock paid operations',async()=>{
+ for(const patch of [{data_continuation_completed:false},{source_sha256:'e'.repeat(64)},{task_id:OTHER},{automatic_retry:true}]){
+  const s=setup();publish(s);const record=completedContinuationRecord();Object.assign(record.completed_unknown_reissues[0],patch);
+  const entry=await readWorkbench(s,record);assert.equal(find(entry,n=>n.textContent==='修复图表提取（新增模型调用）'),undefined);
+  assert.match(text(entry),/不能换编号自动重提/);
+ }
+});
+test('new unknown or a still-active job blocks visual repair even after a proved historical continuation',async()=>{
+ for(const state of ['queued','dispatching','unknown']){
+  const s=setup();publish(s);const record=completedContinuationRecord();record.jobs.push({request_id:state==='unknown'?'9'.repeat(32):'f'.repeat(32),state});
+  const entry=await readWorkbench(s,record);assert.equal(find(entry,n=>n.textContent==='修复图表提取（新增模型调用）'),undefined);
+ }
+});

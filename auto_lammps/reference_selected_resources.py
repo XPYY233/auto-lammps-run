@@ -29,7 +29,7 @@ BOOTSTRAP = (_READER_BOOTSTRAP
     .replace("str(root)!=request['remote_root']", "str(root)!=remote_root")
     .replace('from auto_lammps.author_source_worker import read_source_report',
              'from auto_lammps.reference_selected_resource_worker import selected_resources')
-    .replace('response=read_source_report(request)', "response=selected_resources(request,action=envelope['action'])"))
+    .replace('response=read_source_report(request)', "response=selected_resources(request,action=envelope['action'],previous_bundle_sha256=envelope.get('previous_bundle_sha256'))"))
 
 
 def selected_tool_bundle():
@@ -124,6 +124,46 @@ class ReferenceSelectedResources:
         folder,request=self._saved(operation_id)
         return self._observe(request,folder,'reconcile')
 
+    def resume(self,operation_id):
+        """Continue known partial files under the original immutable operation."""
+        folder,request=self._saved(operation_id)
+        prior=self.status(operation_id)
+        if prior['state']!='partial':return prior
+        return self._observe(request,folder,'resume')
+
+    def resume_options(self,operation_id):
+        """Read-only local admission; the remote worker still verifies originals."""
+        folder,request=self._saved(operation_id);report=self.status(operation_id)
+        def denied(reason):return dict(resumable=False,resume_reason=reason)
+        if report['state']!='partial' or not report['missing']:
+            return denied('known_partial_with_missing_files_required')
+        starts=list(folder.glob('*-start.json'))
+        if len(starts)>=32:return denied('selected_observation_limit')
+        resumed=sum(json.loads(read_regular(path,2048,private=True)).get('action')=='resume' for path in starts)
+        if resumed>=worker.MAX_RESUMES:return denied('selected_resume_limit')
+        if report['request_count']>=worker.MAX_CALLS:return denied('selected_request_limit')
+        budget=report.get('received_budget_bytes',report['received_bytes'])
+        mode=report.get('accounting_mode','exact' if report['transfer_accounting_complete'] else 'unknown')
+        if mode=='unknown':
+            # Only the old terminal envelope failure is eligible for remote
+            # legacy-reader attestation. Charge its proven hard read ceiling
+            # conservatively for this preview; never claim exact old bytes.
+            failures=report['failures']
+            selected=next((row for row in request['selected']
+                if len(failures)==1 and row['path']==failures[0]['path']),None)
+            if ('received_budget_bytes' in report or selected is None
+                    or failures[0]['reason']!='selected_transfer_budget_exceeded'
+                    or report['request_count']==0):
+                return denied('selected_transfer_accounting_unknown')
+            old_limit=min(worker.MAX_RESPONSE,worker.MAX_TRANSFER-report['received_bytes'],
+                4*((selected['size']+2)//3)+8192)
+            if old_limit>=worker.MAX_RESPONSE:return denied('selected_transfer_accounting_unknown')
+            budget+=old_limit+1
+        needed=worker.blob_response_limit(report['missing'][0]['size'])+1
+        if needed>worker.MAX_RESPONSE or budget+needed>worker.MAX_TRANSFER:
+            return denied('selected_transfer_budget_exceeded')
+        return dict(resumable=True,resume_reason='original_operation_missing_files_only')
+
     def _observe(self,request,folder,action):
         observations=list(folder.glob('*-start.json'))
         if len(observations)>=32: raise AcquisitionError('selected_observation_limit')
@@ -134,9 +174,13 @@ class ReferenceSelectedResources:
             bundle_sha256=sha256(bundle)))
         command=_bound_transport_command(self.transport,self.transport_binding,self.host_alias,
             self.remote_directory,['python3','-I','-c',BOOTSTRAP])
-        data=canonical(dict(action=action,request=request,bundle=base64.b64encode(bundle).decode(),bundle_sha256=sha256(bundle)))
+        envelope=dict(action=action,request=request,bundle=base64.b64encode(bundle).decode(),bundle_sha256=sha256(bundle))
+        if action=='resume':
+            old=json.loads(read_regular(folder/'intent.json',worker.MAX_REQUEST+2048,private=True))
+            envelope['previous_bundle_sha256']=old['bundle_sha256']
+        data=canonical(envelope)
         try:
-            result=self.capture(command,timeout=2700 if action=='acquire' else 60,max_bytes=worker.MAX_REPORT,
+            result=self.capture(command,timeout=2700 if action in {'acquire','resume'} else 60,max_bytes=worker.MAX_REPORT,
                 input_chunks=[data[index:index+65536] for index in range(0,len(data),65536)])
         except OSError as error:
             result=dict(returncode=None,failure=type(error).__name__,stdout='',stderr='')

@@ -164,16 +164,22 @@ class WorkbenchExtractionJobs:
         if any(intent.get(key)!=value for key,value in expected.items()):
             raise TaskError('提取请求编号已用于其他来源或操作。')
 
-    @staticmethod
-    def _admit_source(db,source_sha256,options,*,exclude_request=None):
+    def completed_unknown_reissues(self, identifier):
+        return self.bridge.completed_unknown_reissues(identifier)
+
+    def _admit_source(self,db,source_sha256,options,*,identifier,repair_identity=None,exclude_request=None):
         """Both histories are checked under the queue's atomic write transaction."""
+        resolved = {r['unknown_request_id'] for r in self.bridge._completed_unknown_reissues(
+            db, identifier, repair_identity=repair_identity)} if options['repair_visuals'] else set()
         for row in db.execute('SELECT i.document intent,r.document receipt FROM workbench_extraction_intents i '
                 'LEFT JOIN workbench_extraction_receipts r ON r.id=i.id'):
             intent=json.loads(row['intent'])
             if intent['source_sha256']!=source_sha256:continue
             receipt=json.loads(row['receipt']) if row['receipt'] else None
             if receipt is None or receipt['state'] in {'unknown','failed_or_unknown'}:
-                if intent['request_id'] != options.get('unknown_reissue_of'):
+                if (intent.get('request_id') not in resolved
+                        and (not options.get('unknown_reissue_of')
+                            or intent.get('request_id') != options['unknown_reissue_of'])):
                     raise TaskError('同一 PDF 原提取状态未知；须先核对，不能再次排队或收费。')
             if (not options.get('unknown_reissue_of') and not options['resume_of'] and not options['force_rescan'] and not options['repair_visuals']
                     and (receipt['state'] in {'completed','completed_with_limitations','no_evidence_published'}
@@ -183,6 +189,7 @@ class WorkbenchExtractionJobs:
                 'ORDER BY e.sequence DESC LIMIT 1) state FROM workbench_jobs j WHERE j.source_sha256=?',
                 (source_sha256,)):
             if row['id']==exclude_request or row['id']==options.get('unknown_reissue_of'):continue
+            if row['id'] in resolved and row['state'] in {'interrupted','unknown','failed_or_unknown'}:continue
             if row['state'] in BLOCKING:
                 raise TaskError('同一 PDF 已排队、正在提取或状态待核对；不能换请求编号重复排队。')
 
@@ -221,7 +228,8 @@ class WorkbenchExtractionJobs:
             if prior:
                 self._same_request(json.loads(prior[0])['intent'],identifier,request_id,options)
             else:
-                self._admit_source(db,source_sha256,options)
+                self._admit_source(db,source_sha256,options,identifier=identifier,
+                    repair_identity={**frozen['intent'], **self.bridge._model_binding(client)})
                 now=datetime.now(timezone.utc).isoformat()
                 db.execute('INSERT INTO workbench_jobs VALUES (?,?,?,?,?,?)',
                     (request_id,identifier,source_sha256,sha256(canonical(frozen)),canonical(frozen).decode(),now))
@@ -292,7 +300,8 @@ class WorkbenchExtractionJobs:
                     {'message':'论文来源、模型配置、原生能力或授权已变化，未派发模型请求。'})
                 return
             with self.tasks.transaction() as db:
-                try:self._admit_source(db,options['source_sha256'],options,exclude_request=request_id)
+                try:self._admit_source(db,options['source_sha256'],options,identifier=identifier,
+                    repair_identity={**intent, **self.bridge._model_binding(client)},exclude_request=request_id)
                 except TaskError:
                     self._event(db,request_id,'paused',
                         {'message':'同一 PDF 的原提取记录已变化；须先核对，未重复派发模型请求。'})

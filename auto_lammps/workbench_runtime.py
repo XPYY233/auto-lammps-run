@@ -14,7 +14,7 @@ from .manifest import canonical, sha256
 from .runtime_launcher import ExecutionDenied, absolute, directory, read_regular
 from .tasks import TaskError
 from .workbench_bridge import (WorkbenchExtractionBridge, WorkbenchPaperBinding, WorkbenchRecoveryBinding,
-    installed_workbench_runtime)
+    _digest, installed_workbench_runtime)
 
 
 class WorkbenchRuntimeError(TaskError):
@@ -181,6 +181,10 @@ def assemble_private_workbench(papers, config_path):
     repair, never a browser-supplied token. An empty binding list permits controller-only PDF registration
     into ``bridge.runtime.database`` before saving actual mappings. Registered
     title/DOI/PDF SHA are checked by the bridge for each human task operation.
+    Optional ``completed_native_capability_allowlist`` contains at most eight
+    reviewed historical capability digests for reading authenticated completed
+    publications after an operator dependency repair. It never permits a
+    pending/unknown checkpoint to resume under a different native capability.
 
     Fixed files under private_root: evidence.sqlite, seal.key, owner.json,
     snapshots/, checkpoints/. Existing stores need the original key and owner
@@ -190,9 +194,10 @@ def assemble_private_workbench(papers, config_path):
     """
     try:
         config = _json(read_regular(absolute(str(config_path)), 65536, private=True))
-        if (not isinstance(config, dict) or set(config) not in (
-                {'version', 'private_root', 'session_id', 'bindings'},
-                {'version', 'private_root', 'session_id', 'bindings', 'recoveries'})
+        required = {'version', 'private_root', 'session_id', 'bindings'}
+        optional = {'recoveries', 'completed_native_capability_allowlist'}
+        if (not isinstance(config, dict) or not required <= set(config)
+                or set(config) - required - optional
                 or type(config['version']) is not int or config['version'] != 1
                 or not isinstance(config['private_root'], str)
                 or not isinstance(config['session_id'], str)
@@ -200,6 +205,13 @@ def assemble_private_workbench(papers, config_path):
                 or any(ord(c) < 33 or ord(c) > 126 for c in config['session_id'])
                 or not isinstance(config['bindings'], list) or len(config['bindings']) > 1000):
             raise _denied()
+        completed_capabilities = config.get('completed_native_capability_allowlist', [])
+        if (not isinstance(completed_capabilities, list) or len(completed_capabilities) > 8
+                or any(not isinstance(value, str) for value in completed_capabilities)
+                or len(set(completed_capabilities)) != len(completed_capabilities)):
+            raise _denied()
+        for value in completed_capabilities:
+            _digest(value)
         recoveries = config.get('recoveries', [])
         if not isinstance(recoveries, list) or len(recoveries) > 1000:
             raise _denied()
@@ -266,7 +278,8 @@ def assemble_private_workbench(papers, config_path):
         runtime = installed_workbench_runtime(database=database, snapshot_blobs=blobs,
             checkpoint_runtime=checkpoints, session_id=config['session_id'],
             explicit_reissue_store=routed)
-        runtime = replace(runtime, pdf_intake_root=root/'imports')
+        runtime = replace(runtime, pdf_intake_root=root/'imports',
+            completed_native_capability_allowlist=tuple(completed_capabilities))
         return WorkbenchExtractionBridge(papers, runtime, recoveries=recoveries), bindings
     except WorkbenchRuntimeError:
         raise

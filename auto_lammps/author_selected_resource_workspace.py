@@ -94,10 +94,21 @@ class AuthorSelectedResourceWorkspace:
         for row in rows:
             context=row['context'];events=row['events'];latest=events[-1] if events else {}
             report=latest.get('report') or {}
+            resume=dict(resumable=False,resume_reason='known_partial_with_missing_files_required')
+            if report.get('state')=='partial':
+                try:
+                    tool=self._tool(context)
+                    # Status is a local immutable receipt; no SSH/model call.
+                    if tool.status(context['operation_id'])!=report:
+                        resume['resume_reason']='selected_receipt_changed'
+                    else:resume=tool.resume_options(context['operation_id'])
+                except (ValueError,KeyError,TypeError,OSError):
+                    resume['resume_reason']='selected_operation_binding_unverified'
             history.append(dict(operation_id=context['operation_id'],selection_request_id=context['selection_request_id'],
                 state=report.get('state','unknown'),selected_complete=report.get('selected_complete',False),
                 source_complete=False,report=deepcopy(report),message=latest.get('message',''),
-                recoverable=report.get('state','unknown')=='unknown'))
+                recoverable=report.get('state','unknown')=='unknown',
+                can_resume=resume['resumable'],**resume))
         return dict(task_id=identifier,scope='reference_only',B_input=False,execution_authorized=False,
                     physical_evaluation_performed=False,scientific_validation=False,history=history,
                     latest=history[-1] if history else None,calls_model=False,submits_HPC=False)
@@ -114,8 +125,8 @@ class AuthorSelectedResourceWorkspace:
                 context=saved['context']
                 if context['selection_request_id']!=selection_request:raise TaskError('原获取已绑定另一选择，不能覆盖。')
                 report=(saved['events'][-1].get('report') if saved['events'] else None)
-                if report and report['state']!='unknown':return self.status(identifier)
-                action='reconcile'
+                if report and report['state']=='selected_complete':return self.status(identifier)
+                action='resume' if report and report['state']=='partial' else 'reconcile'
             else:
                 if any((row['events'][-1].get('report') if row['events'] else None) is None
                        or row['events'][-1]['report']['state']=='unknown' for row in rows):
@@ -144,7 +155,8 @@ class AuthorSelectedResourceWorkspace:
                 action='acquire'
             try:
                 tool=self._tool(context)
-                observed=(tool.acquire(operation,context['selections']) if action=='acquire' else tool.reconcile(operation))
+                observed=(tool.acquire(operation,context['selections']) if action=='acquire'
+                    else tool.resume(operation) if action=='resume' else tool.reconcile(operation))
                 validate_selected_report(context['request'],observed)
                 self._tool(context)  # Recheck the saved connection after transport.
             except (ValueError,KeyError,TypeError,OSError):

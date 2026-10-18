@@ -2950,6 +2950,13 @@ function appendWorkbenchEntry(box){
   if(latestRecord&&latestRecord.source_sha256!==record.source_sha256)sourceChanged=true;
   latestRecord=record;content.replaceChildren();
   content.append(node('p','复用文献工作台的提取、自动核验与保存；使用本应用已配置的模型。论文结果仅供人类参考，不进入独立 B。','form-note'));
+  const completedContinuations=(record.completed_unknown_reissues||[]).filter(item=>
+   item.task_id===id&&item.source_sha256===record.source_sha256&&/^[a-f0-9]{64}$/.test(item.source_sha256||'')&&
+   /^[a-f0-9]{32}$/.test(item.unknown_request_id||'')&&/^[a-f0-9]{32}$/.test(item.superseded_by||'')&&item.unknown_request_id!==item.superseded_by&&
+   item.data_continuation_completed===true&&item.unknown_charge_unsettled===true&&item.repair_visuals_only===true&&item.automatic_retry===false&&
+   (record.messages||[]).some(message=>message.request_id===item.superseded_by&&message.source_sha256===record.source_sha256&&['completed','completed_with_limitations'].includes(message.state)));
+  const continuedUnknowns=new Set(completedContinuations.map(item=>item.unknown_request_id));
+  if(continuedUnknowns.size)content.append(node('p','已批准的断点续接已保存同源 P；旧未知调用及未结费用仍保留。现在仅可单独修复图表，不重新扫描全文。','form-note'));
   if(sourceChanged)content.append(node('p','论文全文来源版本已变化；原请求与费用保留，未自动重新提取。','form-note'));
   for(const message of record.messages||[]){
    const state={completed:'已提取并保存',completed_with_limitations:'已保存，仍有明确缺项',no_evidence_published:'未得到可发布证据',failed:'提取未完成',failed_or_unknown:'请求未完成或状态待核对',unknown:'正在提取或等待回执'}[message.state]||message.state;
@@ -2965,7 +2972,7 @@ function appendWorkbenchEntry(box){
   const terminal=['completed','completed_with_limitations','no_evidence_published','failed'];
   if(!pending&&pendingRequest&&(record.messages||[]).some(message=>message.request_id===pendingRequest.request_id&&terminal.includes(message.state)))pendingRequest=null;
   const activeJobs=(record.jobs||[]).filter(job=>['queued','dispatching'].includes(job.state));
-  const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>['unknown','failed_or_unknown'].includes(message.state))||(record.jobs||[]).some(job=>['queued','dispatching','interrupted','unknown','failed_or_unknown'].includes(job.state));
+  const uncertain=Boolean(pendingRequest&&!pending)||(record.messages||[]).some(message=>!continuedUnknowns.has(message.request_id)&&['unknown','failed_or_unknown'].includes(message.state))||(record.jobs||[]).some(job=>['queued','dispatching'].includes(job.state)||!continuedUnknowns.has(job.request_id)&&['interrupted','unknown','failed_or_unknown'].includes(job.state));
   const saved=(record.messages||[]).some(message=>['completed','completed_with_limitations','no_evidence_published'].includes(message.state)||message.model_request_ids?.length>0);
   const runButton=(label,options={},style='quiet',endpoint='extract',confirmed=()=>true)=>{
    const run=node('button',label,style);run.disabled=pending;content.append(run);
@@ -2979,7 +2986,7 @@ function appendWorkbenchEntry(box){
    return run;
   };
   if(record.enabled&&!uncertain){
-   const resumable=(record.recoveries||[]).filter(item=>item.enabled===true&&/^[a-f0-9]{32}$/.test(item.resume_of));
+   const resumable=continuedUnknowns.size?[]:(record.recoveries||[]).filter(item=>item.enabled===true&&/^[a-f0-9]{32}$/.test(item.resume_of));
    if(resumable.length){
     for(const recovery of resumable){
      content.append(node('p',`可复用原请求已成功的 ${recovery.reused_model_calls} 次答复；后续尚未完成的核验会调用模型并记账。原失败与费用保留。`,'form-note'));
@@ -2987,10 +2994,10 @@ function appendWorkbenchEntry(box){
      runButton('从已保存的阶段继续核验',{resume_of:recovery.resume_of},'primary');
     }
    }
-   else if(!saved)runButton('让应用 AI 提取并核验论文',{},'primary');
+   else if(!saved&&!continuedUnknowns.size)runButton('让应用 AI 提取并核验论文',{},'primary');
    else{
     content.append(node('p','重新扫描或修复图表会新增模型调用并记账；已有证据、请求和费用保留。','form-note'));
-    runButton('重新扫描全文（新增模型调用）',{force_rescan:true});
+    if(!continuedUnknowns.size)runButton('重新扫描全文（新增模型调用）',{force_rescan:true});
     if((record.messages||[]).some(message=>['completed_with_limitations','no_evidence_published'].includes(message.state)||message.visual_evidence_ready===false))runButton('修复图表提取（新增模型调用）',{repair_visuals:true});
    }
   }
@@ -3355,15 +3362,17 @@ async function renderAuthorResourceSelections(id,parent,state){
   }
   const selected=['selected','needs_clarification'].includes(data.latest?.state)&&data.latest?.report?.selections?.length>0?data.latest:null;
   if(selected?.state==='needs_clarification')panel.append(node('p','已有具体文件可以取件；其他缺项仍待澄清，取件不会批准运行或改变科学状态。','form-note'));
-  if(selected||acquired?.recoverable){
-   const fetch=node('button',state.selectedFetchPending?'正在获取所选原件…':acquired?.recoverable?'只核对原所选原件获取请求':'把 AI 所选原件获取到 HPC','quiet');
-   fetch.disabled=Boolean(state.selectionPending)||Boolean(state.selectedFetchPending)||(!acquired?.recoverable&&data.acquisitions?.history?.some(item=>item.selection_request_id===selected?.request_id));
+  if(selected||acquired?.recoverable||acquired?.resumable){
+   const original=acquired?.recoverable||acquired?.resumable;
+   const fetch=node('button',state.selectedFetchPending?'正在获取所选原件…':acquired?.recoverable?'只核对原所选原件获取请求':acquired?.resumable?'继续原请求未完成的原件':'把 AI 所选原件获取到 HPC','quiet');
+   fetch.disabled=Boolean(state.selectionPending)||Boolean(state.selectedFetchPending)||(!original&&data.acquisitions?.history?.some(item=>item.selection_request_id===selected?.request_id));
+   if(acquired?.resume_reason)panel.append(node('p',acquired.resume_reason,'form-note'));
    fetch.onclick=async()=>{
     if(!alive()||state.selectedFetchPending)return;
-    const operation=acquired?.recoverable?acquired.operation_id:state.selectedFetchRequest||crypto.randomUUID().replaceAll('-','');
+    const operation=original?acquired.operation_id:state.selectedFetchRequest||crypto.randomUUID().replaceAll('-','');
     state.selectedFetchPending=operation;state.selectedFetchRequest=operation;fetch.disabled=true;
     feedback.textContent='正在通过原保存连接获取所选原件；不执行源码或提交计算，状态未知时只核对原请求。';
-    try{await api(`/api/tasks/${id}/author-resources/selected-files`,{request_id:operation,selection_request_id:acquired?.recoverable?acquired.selection_request_id:selected.request_id});state.selectionError='';state.selectedFetchRequest=null;}
+    try{await api(`/api/tasks/${id}/author-resources/selected-files`,{request_id:operation,selection_request_id:original?acquired.selection_request_id:selected.request_id});state.selectionError='';state.selectedFetchRequest=null;}
     catch(error){state.selectionError=error.message;}
     finally{state.selectedFetchPending=null;if(alive())await renderAuthorResourceSelections(id,parent,state);}
    };panel.append(fetch);

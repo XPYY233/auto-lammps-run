@@ -135,7 +135,8 @@ class ReferenceOutputs:
             if metadata_bytes+4096>262144:
                 raise TaskError('本次回收的审计存储已用完；原记录保留，未再次读取。')
             try:
-                result = self.capture(command,timeout=60,max_bytes=36*1024*1024,input_chunks=[canonical(request)])
+                result = self.capture(command,timeout=60,max_bytes=worker.response_limit(request),
+                    input_chunks=[canonical(request)])
             except OSError:
                 result=dict(returncode=None,failure='transport_error',stdout='',stderr='')
             _write_new(folder/(uuid.uuid4().hex+'-transport.json'),dict(
@@ -145,6 +146,9 @@ class ReferenceOutputs:
             if result.get('returncode')!=0 or result.get('failure'):
                 raise TaskError('作者输出回收未完成；原作业、费用和文件均保留。')
             try:
+                if (not isinstance(result.get('stdout'),str)
+                        or len(result['stdout']) > 4*((worker.response_limit(request)+2)//3)):
+                    raise ValueError('response limit')
                 report = json.loads(base64.b64decode(result['stdout'].strip(),validate=True))
                 expected = {k:request[k] for k in ('version','request_id','job_id','manifest_sha256')}
                 if not isinstance(report,dict) or set(report)!={*expected,'files'} or any(report[k]!=v for k,v in expected.items()):

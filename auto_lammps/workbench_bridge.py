@@ -28,6 +28,7 @@ HUMAN_ROLE = 'paper_reference_human_only'
 WORKBENCH_CHUNK_PAGES = 1
 _HASH = re.compile(r'[a-f0-9]{64}')
 _MODEL_ERRORS = {
+    'literature_visual_unavailable': '原生文献工作台未发现可补全图表；未创建模型调用，已发布数据保留。',
     'workbench_context_changed': '提取来源、模型配置或授权已变化；后续模型请求暂停，原记录保留。',
     'workbench_model_options_outside_policy': '工作台调用选项超出本项目已配置的模型策略，未发送。',
     'workbench_model_context_too_large': '工作台来源上下文超出本项目已配置的单次模型容量，未发送。',
@@ -113,6 +114,16 @@ class WorkbenchRuntime:
     native_known_failure_planner: object = None
     native_known_failure_creator: object = None
     native_unknown_reissue_creator: object = None
+    completed_native_capability_allowlist: tuple = ()
+
+    def __post_init__(self):
+        values = self.completed_native_capability_allowlist
+        if (type(values) is not tuple or len(values) > 8
+                or any(not isinstance(value, str) for value in values)
+                or len(set(values)) != len(values)):
+            raise TaskError('已完成文献历史的原生能力许可无效。')
+        for value in values:
+            _digest(value)
 
 
 def _reference_paper_sources(pages):
@@ -181,6 +192,7 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
         export = load('evidence.evidence_export')
         six = load('evidence.six_column')
         visuals = load('evidence.visual_evidence')
+        visual_review = load('evidence.literature_visual_review')
         workflow = load('evidence.literature_extraction_checkpoint_workflow')
         stages = load('evidence.literature_extraction_stages')
         stage_budget = load('evidence.literature_extraction_budget')
@@ -241,7 +253,7 @@ def installed_workbench_runtime(*, database, snapshot_blobs, checkpoint_runtime,
                 'operations': {key: fn.__module__ + '.' + fn.__qualname__ for key, fn in operations.items()},
                 'modules': {module.__name__: sha256(Path(module.__file__).read_bytes())
                     for module in (job, business, workflow, stages, stage_budget,
-                                   extraction, persistence, finalizer, context,
+                                   extraction, persistence, finalizer, context, visuals, visual_review,
                                    *recovery_modules)}}
         def native_stage(token):
             state = persistence.decode_job_private_state(jobs.export_private_state(token, session_id=session_id))
@@ -560,6 +572,109 @@ class WorkbenchExtractionBridge:
                 'ON r.id=i.id WHERE i.task_id=? ORDER BY i.rowid', (identifier,)).fetchall()
         return [json.loads(row['receipt']) if row['receipt'] else
             {**json.loads(row['intent']), 'state': 'unknown', 'automatic_retry': False} for row in rows]
+
+    def _completed_unknown_reissues(self, db, identifier, *, repair_identity=None):
+        """Prove publication without settling or rewriting an unknown charge.
+
+        This is a read-only projection. Only a separately authorized, unique
+        child with an authenticated native completion and current published
+        data can supersede the old data-flow blocker. It never authorizes a
+        rescan, another unknown reissue, or a retry of either original call.
+        """
+        resolved = []
+        rows = db.execute('SELECT u.unknown_request_id FROM workbench_extraction_unknown_reissues u '
+            'JOIN workbench_extraction_intents i ON i.id=u.unknown_request_id WHERE i.task_id=?',
+            (identifier,)).fetchall()
+        for row in rows:
+            try:
+                from auto_research.evidence.literature_task_checkpoint_codec import encode_checkpoint
+                claim = self._unknown_reissue_claim(db, row['unknown_request_id'])
+                old, unknown = self._request(db, row['unknown_request_id'])
+                child, receipt = self._request(db, claim['request_id'])
+                identity_keys = ('task_id', 'paper_id', 'source_sha256', 'model',
+                    'connection_revision', 'credential_generation', 'role', 'title', 'doi')
+                if (claim.get('task_id') != identifier or old.get('task_id') != identifier
+                        or unknown.get('state') != 'failed_or_unknown'
+                        or claim.get('authorization_kind') != 'explicit_user_unknown_reissue_once'
+                        or claim.get('supplier_checked') is not True
+                        or claim.get('retain_unknown_charge') is not True
+                        or claim.get('automatic_retry') is not False
+                        or child.get('unknown_reissue_of') != old['request_id']
+                        or any(child.get(k) != old.get(k) for k in identity_keys)
+                        or any(claim.get(k) != old.get(k) for k in
+                            ('task_id', 'paper_id', 'source_sha256', 'connection_revision', 'credential_generation'))
+                        or receipt.get('state') not in {'completed', 'completed_with_limitations'}
+                        or receipt.get('workbench_status') != 'completed'
+                        or receipt.get('authorization_kind') != claim['authorization_kind']
+                        or receipt.get('supplier_checked') is not True
+                        or receipt.get('retain_unknown_charge') is not True):
+                    continue
+                saved = self._continuation(db, child['request_id'])
+                prior = self._continuation(db, old['request_id'])
+                if (not saved or not prior
+                        or saved.get('intent_sha256') != sha256(canonical(child))
+                        or prior.get('intent_sha256') != sha256(canonical(old))
+                        or saved.get('job_token') != sha256(('explicit-unknown-reissue:'
+                            + prior['job_token'] + ':' + child['request_id']).encode())
+                        or any(saved.get(k) != claim.get(k) for k in
+                            ('model_ledger_sha256', 'model_policy_sha256', 'native_capability_sha256'))
+                        or saved.get('workbench_paper_id') != prior.get('workbench_paper_id')
+                        or saved.get('source_sha256') != child['source_sha256']
+                        or saved.get('session_sha256') != sha256(self.runtime.session_id.encode())):
+                    continue
+                if repair_identity is not None and (any(
+                        repair_identity.get(k) != child.get(k) for k in identity_keys)
+                        or any(repair_identity.get(k) != saved.get(k) for k in
+                            ('model_ledger_sha256', 'model_policy_sha256'))):
+                    continue
+                binding = WorkbenchPaperBinding(child['paper_id'], saved['workbench_paper_id'],
+                    child['source_sha256'])
+                registered = self.papers._read(db, binding.paper_id)
+                source = self.runtime.database.get_paper(binding.workbench_paper_id)
+                if (not db.execute('SELECT 1 FROM paper_tasks WHERE paper_id=? AND task_id=?',
+                            (binding.paper_id, identifier)).fetchone()
+                        or any(registered.get(k) != child[k] for k in ('title', 'doi'))
+                        or not isinstance(source, dict) or source.get('title') != child['title']
+                        or doi_text(source.get('doi', '')) != child['doi']
+                        or source.get('pdf_sha256') != binding.pdf_sha256):
+                    continue
+                native = self.runtime.native_recovery_reader(saved['job_token'])
+                sealed_unknown = self.runtime.native_recovery_reader(prior['job_token'])
+                original = self.runtime.native_recovery_reader(claim['parent_job_token'])
+                summary = native['execution'].completion_result
+                counts = receipt.get('counts', {})
+                published = counts.get('published_item_count', 0) + counts.get('existing_item_count', 0)
+                if (native['checkpoint'].state != 'completed'
+                        or (sha256(canonical(self.runtime.native_capability_reader())) != claim['native_capability_sha256']
+                            and claim['native_capability_sha256'] not in
+                                self.runtime.completed_native_capability_allowlist)
+                        or self.runtime.native_source_reader(binding.workbench_paper_id) != binding.pdf_sha256
+                        or sha256(encode_checkpoint(sealed_unknown['checkpoint'])) != claim['unknown_checkpoint_sha256']
+                        or sha256(encode_checkpoint(original['checkpoint'])) != claim['parent_checkpoint_sha256']
+                        or native['job'].paper_id != binding.workbench_paper_id
+                        or native['job'].snapshot['pdf_sha256'] != binding.pdf_sha256
+                        or summary is None or sha256(canonical(summary)) != receipt.get('source_receipt_sha256')
+                        or summary.get('status') != 'completed'
+                        or summary.get('schema_version') != 'literature-extraction-commit-result-v2'
+                        or any(summary.get(k) != v for k, v in counts.items())
+                        or type(published) is not int or published < 1
+                        or len(self.runtime.data_items(self.runtime.database, binding.workbench_paper_id)) < published):
+                    continue
+                resolved.append(dict(unknown_request_id=old['request_id'],
+                    superseded_by=child['request_id'], task_id=identifier,
+                    paper_id=child['paper_id'], source_sha256=child['source_sha256'],
+                    data_continuation_completed=True, unknown_charge_unsettled=True,
+                    repair_visuals_only=True, automatic_retry=False))
+            except Exception:
+                # Missing, changed or unauthenticated evidence never lifts a
+                # blocker. Status reads cannot mutate native recovery state.
+                continue
+        return resolved
+
+    def completed_unknown_reissues(self, identifier):
+        task_id(identifier)
+        with self.papers.tasks.transaction() as db:
+            return self._completed_unknown_reissues(db, identifier)
 
     @staticmethod
     def _model_failure_details(record, calls):
@@ -1369,13 +1484,16 @@ class WorkbenchExtractionBridge:
             same_source = db.execute('SELECT i.document intent, r.document receipt '
                 'FROM workbench_extraction_intents i LEFT JOIN workbench_extraction_receipts r '
                 'ON r.id=i.id WHERE i.paper_id=?', (paper['id'],)).fetchall()
+            resolved = {r['unknown_request_id'] for r in self._completed_unknown_reissues(db, identifier,
+                repair_identity={**intent, **self._model_binding(client)})} if repair_visuals else set()
             for row in same_source:
                 old_intent = json.loads(row['intent'])
                 if old_intent['source_sha256'] != binding.pdf_sha256:
                     continue
                 old = json.loads(row['receipt']) if row['receipt'] else None
                 if old is None or old['state'] in {'unknown', 'failed_or_unknown'}:
-                    if not explicit_reissue or old_intent['request_id'] != unknown_reissue_of:
+                    if (old_intent.get('request_id') not in resolved
+                            and (not explicit_reissue or old_intent['request_id'] != unknown_reissue_of)):
                         raise TaskError('同一 PDF 的先前提取状态未知；请先核对，不能换请求编号再次收费。')
                 if (not recovery and not explicit_reissue and not force_rescan and not repair_visuals and (old['state'] in
                         {'completed', 'completed_with_limitations', 'no_evidence_published'}

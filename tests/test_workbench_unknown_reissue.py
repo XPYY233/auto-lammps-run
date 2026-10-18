@@ -40,6 +40,7 @@ class ExplicitUnknownReissueTests(unittest.TestCase):
 
     def transport(self,body,key,timeout):
         payload=json.loads(body);self.outgoing.append(payload)
+        if self.phase=='published':return self.fixture.transport(body,key,timeout)
         if self.phase=='unknown':raise TimeoutError('synthetic unknown provider response')
         length=self.phase=='length' and len(self.outgoing)==self.length_at
         content='{"data":[' if length else json.dumps(dict(data=[],findings=[],pending_tasks=[]))
@@ -97,6 +98,153 @@ class ExplicitUnknownReissueTests(unittest.TestCase):
         self.assertNotIn('job_token',option)
         self.assertEqual(before,list(self.fixture.storage.rglob('*')))
         self.assertEqual(len(self.outgoing),4);self.assert_history_untouched()
+
+    def publish_reissue(self):
+        self.fail_unknown();self.authorize();self.phase='published'
+        result=self.extract(self.new_id,unknown_reissue_of=self.unknown_id)
+        self.assertIn(result['state'],{'completed','completed_with_limitations'},result)
+        self.assertGreater(result['counts']['published_item_count'],0)
+        return result
+
+    def test_completed_projection_requires_authenticated_publication_and_preserves_unknown(self):
+        self.publish_reissue()
+        before=self.bridge.history(self.fixture.task['id'])
+        proof=self.bridge.completed_unknown_reissues(self.fixture.task['id'])
+        self.assertEqual(len(proof),1,proof)
+        self.assertEqual(proof[0]['unknown_request_id'],self.unknown_id)
+        self.assertEqual(proof[0]['superseded_by'],self.new_id)
+        self.assertTrue(proof[0]['unknown_charge_unsettled'])
+        self.assertTrue(proof[0]['repair_visuals_only'])
+        self.assertNotIn('job_token',json.dumps(proof))
+        self.assertEqual(self.bridge.history(self.fixture.task['id']),before)
+        self.assertEqual(before[1]['state'],'failed_or_unknown')
+        self.assert_history_untouched()
+        self.fixture.restart()
+        self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),proof)
+
+    def test_published_reissue_allows_only_separate_visual_repair_not_rescan_or_retry(self):
+        self.publish_reissue();calls=len(self.outgoing)
+        for kwargs in ({},{'force_rescan':True},{'resume_of':self.unknown_id}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(TaskError):self.extract(self.other_id,**kwargs)
+        self.assertEqual(len(self.outgoing),calls)
+        result=self.extract(self.other_id,repair_visuals=True)
+        # This synthetic PDF has no visuals: the native free preflight must
+        # fail specifically, after admission, without rescanning numeric P.
+        self.assertEqual(result['state'],'failed',result)
+        self.assertEqual(result['error_code'],'literature_visual_unavailable')
+        self.assertIn('未创建模型调用',result['error'])
+        self.assertEqual(len(self.outgoing),calls)
+        self.assert_history_untouched()
+
+    def test_queue_and_dispatch_allow_proven_visual_repair_but_new_unknown_still_blocks(self):
+        self.publish_reissue();calls=len(self.outgoing)
+        context=lambda _:dict(enabled=True,binding=self.fixture.binding,client=self.client,
+            connection_revision=1,credential_generation=1)
+        jobs=WorkbenchExtractionJobs(self.bridge,context,max_workers=1);self.addCleanup(jobs.close)
+        self.assertEqual(jobs.completed_unknown_reissues(self.fixture.task['id']),
+            self.bridge.completed_unknown_reissues(self.fixture.task['id']))
+        with patch.object(jobs.pool,'submit'):
+            for kwargs in ({},{'force_rescan':True}):
+                with self.assertRaises(TaskError):jobs.enqueue(self.fixture.task['id'],self.other_id,
+                    source_sha256=self.fixture.source_sha,**kwargs)
+            queued=jobs.enqueue(self.fixture.task['id'],self.other_id,
+                source_sha256=self.fixture.source_sha,repair_visuals=True)
+        self.assertEqual(queued['state'],'queued')
+        jobs.run(self.fixture.task['id'],self.other_id)
+        self.assertEqual(jobs.get(self.fixture.task['id'],self.other_id)['receipt']['error_code'],
+            'literature_visual_unavailable')
+        # A distinct unresolved request for this PDF must block even after
+        # the explicitly authorized old unknown has a published continuation.
+        unresolved='e'*32
+        intent=self.bridge.extraction_identity(self.fixture.task['id'],unresolved,self.fixture.binding,
+            self.client,repair_visuals=True,connection_revision=1,credential_generation=1)
+        with self.fixture.tasks.transaction() as db:
+            db.execute('INSERT INTO workbench_extraction_intents VALUES (?,?,?,?,?)',
+                (unresolved,self.fixture.task['id'],self.fixture.paper['id'],
+                    sha256(canonical(intent)),canonical(intent).decode()))
+        with self.assertRaises(TaskError):jobs.enqueue(self.fixture.task['id'],'f'*32,
+            source_sha256=self.fixture.source_sha,repair_visuals=True)
+        with self.assertRaises(TaskError):self.extract('f'*32,repair_visuals=True)
+        self.assertEqual(len(self.outgoing),calls)
+
+    def test_changed_native_or_source_or_model_cannot_use_published_unknown_exception(self):
+        self.publish_reissue();calls=len(self.outgoing)
+        runtime=self.bridge.runtime
+        for kwargs in ({'native_recovery_reader':lambda _:None},
+                {'native_source_reader':lambda _:'f'*64},
+                {'data_items':lambda *args:[]},
+                {'native_capability_reader':lambda:{**runtime.native_capability_reader(),
+                    'modules':{'changed_module':'f'*64}}}):
+            with self.subTest(kwargs=tuple(kwargs)),patch.object(self.bridge,'runtime',replace(runtime,**kwargs)):
+                self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),[])
+                with self.assertRaises(TaskError):self.extract(self.other_id,repair_visuals=True)
+        with self.assertRaises(TaskError):self.bridge.extract(self.fixture.task['id'],self.other_id,
+            self.fixture.binding,self.client,repair_visuals=True,connection_revision=2,credential_generation=1)
+        self.assertEqual(len(self.outgoing),calls)
+        self.assert_history_untouched()
+
+    def test_operator_old_capability_allowlist_reads_only_completed_authenticated_publication(self):
+        self.publish_reissue();calls=len(self.outgoing)
+        runtime=self.bridge.runtime
+        old_cap=sha256(canonical(runtime.native_capability_reader()))
+        changed=lambda:{**runtime.native_capability_reader(),'modules':{'changed_module':'f'*64}}
+        approved=replace(runtime,native_capability_reader=changed,
+            completed_native_capability_allowlist=(old_cap,))
+        with patch.object(self.bridge,'runtime',approved):
+            self.assertEqual(len(self.bridge.completed_unknown_reissues(self.fixture.task['id'])),1)
+            result=self.extract(self.other_id,repair_visuals=True)
+            self.assertEqual(result['error_code'],'literature_visual_unavailable')
+        child_token=self.token(self.new_id)
+        for bad in ('completion','summary','pdf'):
+            def reader(token):
+                native=runtime.native_recovery_reader(token)
+                if token!=child_token:return native
+                if bad=='completion':
+                    native={**native,'checkpoint':replace(native['checkpoint'],state='paused')}
+                elif bad=='summary':
+                    native={**native,'execution':replace(native['execution'],
+                        completion_result={**native['execution'].completion_result,'published_item_count':999})}
+                else:
+                    native={**native,'job':replace(native['job'],snapshot={**native['job'].snapshot,'pdf_sha256':'f'*64})}
+                return native
+            with self.subTest(bad=bad),patch.object(self.bridge,'runtime',
+                    replace(approved,native_recovery_reader=reader)):
+                self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),[])
+        self.assertEqual(len(self.outgoing),calls);self.assert_history_untouched()
+
+    def test_completed_capability_allowlist_never_authorizes_unknown_reissue(self):
+        self.fail_unknown();runtime=self.bridge.runtime
+        old_cap=sha256(canonical(runtime.native_capability_reader()))
+        changed=lambda:{**runtime.native_capability_reader(),'modules':{'changed_module':'f'*64}}
+        with patch.object(self.bridge,'runtime',replace(runtime,native_capability_reader=changed,
+                completed_native_capability_allowlist=(old_cap,))):
+            self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),[])
+            with self.assertRaises(TaskError):self.authorize()
+        self.assertEqual(len(self.outgoing),4);self.assert_history_untouched()
+
+    def test_unpublished_completed_child_never_supersedes_unknown(self):
+        self.fail_unknown();self.authorize();self.phase='success'
+        self.extract(self.new_id,unknown_reissue_of=self.unknown_id)
+        self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),[])
+        with self.assertRaises(TaskError):self.extract(self.other_id,repair_visuals=True)
+
+    def test_unbound_or_incomplete_consent_never_supersedes_unknown(self):
+        self.publish_reissue()
+        with self.fixture.tasks.transaction() as db:
+            claim=self.bridge._unknown_reissue_claim(db,self.unknown_id)
+        for changes in ({'supplier_checked':False},{'retain_unknown_charge':False},
+                {'authorization_kind':'automatic_retry'},{'request_id':'e'*32},
+                {'task_id':'f'*32},{'source_sha256':'f'*64}):
+            with self.subTest(changes=changes),patch.object(self.bridge,'_unknown_reissue_claim',
+                    return_value={**claim,**changes}):
+                self.assertEqual(self.bridge.completed_unknown_reissues(self.fixture.task['id']),[])
+                with self.assertRaises(TaskError):self.extract(self.other_id,repair_visuals=True)
+        second=self.fixture.tasks.create('Same PDF separate task','No physics','reproduction')
+        paper=self.fixture.papers.get(self.fixture.paper['id'])
+        self.fixture.papers.link_task(paper['id'],paper['revision'],second['id'])
+        self.assertEqual(self.bridge.completed_unknown_reissues(second['id']),[])
+        with self.assertRaises(TaskError):self.bridge.extract(second['id'],self.other_id,self.fixture.binding,
+            self.client,repair_visuals=True,connection_revision=1,credential_generation=1)
 
     def test_explicit_consent_resumes_original_native_pipeline_without_rescan(self):
         self.fail_unknown();self.authorize();self.phase='success'
