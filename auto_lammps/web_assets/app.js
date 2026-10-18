@@ -3566,9 +3566,10 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
   catch(error){if(alive())content.replaceChildren(node('p','目标核定记录暂不可读取：'+error.message,'error'));return;}
   if(!alive()||result.task_id!==id)return;
   const records=result.history||[];content.replaceChildren();
-  const pending=records.some(r=>['prepared','dispatching','reserved','calling','unknown'].includes(r.state));
+  const pending=records.some(r=>r.blocking!==false&&['prepared','dispatching','reserved','calling','unknown'].includes(r.state));
   const latest=records.at(-1),review=latest?.reviews?.filter(r=>r.state==='completed').at(-1),answer=latest?.state==='completed'?latest.report:review?.report;
   if(answer){
+   if(latest?.original_source_preserved)content.append(node('p','本次恢复严格使用原请求的 P 快照、原目标和原文；后续修复或新增的图表未自动加入这份建议。','form-note'));
    if(review)content.append(node('p','这份已保存的 AI 答复经通用格式规范化后通过复核；原失败与费用保留，没有新模型调用，科学范围仍待确认。','form-note'));
    const names={raw_lammps:'LAMMPS 原始计算',postprocessing:'计算数据后处理',analytical:'解析模型',cited:'引用资料',unclear:'方法待核定'};
    const labels=new Map((answer.inventory?.targets||[]).map(row=>[row.id,row.label]));
@@ -3587,7 +3588,7 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
    if(current?.mode==='reproduction')await renderReferenceScopeSelection(content,id,latest,answer,review,alive);
    if(!alive())return;
   }
-  const history=node('details');history.append(node('summary',`查看 ${records.length} 次目标核定记录、失败原因与用量`));
+  const history=node('details');history.append(node('summary',`查看 ${records.length} 次目标核定记录、失败原因、用量与未知请求恢复`));
   for(const record of records){const item=node('article');const label=({completed:'完整建议已返回',source_unavailable:'原建议保留，来源已变化',invalid_output:'建议未通过检查',failed:'模型调用未完成',unavailable:'出处或契约尚未齐备',paused:'来源或配置变化，已暂停',prepared:'已登记请求，正在核定',dispatching:'应用 AI 正在核定',reserved:'已登记请求，正在核定',calling:'应用 AI 正在核定',unknown:'请求状态待核对'})[record.state]||'状态待核对';item.append(node('p',(record.at?new Date(record.at).toLocaleString('zh-CN')+' · ':'')+label),node('small','请求 '+record.request_id));
    if(record.receipt?.message)item.append(node('p',record.receipt.message));
    if(Number.isInteger(record.usage?.total_tokens))item.append(node('small','已记录模型用量 '+record.usage.total_tokens));
@@ -3596,6 +3597,25 @@ async function renderReferenceTargetAnalysis(panel,report,identity){
     const check=node('button','重新核验这份已保存答复（不调用模型）');check.onclick=async()=>{if(!alive()||check.disabled)return;check.disabled=true;
      try{await api(`/api/tasks/${id}/reference-target-analysis/${record.request_id}/review`,{});if(alive())await refresh();}
      catch(error){if(alive()){item.append(node('p','原答复复核未完成：'+error.message,'error'));check.disabled=false;}}};item.append(check);
+   }
+   const recovery=(result.unknown_reissues||[]).find(row=>row.unknown_reissue_of===record.request_id);
+   if(recovery){
+    item.append(node('p','恢复只重发原消息和原 P 来源，保留原未知调用与未确定费用，并计入本任务三次核定上限。新调用仍未知时不会自动再发。','form-note'));
+    if(recovery.reason)item.append(node('p',recovery.reason,'form-note'));
+    if(recovery.enabled){
+     const supplier=node('input'),retain=node('input');supplier.type='checkbox';retain.type='checkbox';
+     const supplierLabel=node('label'),retainLabel=node('label');
+     supplierLabel.append(supplier,node('span','我已核对这笔供应商记录，允许恢复原请求'));
+     retainLabel.append(retain,node('span','保留原未知费用，并接受这一次新增模型调用'));
+     const restore=node('button','按原内容恢复这次目标核定（一次）');restore.disabled=true;
+     const enable=()=>{restore.disabled=!(supplier.checked&&retain.checked);};supplier.onchange=enable;retain.onchange=enable;
+     const request=recovery.request_id||crypto.randomUUID().replaceAll('-','');
+     restore.onclick=async()=>{if(!alive()||restore.disabled)return;restore.disabled=true;
+      try{await api(`/api/tasks/${id}/reference-target-analysis/unknown-reissue`,{request_id:request,
+       unknown_reissue_of:record.request_id,supplier_checked:supplier.checked,retain_unknown_charge:retain.checked});if(alive())await refresh();}
+      catch(error){if(alive()){item.append(node('p','原请求恢复需核对记录：'+error.message,'error'));await refresh();}}};
+     item.append(supplierLabel,retainLabel,restore);
+    }
    }
    history.append(item);}content.append(history);
   const run=node('button','让应用 AI 核定全部 P 目标与共享计算依赖','primary');run.disabled=pending||records.length>=3;

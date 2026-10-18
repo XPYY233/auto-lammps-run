@@ -321,6 +321,13 @@ class ReferenceTargetAnalysisInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class ReferenceTargetUnknownReissueInput(Input):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    unknown_reissue_of: str = Field(pattern=r'^[a-f0-9]{32}$')
+    supplier_checked: StrictBool
+    retain_unknown_charge: StrictBool
+
+
 class ReferenceOutputInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
@@ -470,7 +477,8 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if callable(getattr(workbench_bridge, 'extract', None)) else None)
     if workbench_jobs is not None and workbench_jobs.tasks.path != store.path:
         raise ValueError('Workbench extraction must share the task store')
-    from .reference_targets import ReferenceTargetAnalysis, model_ledger_identity
+    from .reference_targets import model_ledger_identity
+    from .reference_target_recovery import ReferenceTargetAnalysis
     def reference_target_sources(identifier):
         report = paper_evidence_views.get(identifier) if paper_evidence_views else None
         if not report or not report.get('target_inventory'):
@@ -534,8 +542,48 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     from .workbench_target_inventory import WorkbenchTargetInventory
     workbench_targets = WorkbenchTargetInventory(store, papers, workbench_target_sources,
         connection_provider=reference_target_connection)
+    def historical_reference_target_sources(identifier,*,source_binding,inventory_sha256):
+        """Reprove the original sealed P and inventory, never the latest source."""
+        from .reference_targets import reference_target_input
+        from .workbench_target_inventory import workbench_inventory_input
+        from .condition_generation import source_bundle
+        binding=workbench_binding(identifier)
+        reader=getattr(getattr(workbench_bridge,'runtime',None),'native_paper_sources_reader',None)
+        if binding is None or not callable(reader):
+            raise TaskError('原 P 的完整原文与历史发布证明尚未连接。')
+        original=reader(binding.workbench_paper_id)
+        if original['pdf_sha256']!=binding.pdf_sha256:
+            raise TaskError('原 PDF 摘要变化，不能重发旧核定请求。')
+        published=workbench_bridge.history(identifier)
+        with store.transaction() as db:
+            ids=[row[0] for row in db.execute('SELECT id FROM workbench_target_intents WHERE task_id=? ORDER BY at,id',(identifier,))]
+        for request in ids:
+            saved=workbench_targets._stored(identifier,request)
+            if saved is None:continue
+            context,receipt,_=saved
+            if not receipt or receipt['state']!='completed':continue
+            source=workbench_inventory_input(context['input']);report=receipt['report']
+            if (source['paper_id']!=binding.paper_id
+                    or source['source_binding']['pdf_sha256']!=binding.pdf_sha256
+                    or report['input_sha256']!=sha256(canonical(source))
+                    or report['source_binding']!=source['source_binding']
+                    or sha256(canonical(report['inventory']))!=inventory_sha256
+                    or source['sources']!=source_bundle(original['sources'])):continue
+            publication=source['publication']
+            if not any(row.get('request_id')==publication['request_id']
+                    and row.get('state') in {'completed','completed_with_limitations'}
+                    and row.get('source_sha256')==binding.pdf_sha256
+                    and row.get('paper_id')==binding.paper_id
+                    and sha256(canonical(row))==publication['receipt_sha256'] for row in published):continue
+            value=reference_target_input(dict(task_id=identifier,paper_id=source['paper_id'],paper=source['paper'],
+                role='paper_reference_human_only',inventory=report['inventory'],sources=source['sources'],
+                source_binding=dict(inventory_source_sha256=binding.pdf_sha256,pdf_sha256=binding.pdf_sha256,
+                    source_receipt_sha256=publication['receipt_sha256'],package_manifest_sha256=None)))
+            if value['source_binding']==source_binding:return value
+        raise TaskError('原 P、原库存或原文历史证明不符；未改用最新来源重发。')
     reference_targets = ReferenceTargetAnalysis(store, papers, reference_target_sources,
-        connection_provider=reference_target_connection)
+        connection_provider=reference_target_connection,
+        historical_reference_provider=historical_reference_target_sources)
     def output_analysis_connection(identifier):
         store.get(identifier)
         if model_client is None:raise TaskError('本项目模型调用账本尚未配置。')
@@ -1595,8 +1643,27 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/reference-target-analysis')
     def reference_target_history(identifier: str):
         store.get(identifier)
-        return {'task_id': identifier, 'history': reference_targets.history(identifier),
-            'execution_authorized': False, 'B_input': False}
+        history=reference_targets.history(identifier)
+        # This is an action menu, not a source/credential preflight. Opening
+        # history must remain possible without a configured model connection.
+        options=[dict(unknown_reissue_of=row['request_id'],
+            enabled=not row.get('unknown_reissue') and len(history)<3,
+            requires_preflight=True,retains_unknown_charge=True,
+            reason=('原消息、原 P 与模型连接将在确认后核对；不符则不发送。'
+                if not row.get('unknown_reissue') else '这笔请求已有一次恢复记录，不能再次重发。'))
+            for row in history if row['original_state']=='unknown']
+        return {'task_id': identifier, 'history':history,
+            'unknown_reissues':options,'execution_authorized': False, 'B_input': False}
+
+    @app.post('/api/tasks/{identifier}/reference-target-analysis/unknown-reissue')
+    def reissue_unknown_reference_target(identifier: str,data: ReferenceTargetUnknownReissueInput):
+        require_open_task(identifier)
+        context=workbench_context(identifier)
+        return reference_targets.reissue_unknown(identifier,data.request_id,context['client'],
+            unknown_reissue_of=data.unknown_reissue_of,supplier_checked=data.supplier_checked,
+            retain_unknown_charge=data.retain_unknown_charge,
+            connection_revision=context['connection_revision'],
+            credential_generation=context['credential_generation'])
 
     @app.post('/api/tasks/{identifier}/reference-target-analysis')
     def reference_target_analyze(identifier: str, data: ReferenceTargetAnalysisInput):
