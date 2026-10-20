@@ -23,7 +23,7 @@ from .condition_generation import source_bundle
 from .deepseek import DeepSeekClient, ModelError, request_body
 from .manifest import canonical, private_directory, sha256
 from .potential_acquisition import safe_path
-from .reference_scope import ReferenceScopeService
+from .reference_scope import ReferenceScopeService, _closure
 from .reference_targets import model_ledger_identity
 from .scientific_adapters import prepare_stage_messages, validate_prepared_messages
 from .tasks import TaskError, task_id, text
@@ -240,9 +240,9 @@ def _deployment(value):
     return result
 
 
-def author_reference_input(value, scope_record, paper_sources):
+def author_reference_input(value, scope_record, paper_sources, *, validation_record=None):
     """Pure projection after the service has rechecked the saved scope."""
-    if (not isinstance(value, dict) or set(value) != _INPUT_FIELDS
+    if (not isinstance(value, dict) or set(value) not in (_INPUT_FIELDS, _INPUT_FIELDS | {'author_validation_id'})
             or value['scope'] != 'reference_only' or value['role'] != 'author_reference_human_only'):
         raise TaskError('作者 A 方案仅接受应用参考侧的受信来源，不能接收普通 B 输入。')
     task_id(value['task_id']); task_id(value['paper_id']); task_id(value['scope_id'])
@@ -271,11 +271,31 @@ def author_reference_input(value, scope_record, paper_sources):
     if len({row['id'] for row in sources}) != len(sources):
         raise TaskError('论文与源码引用编号冲突。')
     invocation_ids = [row['source_id'] for row in reader['reads'] if row.get('path') in paths and row.get('source_id')]
-    return dict(version=VERSION, **FLAGS, task_id=value['task_id'], paper_id=value['paper_id'], paper=deepcopy(value['paper']),
+    result = dict(version=VERSION, **FLAGS, task_id=value['task_id'], paper_id=value['paper_id'], paper=deepcopy(value['paper']),
                 reference_scope=dict(id=scope_record['id'], receipt_sha256=_hash(scope_record['receipt_sha256']),
                     scope_sha256=scope_record['scope_sha256'], scope=deepcopy(scope)),
                 author_source=reader, sources=sources, invocation_source_ids=invocation_ids,
                 deployment=_deployment(value['deployment']), missing=_strings(value['missing']))
+    if 'author_validation_id' in value:
+        record = validation_record or {}; contract = record.get('contract', {})
+        if (record.get('state') != 'recorded' or record.get('can_prepare_A_plan') is not True
+                or record.get('id') != value['author_validation_id'] or record.get('task_id') != value['task_id']
+                or record.get('validation_sha256') != sha256(canonical(contract))
+                or contract.get('kind') != 'author_bounded_validation' or contract.get('unit') != 'state'
+                or contract.get('scope') != 'reference_only' or contract.get('task_id') != value['task_id']
+                or contract.get('paper_id') != value['paper_id']
+                or type(contract.get('unit_count')) is not int or not 1 <= contract['unit_count'] <= MAX_INVOCATIONS
+                or contract.get('original_scope_id') != scope_record['id']
+                or contract.get('original_scope_sha256') != scope_record['scope_sha256']
+                or contract.get('original_scope_receipt_sha256') != scope_record['receipt_sha256']
+                or any(contract.get(key) is not False for key in
+                       ('B_input', 'execution_authorized', 'full_paper_success', 'changes_B_scope', 'resets_plan_rounds'))):
+            raise TaskError('作者验证子集未绑定当前原 P 范围及显式用户授权。')
+        result['author_validation'] = dict(id=record['id'], receipt_sha256=_hash(record['receipt_sha256']),
+            validation_sha256=record['validation_sha256'], contract=deepcopy(contract))
+    elif validation_record is not None:
+        raise TaskError('作者验证子集不能在输入中隐式启用。')
+    return result
 
 
 def plan_selection_context(evidence):
@@ -315,12 +335,44 @@ def plan_selection_context(evidence):
         required=['dependency_id', 'invocation_ids', 'analysis_capability_ids', 'citations', 'missing'],
         properties=dict(dependency_id=dict(type='string', enum=scope['dependency_ids']),
             invocation_ids=strings(MAX_INVOCATIONS, 80), analysis_capability_ids=strings(64, 80), citations=citations, missing=strings(64, 2000)))
-    schema = dict(type='object', additionalProperties=False, required=sorted(_OUTPUT_FIELDS), properties=dict(
+    bounded = evidence.get('author_validation')
+    if 'author_validation' in evidence:
+        if not isinstance(bounded, dict) or not bounded:
+            raise TaskError('显式作者验证合同不能为空或由无效值关闭。')
+        contract = bounded.get('contract', {})
+        if (set(bounded) != {'id', 'receipt_sha256', 'validation_sha256', 'contract'}
+                or bounded['validation_sha256'] != sha256(canonical(contract))
+                or contract.get('task_id') != evidence['task_id'] or contract.get('paper_id') != evidence['paper_id']
+                or contract.get('original_scope_id') != evidence['reference_scope']['id']
+                or contract.get('original_scope_sha256') != evidence['reference_scope']['scope_sha256']
+                or contract.get('original_scope_receipt_sha256') != evidence['reference_scope']['receipt_sha256']
+                or type(contract.get('unit_count')) is not int or not 1 <= contract['unit_count'] <= MAX_INVOCATIONS
+                or contract.get('kind') != 'author_bounded_validation' or contract.get('scope') != 'reference_only'
+                or any(contract.get(key) is not False for key in
+                       ('B_input', 'execution_authorized', 'full_paper_success', 'changes_B_scope', 'resets_plan_rounds'))):
+            raise TaskError('主动作者验证合同与原 P 范围或授权摘要不一致。')
+        task_id(bounded['id']); _hash(bounded['receipt_sha256'])
+    fields = _OUTPUT_FIELDS | ({'validation_selection'} if bounded else set())
+    schema = dict(type='object', additionalProperties=False, required=sorted(fields), properties=dict(
         status=dict(type='string', enum=['proposed', 'needs_clarification']), summary=string(4000),
         invocations=dict(type='array', maxItems=MAX_INVOCATIONS, items=invocation),
-        coverage=dict(type='array', minItems=len(scope['dependency_ids']), maxItems=len(scope['dependency_ids']), items=coverage),
+        coverage=dict(type='array', minItems=0 if bounded else len(scope['dependency_ids']),
+                      maxItems=len(scope['dependency_ids']), items=coverage),
         questions=strings(64, 2000), limitations=strings(128, 2000)))
-    return dict(tool='original_author_invocation_plan', version=VERSION,
+    if bounded:
+        argument = dict(type='object', additionalProperties=False, required=['invocation_id', 'argv_index'],
+                        properties=dict(invocation_id=string(80), argv_index=dict(type='integer', minimum=0, maximum=127)))
+        state = dict(type='object', additionalProperties=False,
+            required=['id', 'label', 'citations', 'invocation_ids', 'argument_bindings'], properties=dict(
+                id=string(2000), label=string(500), citations=citations, invocation_ids=strings(MAX_INVOCATIONS, 80),
+                argument_bindings=dict(type='array', maxItems=MAX_INVOCATIONS, items=argument)))
+        schema['properties']['validation_selection'] = dict(type='object', additionalProperties=False,
+            required=['target_ids', 'states'], properties=dict(
+                target_ids=dict(type='array', minItems=1, maxItems=len(scope['selected_ids']),
+                    items=dict(type='string', enum=scope['selected_ids'])),
+                states=dict(type='array', minItems=0,
+                            maxItems=bounded['contract']['unit_count'], items=state)))
+    result = dict(tool='original_author_invocation_plan', version=VERSION,
         source_sha256=sha256(Path(__file__).read_bytes()), scope='reference_only', B_input=False,
         approval=False, execution_authorized=False, physical_evaluation_performed=False,
         scope_id=evidence['reference_scope']['id'], scope_sha256=evidence['reference_scope']['scope_sha256'],
@@ -343,6 +395,17 @@ def plan_selection_context(evidence):
             missing='needs_clarification_is_a_saved_plan_not_execution_authorization',
             execution_approval='not_required_for_nonexecuting_plan_preparation',
             revision='complete_saved_previous_answer_plus_specific_errors_not_start_over'))
+    if bounded:
+        result['author_validation'] = deepcopy(bounded)
+        result['requirements'].update(
+            coverage='bounded_A_validation_only_exact_selected_target_dependency_closure_original_P_and_B_unchanged',
+            states='select_exact_authorized_count_from_cited_author_sources; state_id_must_be_literal_in_author_quote; '
+                'each_declared_invocation_belongs_to_exactly_one_state_and_has_explicit_argv_index_equal_to_state_id; '
+                'no_bulk_driver_or_unbound_shared_invocation; repeated_state_or_call_forbidden; '
+                'reuse_requires_independently_verified_output_binding_not_supported_here_record_as_missing; '
+                'unsupported_source_parameterization_is_needs_clarification_never_rewrite_author_code',
+            validation_limits='development_subset_not_full_paper_success_not_B_scope_not_round_reset')
+    return result
 
 
 def _citations(value, sources, *, required=False):
@@ -381,7 +444,9 @@ def _ids(value, allowed, maximum=512):
 def validate_author_plan(evidence, value):
     """Check references and complete scope, not scientific or executable truth."""
     plan_selection_context(evidence)
-    if (not isinstance(value, dict) or set(value) != _OUTPUT_FIELDS
+    bounded = evidence.get('author_validation')
+    fields = _OUTPUT_FIELDS | ({'validation_selection'} if bounded else set())
+    if (not isinstance(value, dict) or set(value) != fields
             or value['status'] not in {'proposed', 'needs_clarification'}
             or not isinstance(value['invocations'], list)
             or not isinstance(value['coverage'], list)):
@@ -390,6 +455,34 @@ def validate_author_plan(evidence, value):
         raise TaskError(f'作者原调用清单超过 {MAX_INVOCATIONS} 项表达上限；不能截断论文目标或隐式增加计算。')
     scope = evidence['reference_scope']['scope']
     sources = {row['id']: row for row in evidence['sources']}
+    validation = None
+    if bounded:
+        selection = value['validation_selection']
+        if (not isinstance(selection, dict) or set(selection) != {'target_ids', 'states'}
+                or not isinstance(selection['states'], list)
+                or len(selection['states']) > bounded['contract']['unit_count']):
+            raise TaskError('作者验证必须明确原目标与不超过授权数量的逐态选择。')
+        scope = _closure(dict(targets=scope['targets'], dependencies=scope['dependencies'],
+            inventory=dict(targets=scope['inventory_targets']), limitations=scope['limitations']),
+            selection['target_ids'], '显式作者 A 开发验证子集；原 P 范围与 B 目标不变。')
+        states, state_ids = [], set()
+        for row in selection['states']:
+            if (not isinstance(row, dict) or set(row) != {'id', 'label', 'citations', 'invocation_ids', 'argument_bindings'}
+                    or not isinstance(row['argument_bindings'], list) or len(row['argument_bindings']) > MAX_INVOCATIONS):
+                raise TaskError('作者验证状态须保留原状态值、来源和逐调用字面参数绑定。')
+            state_id = text(row['id'], 2000)
+            if state_id in state_ids:
+                raise TaskError('作者验证状态不能重复计数。')
+            state_ids.add(state_id)
+            cites = _citations(row['citations'], sources, required=True)
+            if not any(sources[cite['source_id']]['origin'] == 'author_source' and state_id in cite['quote'] for cite in cites):
+                raise TaskError('验证状态值必须逐字出现在所引作者原件中，不能由开发者或模型补造。')
+            states.append(dict(id=state_id, label=text(row['label'], 500), citations=cites,
+                               invocation_ids=deepcopy(row['invocation_ids']), argument_bindings=deepcopy(row['argument_bindings'])))
+        validation = dict(binding=deepcopy(bounded), selected_ids=scope['selected_ids'],
+            excluded_ids=scope['excluded_ids'], dependency_ids=scope['dependency_ids'],
+            states=states, unit_count=bounded['contract']['unit_count'], full_paper_success=False,
+            changes_B_scope=False, reused_outputs_verified=False)
     files = {row['path']: row for row in evidence['author_source']['files']}
     environments = {row['id']: row for row in evidence['deployment']['environments']}
     analyses = {row['id']: row for row in evidence['deployment']['analysis_capabilities']}
@@ -401,6 +494,8 @@ def validate_author_plan(evidence, value):
                              deployment=deepcopy(evidence['deployment']['missing']))
     invocations, seen, signatures = [], set(), set()
     issues = inherited_missing['reference'] + inherited_missing['deployment']
+    if validation is not None and len(validation['states']) != validation['unit_count']:
+        issues.append('尚未按显式授权选择完整数量的作者验证状态。')
     invocation_fields = {'id', 'entrypoint', 'argv', 'working_directory', 'environment_id', 'executable_id',
                          'dependency_ids', 'required_files', 'output_files', 'citations', 'missing'}
     for row in value['invocations']:
@@ -490,18 +585,43 @@ def validate_author_plan(evidence, value):
         matched = {row['dependency_id'] for row in coverage if invocation['id'] in row['invocation_ids']}
         if set(invocation['dependency_ids']) != matched or not matched:
             raise TaskError('作者调用必须对应已有依赖，不能附加未选择的计算。')
+    if validation is not None:
+        bound_calls = set(); by_call = {row['id']: row for row in invocations}
+        for state in validation['states']:
+            calls = _ids(state['invocation_ids'], seen, MAX_INVOCATIONS)
+            state['invocation_ids'] = calls
+            if not calls:
+                issues.append('验证状态 ' + state['id'] + ' 尚缺逐态原调用或独立核验的旧输出复用绑定。')
+            arguments = state['argument_bindings']
+            if len(arguments) != len(calls):
+                raise TaskError('每个验证状态调用必须有一项明确字面参数绑定；不能仅把完整驱动标为子集。')
+            local = set()
+            for argument in arguments:
+                if (not isinstance(argument, dict) or set(argument) != {'invocation_id', 'argv_index'}
+                        or argument['invocation_id'] not in calls or argument['invocation_id'] in local
+                        or argument['invocation_id'] in bound_calls or type(argument['argv_index']) is not int):
+                    raise TaskError('验证调用不能重复、跨状态共用或省略原参数位置。')
+                invocation = by_call[argument['invocation_id']]; index = argument['argv_index']
+                if not 0 <= index < len(invocation['argv']) or invocation['argv'][index] != state['id']:
+                    raise TaskError('验证状态值必须对应实际原调用的独立字面 argv 参数，不能只修改报告数量。')
+                local.add(argument['invocation_id']); bound_calls.add(argument['invocation_id'])
+        if bound_calls != seen:
+            raise TaskError('验证方案包含未绑定状态的调用；不能隐藏完整范围驱动或额外求值。')
     questions = _strings(value['questions']); limitations = _strings(value['limitations'], 128)
     if issues and value['status'] != 'needs_clarification':
         details = '；'.join(dict.fromkeys(issues))
         raise TaskError('仍有来源、部署、调用或依赖缺项时应明确标为待澄清方案：' + details[:4000])
     if value['status'] == 'needs_clarification' and not (issues or questions):
         raise TaskError('待澄清方案需要具体问题，不能只有空状态。')
-    return dict(version=VERSION, **FLAGS, status=value['status'], summary=text(value['summary'], 4000),
+    report = dict(version=VERSION, **FLAGS, status=value['status'], summary=text(value['summary'], 4000),
                 reference_scope=deepcopy(evidence['reference_scope']), invocations=invocations,
                 coverage=sorted(coverage, key=lambda item: expected.index(item['dependency_id'])),
                 questions=questions, limitations=limitations, inherited_missing=inherited_missing,
                 source_binding_sha256=sha256(canonical(evidence)),
                 original_files_rewritten=False, execution_approval_required=True)
+    if validation is not None:
+        report['author_validation'] = validation
+    return report
 
 
 def _revision_sources(previous, current):
@@ -514,6 +634,9 @@ def _revision_sources(previous, current):
     for key in ('task_id', 'paper_id', 'paper', 'reference_scope'):
         if previous[key] != current[key]:
             raise TaskError('作者方案原 P 范围已变化；不能丢弃旧稿或缩减目标重建。')
+    old_validation, new_validation = previous.get('author_validation'), current.get('author_validation')
+    if old_validation is not None and old_validation != new_validation:
+        raise TaskError('已绑定作者验证子集不能经修订移除、换范围或扩大；旧稿与授权保留。')
     old_sources = {row['id']: row for row in previous['sources']}
     new_sources = {row['id']: row for row in current['sources']}
     if any(new_sources.get(key) != value for key, value in old_sources.items()):
@@ -544,7 +667,7 @@ def _revision_sources(previous, current):
     if any(row not in new_deployment['analysis_capabilities'] for row in old_deployment['analysis_capabilities']):
         raise TaskError('原分析能力被移除、覆盖；未覆盖旧方案。')
     old_environment_ids = {row['id'] for row in old_deployment['environments']}
-    return dict(added_source_ids=[key for key in new_sources if key not in old_sources],
+    result = dict(added_source_ids=[key for key in new_sources if key not in old_sources],
                 added_source_package_sha256=[sha256(canonical(row)) for row in new_members if row not in old_members],
                 added_environment_ids=[row['id'] for row in new_deployment['environments']
                                        if row['id'] not in old_environment_ids],
@@ -552,6 +675,10 @@ def _revision_sources(previous, current):
                                     if row not in old_deployment['analysis_capabilities']],
                 previous_missing=deepcopy(previous['missing']), current_missing=deepcopy(current['missing']),
                 original_scope_unchanged=True, original_sources_retained=True)
+    if new_validation is not None:
+        result['author_validation'] = deepcopy(new_validation)
+        result['bounded_validation_explicitly_added'] = old_validation is None
+    return result
 
 
 class AuthorReferencePlan:
@@ -610,7 +737,12 @@ class AuthorReferencePlan:
             raise TaskError('请先保存基于 P 的复现范围。')
         # The caller cannot replace the saved P source text with browser prose.
         original = self.scopes.targets._input(identifier, active=False)
-        return author_reference_input(raw, saved, original['sources'])
+        validation = self.scopes.get_author_validation(identifier)
+        if validation is not None and raw.get('author_validation_id') != validation['id']:
+            raise TaskError('本任务已有显式作者验证子集，不能静默回到完整范围。')
+        if validation is None and 'author_validation_id' in raw:
+            raise TaskError('作者验证子集尚未保存；不能凭浏览器说明改变范围。')
+        return author_reference_input(raw, saved, original['sources'], validation_record=validation)
 
     def _model(self, identifier, client, connection_revision, credential_generation):
         if not isinstance(client, DeepSeekClient):
@@ -715,6 +847,8 @@ class AuthorReferencePlan:
                               previous_requested_revision=old['revision_note'], requested_revision=note),
                 inherited_answer_from=inherited_from, operation='revise_complete_previous_answer',
                 source_updates=source_updates, original_answer_modified=False, target_scope_reduction_allowed=False)
+            if evidence.get('author_validation') is not None:
+                revision['author_validation_subset_allowed'] = True
         messages = [dict(role='system', content=(
             'Prepare a reference-only plan for executing ORIGINAL AUTHOR files against the saved P scope. '
             'Return one complete JSON object matching original_author_invocation_plan.output_types. '
@@ -733,6 +867,18 @@ class AuthorReferencePlan:
             'extra uncounted format repair. Use concise Chinese for explanations and questions.')),
             dict(role='user', content=canonical(dict(**evidence, original_author_invocation_plan=plan_selection_context(evidence),
                                                    author_plan_revision=revision, user_revision_note=note)).decode())]
+        if evidence.get('author_validation') is not None:
+            messages[0]['content'] += (
+                ' An explicit user-approved bounded author A validation overlay is attached. Keep the original '
+                'P scope and previous complete answer intact as history, but propose only this validation subset. '
+                'Select exactly the authorized count of original states and relevant original targets from P and '
+                'author sources. Map each state to direct original invocations and explicit literal argv positions; '
+                'do not use an unbounded or full-scope driver while merely reporting the smaller state count. '
+                'Return validation_selection and cover precisely the selected target dependency closure. '
+                'Previously completed state reuse lacks verified output binding in this contract: retain that '
+                'as a concrete missing item rather than claiming reuse or knowingly rerunning it. If the original '
+                'entrypoint cannot limit states, save needs_clarification; do not rewrite it. This is development '
+                'validation only, never full-paper success, a new B scope, or a plan-round reset.')
         messages, proof = prepare_stage_messages(STAGE, messages, evidence)
         validate_prepared_messages(STAGE, messages, evidence)
         body = request_body(client.calls.config, messages, model=client.model, thinking=client.thinking)

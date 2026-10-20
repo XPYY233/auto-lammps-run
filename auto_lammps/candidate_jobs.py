@@ -17,6 +17,7 @@ from .deepseek import ModelError
 from .ledger import Resources
 from .manifest import ManifestError, Snapshot, canonical, private_directory, read_file, root_descriptor, sha256
 from .potentials import PotentialError
+from .plan_review import normalized_review_issues
 from .structures import StructureError, geometry_runtime
 from .tasks import TaskError, task_id
 
@@ -683,6 +684,75 @@ class CandidateService:
                     'receipt':{k:v for k,v in receipt.items() if k!='structured_output'}}
         return None
 
+    def latest_review_feedback(self, identifier, previous=None):
+        """Return only the latest verified rejection of this task's exact draft.
+
+        The short failed-event detail is presentation text, not repair evidence.
+        Use the complete, validated review event and its immutable model receipt;
+        never fall back past a newer unknown, invalid report or different draft.
+        """
+        job = self.history.get(identifier)
+        if job is None:
+            return None
+        if self._review_unresolved(job):
+            raise CandidateError('已有模型请求状态未知，不能将旧审核用于新稿。')
+        previous = previous if previous is not None else self.previous_proposal(identifier)
+        if previous is None:
+            return None
+        requests = [e for e in job['events']
+                    if e['state'] in {'review_request','candidate_review_request'}]
+        if not requests:
+            return None
+        requested = requests[-1]
+        links = [e for e in job['events'] if e['state'] == 'model_proposal'
+                 and e['sequence'] < requested['sequence']]
+        if not links:
+            return None
+        source = links[-1]['payload']
+        if (source.get('request_id') != previous['request_id']
+                or source.get('proposal_sha256') != previous['receipt']['output_sha256']
+                or source.get('condition_sha256') != job['condition_sha256']):
+            return None
+        key = requested['payload']['request_id']
+        if requested['payload'].get('proposal_sha256',source['proposal_sha256']) != source['proposal_sha256']:
+            raise CandidateError('Latest review does not match its recorded complete proposal')
+        checks = [e for e in job['events']
+                  if e['state'] in {'model_review','candidate_model_review'}
+                  and e['sequence'] > requested['sequence']
+                  and e['payload'].get('request_id') == key]
+        if not checks:
+            return None
+        checked = checks[-1]
+        saved = checked['payload']
+        if saved.get('status') == 'invalid_report':
+            return None
+        found = self.client.calls.lookup(key)
+        receipt = (found or {}).get('receipt') or {}
+        raw_report = receipt.get('structured_output')
+        report = {k:saved.get(k) for k in ('issues','coverage','summary')}
+        saved_receipt = saved.get('receipt') or {}
+        if (not found or receipt.get('state') != 'completed'
+                or receipt.get('request_sha256') != found['request_sha256']
+                or not isinstance(raw_report,dict) or set(raw_report) != {'issues','coverage','summary'}
+                or receipt.get('output_sha256') != sha256(canonical(raw_report))
+                or saved_receipt != {k:v for k,v in receipt.items() if k != 'structured_output'}
+                or report != {**raw_report,'issues':normalized_review_issues(raw_report['issues'])}
+                or saved.get('proposal_sha256') != source['proposal_sha256']
+                or not isinstance(saved.get('artifact_sha256'),dict)
+                or set(saved['artifact_sha256']) != {'rendered_script','resource_metadata','geometry_checks','analysis_plan'}
+                or any(not isinstance(value,str) or len(value) != 64
+                       or any(c not in '0123456789abcdef' for c in value)
+                       for value in saved['artifact_sha256'].values())):
+            raise CandidateError('Latest complete review feedback failed receipt or proposal verification')
+        if not report['issues']:
+            return None
+        return dict(version=1,task_id=identifier,condition_sha256=job['condition_sha256'],
+            proposal_request_id=previous['request_id'],proposal_sha256=source['proposal_sha256'],
+            review_request_id=key,review_request_sha256=found['request_sha256'],
+            review_output_sha256=receipt['output_sha256'],review_event_sequence=checked['sequence'],
+            artifact_sha256=saved['artifact_sha256'],receipt=saved_receipt,report=report,
+            raw_issues=raw_report['issues'] if raw_report['issues'] != report['issues'] else None)
+
     def run(self, identifier):
         job = self.history.get(identifier)
         with self.history.lease(job['id']) as acquired:
@@ -731,6 +801,7 @@ class CandidateService:
                 if inputs['condition_record_sha256']!=job['condition_sha256']:
                     raise CandidateError('Frozen research conditions changed; preserve the original preparation identity')
                 previous=self.previous_proposal(identifier)
+                review_feedback = self.latest_review_feedback(identifier,previous) if not review_intent else None
                 resources,execution_budget = (self._proposal_execution_inputs(job,previous['request_id'])
                     if review_intent and previous is not None else self._new_execution_inputs(identifier))
                 if review_intent:
@@ -766,7 +837,8 @@ class CandidateService:
                             proposal_round_budget=self.history.get(identifier)['proposal_rounds'],
                             failure_context=failure, review_recovery=review_intent,
                             before_review_request=review_requested,
-                            on_review=review_saved,execution_budget=execution_budget)
+                            on_review=review_saved,execution_budget=execution_budget,
+                            review_feedback=review_feedback)
                 if self.tasks.get(identifier)['revision']!=revision:
                     raise CandidateError('Task guidance changed during preparation; preserve this answer and review the new instructions')
                 if result['status'] == 'clarification_required':
@@ -810,6 +882,12 @@ class CandidateService:
                                     {'candidate_review_request','candidate_model_review',
                                      'review_recovery_requested','review_request','model_review'}],
                   'execution_authorized': result.get('execution_authorized', False), 'files': []}
+        try:
+            review['latest_review_feedback'] = self.latest_review_feedback(identifier)
+        except (CandidateError,ModelError,TaskError,ManifestError,KeyError,TypeError,ValueError):
+            # Retained plans remain readable; an unverified report is never
+            # presented as feedback or supplied to the next model request.
+            review['latest_review_feedback'] = None
         if job['state'] != 'prepared' or not result.get('snapshot_sha256'):
             return review
         digest = result['snapshot_sha256']

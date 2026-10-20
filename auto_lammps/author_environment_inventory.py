@@ -425,7 +425,9 @@ class AuthorEnvironmentInventory:
         _write_new(trace/'transport.json',result)
         report=None
         if result.get('returncode')==0 and not result.get('failure'):
-            try:report=_validate_report(context['request'],json.loads(base64.b64decode(result['stdout'],validate=True)))
+            try:
+                payload=base64.b64decode(result['stdout'],validate=True).strip()
+                report=_validate_report(context['request'],json.loads(base64.b64decode(payload,validate=True)))
             except (ValueError,KeyError,TypeError):pass
         summary={key:result.get(key) for key in ('returncode','failure')}
         summary.update(action=action,report_verified=report is not None)
@@ -450,6 +452,18 @@ class AuthorEnvironmentInventory:
                 identity=sha256(canonical(dict(profile=binding['profile_sha256'],native_files=report['native_files'],python=candidate)))
                 environments.append(dict(id='metadata-python-'+identity[:16],label=candidate['label'],sha256=identity,
                     executables=[dict(id=candidate['id'],label=candidate['label'],sha256=candidate['sha256'],kind='python')]))
+            # Existing native programs share the very same pinned CPU profile.
+            # Projection is metadata only; author entry/child policies stay false.
+            raw=runtime.read_regular(binding['profile_path'],1024**2,private=True)
+            if sha256(raw)!=binding['profile_sha256']:raise TaskError('已有部署文件已变化。')
+            native=json.loads(raw)['native_slurm']
+            verified={item['path']:item['sha256'] for item in report['native_files'] if item['status']=='verified'}
+            for environment in environments:
+                for field,kind,label in [('engine_path','lammps','已有CPU LAMMPS引擎'),('shell_path','shell','已有作者脚本解释器')]:
+                    path=native[field]
+                    if path not in verified or verified[path]!=binding['native_files'].get(path):
+                        raise TaskError('已有程序未通过当前原件摘要核对。')
+                    environment['executables'].append(dict(id='deployment_'+kind,label=label,sha256=verified[path],kind=kind))
         return dict(version=VERSION,**FLAGS,task_id=identifier,request_id=request,report_sha256=value['report_sha256'],
             metadata_status=value['state'],environments=environments,missing=deepcopy(value['missing']),
             environment_evidence=deepcopy(report),calls_model=False,reads_remote=False,

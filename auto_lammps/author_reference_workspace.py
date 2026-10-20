@@ -353,6 +353,9 @@ class AuthorReferenceWorkspace:
         binding,paper,receipt,scope=self._metadata(identifier)
         if (scope['id']!=value['scope_id'] or sha256(canonical(receipt))!=value['receipt_document_sha256']):
             raise TaskError('准备期间原目标或固定源码绑定改变。')
+        validation=self.scopes.get_author_validation(identifier)
+        if (validation['id'] if validation else None)!=value['input'].get('author_validation_id'):
+            raise TaskError('准备期间显式作者验证子集改变；未发送旧范围。')
         return deepcopy(value['input'])
 
     def status(self,identifier):
@@ -378,6 +381,10 @@ class AuthorReferenceWorkspace:
         result.update(configured=identifier in self.bindings or ready,enabled=ready,
             can_prepare=ready and result['remaining_rounds']>0 and not result['pending_reconciliation'],
             disabled_reason=reason,source_reads_on_GET=False,can_submit=False,can_approve=False)
+        validation=self.scopes.author_validation_status(identifier)
+        result['author_validation']=validation
+        if validation['latest'] is not None and not validation['latest']['can_prepare_A_plan']:
+            result.update(can_prepare=False,disabled_reason=validation['latest']['disabled_reason'])
         execution=self.execution_status(identifier)
         result.update(execution=execution,can_submit=execution['can_submit'],can_approve=execution['can_approve'])
         return result
@@ -429,6 +436,9 @@ class AuthorReferenceWorkspace:
             if saved is None and (state['pending_reconciliation'] or state['remaining_rounds']==0):
                 raise TaskError('作者方案原请求待核对或三轮已用完；未重新读取或发送。')
             binding,paper,receipt,scope=self._metadata(identifier)
+            validation=self.scopes.get_author_validation(identifier)
+            if validation is not None and not validation['can_prepare_A_plan']:
+                raise TaskError(validation['disabled_reason'])
             sources=self._sources(identifier,binding,receipt)
             checked=author_source_inputs(sources,identifier)
             paths=list(binding['invocation_paths'])
@@ -441,6 +451,8 @@ class AuthorReferenceWorkspace:
                 scope='reference_only',role='author_reference_human_only',scope_id=scope['id'],
                 author_source=sources,invocation_paths=paths,
                 deployment=deepcopy(binding['deployment']),missing=deepcopy(binding.get('missing',[])))
+            if validation is not None:
+                value['author_validation_id']=validation['id']
             token=self.current.set(dict(task_id=identifier,scope_id=scope['id'],receipt_document_sha256=sha256(canonical(receipt)),input=value))
             try:return self.planner.prepare(identifier,request,model['client'],
                 connection_revision=model['connection_revision'],credential_generation=model['credential_generation'],revision_note=revision_note)

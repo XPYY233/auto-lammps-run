@@ -65,6 +65,21 @@ test('previous verified plan stays visible during iteration but cannot be approv
  assert.equal(elements.get('#plan-review-panel').hidden,false);assert.equal(elements.get('#plan-approve').disabled,true);
  assert.match(elements.get('#plan-version').textContent,/上一份/);
 });
+test('structured requirement quotes render verbatim instead of object coercion',()=>{
+ const review={state:'prepared',files:[],workspace:{current:{structure:{},additional_structures:[],resources:{},analysis:{},potential:{},
+  automatic_check:{coverage:[{requirement:'r1',evidence:[{source:'rendered_script',quote:'fix swap all atom/swap 1 10 12345'}]}]}}}};
+ const {c,elements}=setup(null,review);c.renderPlanSummary(review);
+ const read=e=>[e.textContent||'',...e.children.map(read)].join('\n');
+ const text=read(elements.get('#plan-summary'));
+ assert.match(text,/rendered_script/);assert.match(text,/fix swap all atom\/swap 1 10 12345/);assert.doesNotMatch(text,/\[object Object\]/);
+});
+test('complete bound rejection feedback is readable without resending a model call',()=>{
+ const {c,elements,calls}=setup(null);c.renderFullReviewFeedback('task',elements.get('#plan-review-panel'),{
+  proposal_sha256:'a'.repeat(64),review_request_id:'b'.repeat(32),report:{summary:'Retain the same draft.',issues:['Full rejection tail retained.'],coverage:[]}});
+ const read=e=>[e.textContent||'',...e.children.map(read)].join('\n');
+ assert.match(read(elements.get('#full-review-feedback')),/Full rejection tail retained/);
+ assert.equal(calls.length,0);
+});
 test('scientific text is readable without changing the stored request',()=>{
  const {c}=setup(null);assert.equal(c.researchText('\\(T=0\\) K; 6\\times6'), 'T=0 K; 6×6');
 });

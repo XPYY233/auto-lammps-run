@@ -163,7 +163,7 @@ def _raw_plan(report):
         return [{key: row[key] for key in ('source_id', 'quote')} for row in rows]
 
     try:
-        return dict(status=report['status'], summary=report['summary'],
+        result = dict(status=report['status'], summary=report['summary'],
             invocations=[dict(id=row['id'], entrypoint=deepcopy(row['entrypoint']),
                 argv=deepcopy(row['argv']), working_directory=row['working_directory'],
                 environment_id=row['environment']['id'], executable_id=row['executable']['id'],
@@ -175,6 +175,13 @@ def _raw_plan(report):
                 analysis_capability_ids=[item['id'] for item in row['analysis_capabilities']],
                 citations=citations(row['citations']), missing=deepcopy(row['missing'])) for row in report['coverage']],
             questions=deepcopy(report['questions']), limitations=deepcopy(report['limitations']))
+        if 'author_validation' in report:
+            validation = report['author_validation']
+            result['validation_selection'] = dict(target_ids=deepcopy(validation['selected_ids']), states=[dict(
+                id=row['id'], label=row['label'], citations=citations(row['citations']),
+                invocation_ids=deepcopy(row['invocation_ids']), argument_bindings=deepcopy(row['argument_bindings']))
+                for row in validation['states']])
+        return result
     except (TypeError, KeyError) as exc:
         raise AuthorExecutionError('A complete previously validated author recipe is required') from exc
 
@@ -250,6 +257,9 @@ def compile_author_package(report, *, evidence, source_files, deployment, resour
             provenance=deepcopy(provenance), deployment=deepcopy(deployment),
             files=sorted(files.values(), key=lambda item: item['path']), invocations=invocations,
             outputs=sorted(outputs.values(), key=lambda item: item['path']))
+        # Keep the existing exact runtime schema. The full revalidated report
+        # (including bounded-validation proof) is already pinned by plan_sha256;
+        # source_binding_sha256 also pins the explicit authorization overlay.
         if len(canonical(payload)) > 1_000_000:
             raise AuthorExecutionError('Author package exceeds the existing bounded manifest capacity')
         if sum(row['size'] for row in files.values()) + len(canonical(payload)) + 8192 > resources['storage_bytes']:

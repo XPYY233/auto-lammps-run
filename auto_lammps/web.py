@@ -264,6 +264,18 @@ class AuthorResourceInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
+class AuthorValidationPreviewInput(Input):
+    scope_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    unit_count: StrictInt = Field(ge=1,le=128)
+    user_intent: str = Field(default='',max_length=4000)
+    guidance_sequence: StrictInt | None = Field(default=None,ge=1)
+
+
+class AuthorValidationInput(AuthorValidationPreviewInput,Revision):
+    validation_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    expected_validation_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 class AuthorReadApprovalInput(AuthorResourceInput):
     receipt_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     note: str = Field(default='', max_length=2000)
@@ -1513,6 +1525,29 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     @app.get('/api/tasks/{identifier}/author-plan')
     def author_plan_status(identifier: str):
         return author_workspace.status(identifier)
+
+    @app.get('/api/tasks/{identifier}/author-validation')
+    def author_validation_status(identifier: str):
+        status=author_workspace.scopes.author_validation_status(identifier)
+        parent=author_workspace.scopes.get(identifier)
+        status.update(task_revision=store.get(identifier)['revision'],parent_scope_id=(parent or {}).get('id'),
+            calls_model=False,submits_HPC=False,changes_B_scope=False)
+        return status
+
+    @app.post('/api/tasks/{identifier}/author-validation/preview')
+    @serialized_task_action
+    def author_validation_preview(identifier: str,data: AuthorValidationPreviewInput):
+        require_open_task(identifier)
+        return author_workspace.scopes.preview_author_validation(identifier,data.scope_id,data.unit_count,
+            data.user_intent,guidance_sequence=data.guidance_sequence)
+
+    @app.post('/api/tasks/{identifier}/author-validation')
+    @serialized_task_action
+    def author_validation_create(identifier: str,data: AuthorValidationInput):
+        require_open_task(identifier)
+        return author_workspace.scopes.create_author_validation(identifier,data.revision,data.validation_id,
+            data.scope_id,data.unit_count,data.user_intent,expected_validation_sha256=data.expected_validation_sha256,
+            guidance_sequence=data.guidance_sequence)
 
     @app.get('/api/tasks/{identifier}/author-execution')
     def author_execution_status(identifier: str):

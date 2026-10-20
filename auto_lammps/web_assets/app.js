@@ -1164,7 +1164,14 @@ function renderPlanSummary(review){
   outputs.append(node('p',files.join('、')));box.append(outputs);
   const check=plan.automatic_check||review.automatic_check;
   if(check){const details=detailsFor('checks','查看应用的需求与步骤核对结果','plan-checks');
-    for(const item of check.coverage||[])details.append(researchContent(item.requirement+'：'+item.evidence));box.append(details);}
+    for(const item of check.coverage||[]){
+      details.append(researchContent(String(item.requirement||'')));
+      if(Array.isArray(item.evidence))for(const evidence of item.evidence){
+        if(evidence&&typeof evidence==='object'){details.append(node('p',String(evidence.source||'核对来源')),
+          node('pre',typeof evidence.quote==='string'?evidence.quote:JSON.stringify(evidence,null,2),'plan-code'));}
+        else details.append(researchContent(String(evidence)));
+      }else details.append(researchContent(String(item.evidence||'')));
+    }box.append(details);}
   const recovery=plan.failure_recovery||review.failure_recovery;
   if(recovery){const details=detailsFor('recovery','查看应用内 AI 的失败诊断与本次修正','plan-checks');
     details.append(researchContent(recovery.summary),researchContent('原因：'+recovery.cause),researchContent('修改：'+recovery.repair));
@@ -1226,6 +1233,7 @@ async function refreshPlanReview(){
   const blocked=!executionReadable||execution.configured===false;
   renderFormalBRetestBudget(id,panel,execution.formal_b_retest);
   renderSupplierCheckedReview(id,panel,sameDraft.supplier_check_recoveries||[]);
+  renderFullReviewFeedback(id,panel,review.latest_review_feedback);
   recheck.disabled=!sameDraft.can_recheck||active||unresolved||blocked;
   recheck.onclick=()=>action(async()=>{
     if(recheck.disabled)return;
@@ -1268,6 +1276,17 @@ async function refreshPlanReview(){
     await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
   renderNextAction();
+}
+
+function renderFullReviewFeedback(id,parent,data){
+ let panel=$('#full-review-feedback');if(!panel){panel=node('details',undefined,'plan-checks');panel.id='full-review-feedback';parent.append(panel);}
+ const open=panel.open;panel.replaceChildren();panel.dataset.task=id;panel.hidden=!data;if(!data)return;
+ panel.open=open;panel.append(node('summary','查看本稿完整审核意见与引用依据（下一稿会自动收到）'));
+ panel.append(node('p',`原稿 ${data.proposal_sha256} · 审核请求 ${data.review_request_id}`,'form-note'));
+ const report=data.report||{};if(report.summary)panel.append(researchContent(report.summary));
+ for(const issue of report.issues||[])panel.append(typeof issue==='string'?researchContent(issue):node('pre',JSON.stringify(issue,null,2),'plan-code'));
+ const evidence=node('details');evidence.append(node('summary','查看完整需求覆盖、原文引用和模型回执'));
+ evidence.append(node('pre',JSON.stringify(data,null,2),'plan-code'));panel.append(evidence);
 }
 
 function renderSupplierCheckedReview(id,parent,options){
@@ -3283,10 +3302,39 @@ async function renderAuthorPlanPanel(id){
    if(item.proposal){const raw=node('details');raw.append(node('summary','查看 AI 原始完整答复（保留未通过的方案）'));const pre=node('pre');pre.textContent=JSON.stringify(item.proposal,null,2);raw.append(pre);article.append(raw);}
    article.append(node('p',`状态 ${item.state} · 请求 ${item.request_id} · 模型用量 ${item.receipt?.usage?.total_tokens??'待核对'}；未批准或提交计算。`,'form-note'));panel.append(article);
   }
+  if(data.author_validation)await renderAuthorValidationPanel(id,panel,state);
   if(data.execution)await renderAuthorExecutionPanel(id,panel,state,data.execution);
   if(state.resourceOpen)void renderAuthorResourcePanel(id,panel,state);
  }catch(error){if(alive())panel.replaceChildren(node('p','作者运行方案暂不可核验：'+error.message,'form-note'));}
 }
+async function renderAuthorValidationPanel(id,parent,state){
+ const panel=node('section',undefined,'result-widget');panel.id='author-validation-panel';parent.append(panel);
+ const alive=()=>current?.id===id&&parent.dataset.task===id&&panel.isConnected&&!$('#task-view').hidden;
+ try{
+  const data=await api(`/api/tasks/${id}/author-validation`);if(!alive())return;
+  panel.append(node('h4','作者 A 验证子集：先预览，再明确保存'),node('p','仅对作者 A 指定状态数，由应用 AI 根据原 P 与作者原件选择具体状态；原 P、B 范围、失败、费用和方案轮次保留。这不代表全文复现通过，也不提交计算。','form-note'));
+  if(data.latest){panel.append(node('p',`已保存 ${data.latest.contract.unit_count} 状态验证要求 · ${data.latest.state}；具体状态将在作者方案内展示。`,'form-note'));
+   const detail=node('details');detail.append(node('summary','查看已批准验证意图、原范围与历史绑定'),node('pre',JSON.stringify(data.latest,null,2),'plan-code'));panel.append(detail);}
+  const count=node('input');count.type='number';count.min='1';count.max='128';count.value=state.validationCount||'';count.setAttribute('aria-label','作者 A 验证状态数');
+  const guidance=node('input');guidance.type='number';guidance.min='1';guidance.value=state.validationGuidance||'';guidance.setAttribute('aria-label','已保存的补充要求编号（可选）');
+  const note=node('textarea');note.rows=3;note.value=state.validationNote||'';note.setAttribute('aria-label','作者 A 验证子集用途与限制');note.placeholder='说明本次验证用途；也可填入已保存的补充要求编号，复用该条原文。';
+  const feedback=node('p',state.validationError||'先填写状态数和明确用途，预览只读取现有记录。','form-note');feedback.setAttribute('role','status');
+  const preview=node('button','预览作者 A 验证子集','quiet'),save=node('button','确认保存此验证子集（不提交计算）','quiet');save.disabled=true;
+  const detail=node('pre',undefined,'plan-code');detail.hidden=true;
+  const body=()=>({scope_id:data.parent_scope_id,unit_count:Number(count.value),user_intent:note.value.trim(),guidance_sequence:guidance.value?Number(guidance.value):null});
+  let shown=null,pending=false;
+  const changed=()=>{state.validationCount=count.value;state.validationGuidance=guidance.value;state.validationNote=note.value;shown=null;save.disabled=true;detail.hidden=true;};count.oninput=guidance.oninput=note.oninput=changed;
+  preview.disabled=!data.parent_scope_id;
+  preview.onclick=async()=>{if(!alive()||pending)return;pending=true;preview.disabled=true;save.disabled=true;
+   try{const input=body(),value=await api(`/api/tasks/${id}/author-validation/preview`,input);if(!alive())return;shown={input,value};detail.textContent=JSON.stringify(value.contract,null,2);detail.hidden=false;save.disabled=false;feedback.textContent='预览已生成；核对后保存，仅授权这个作者 A 验证子集。';}
+   catch(error){if(alive())feedback.textContent=error.message;}finally{pending=false;if(alive())preview.disabled=!data.parent_scope_id;}};
+  save.onclick=async()=>{if(!alive()||pending||!shown||JSON.stringify(body())!==JSON.stringify(shown.input))return;pending=true;save.disabled=true;preview.disabled=true;
+   try{await api(`/api/tasks/${id}/author-validation`,{...shown.input,revision:data.task_revision,validation_id:crypto.randomUUID().replaceAll('-',''),expected_validation_sha256:shown.value.validation_sha256});state.validationError='';if(alive())await renderAuthorPlanPanel(id);}
+   catch(error){if(alive())feedback.textContent=error.message;}finally{pending=false;if(alive()){preview.disabled=!data.parent_scope_id;save.disabled=!shown;}}};
+  panel.append(node('label','验证状态数'),count,node('label','复用补充要求编号（可选）'),guidance,note,preview,detail,save,feedback);
+ }catch(error){if(alive())panel.append(node('p','作者验证子集暂不可核验：'+error.message,'form-note'));}
+}
+
 async function renderAuthorExecutionPanel(id,parent,state,data){
  if(current?.id!==id||parent.dataset.task!==id)return;
  const panel=node('section',undefined,'result-widget');panel.id='author-execution-panel';parent.append(panel);

@@ -94,6 +94,141 @@ class ReferenceScopeService:
                 db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_reference_scope_{action} '
                            f'BEFORE {action} ON reference_scope_receipts '
                            "BEGIN SELECT RAISE(ABORT, 'immutable reference scope history'); END")
+            # A development validation is a separate human-authorized overlay.
+            # It must never become the ordinary P scope consumed by B.
+            db.execute('CREATE TABLE IF NOT EXISTS author_validation_subsets ('
+                       'id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), '
+                       'sequence INTEGER NOT NULL, document TEXT NOT NULL, document_sha256 TEXT NOT NULL, '
+                       'UNIQUE(task_id,sequence))')
+            for action in ('UPDATE', 'DELETE'):
+                db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_author_validation_{action} '
+                           f'BEFORE {action} ON author_validation_subsets '
+                           "BEGIN SELECT RAISE(ABORT, 'immutable author validation history'); END")
+
+    def preview_author_validation(self, identifier, scope_id, unit_count, user_intent='', *, guidance_sequence=None):
+        """Pin an explicit bounded A-only request; the model selects states later."""
+        task = self._task(task_id(identifier), active=True)
+        parent = self.get(identifier, task_id(scope_id))
+        latest = self.get(identifier)
+        if (not parent or parent['state'] != 'recorded' or not latest or latest['id'] != scope_id):
+            raise TaskError('作者验证子集必须绑定当前有效的原 P 范围。')
+        if type(unit_count) is not int or not 1 <= unit_count <= 128:
+            raise TaskError('作者验证状态数须为一至128的明确整数。')
+        intent = dict(note=text(user_intent, 4000, required=guidance_sequence is None),
+                      guidance_sequence=None, guidance_at=None)
+        if guidance_sequence is not None:
+            if type(guidance_sequence) is not int or guidance_sequence < 1:
+                raise TaskError('作者验证需要本任务已保存的补充要求编号。')
+            guidance = [row for row in self.tasks.guidance(identifier) if row['sequence'] == guidance_sequence]
+            if len(guidance) != 1 or (intent['note'] and intent['note'] != guidance[0]['note']):
+                raise TaskError('作者验证的补充要求与本任务原记录不一致。')
+            intent = dict(note=guidance[0]['note'], guidance_sequence=guidance_sequence, guidance_at=guidance[0]['at'])
+        contract = dict(version=1, kind='author_bounded_validation', scope='reference_only', B_input=False,
+            execution_authorized=False, scientific_status='not_evaluated', full_paper_success=False,
+            changes_B_scope=False, resets_plan_rounds=False, task_id=identifier, paper_id=task['paper_id'],
+            task_revision=task['revision'], original_scope_id=parent['id'],
+            original_scope_sha256=parent['scope_sha256'], original_scope_receipt_sha256=parent['receipt_sha256'],
+            unit='state', unit_count=unit_count, user_intent=intent,
+            state_selection='application_AI_required', prior_execution=self._history_binding(identifier))
+        return dict(task_id=identifier, contract=contract, validation_sha256=sha256(canonical(contract)),
+                    execution_authorized=False, calls_model=False, submits_HPC=False, B_input=False)
+
+    def _stored_author_validation(self, identifier, validation_id):
+        with self.tasks.transaction() as db:
+            row = db.execute('SELECT * FROM author_validation_subsets WHERE id=?', (task_id(validation_id),)).fetchone()
+            if row is None:
+                return None
+            if row['task_id'] != identifier:
+                raise TaskError('作者验证子集属于其他任务。')
+            value = json.loads(row['document'])
+            previous = db.execute('SELECT id,document_sha256 FROM author_validation_subsets '
+                'WHERE task_id=? AND sequence=?', (identifier, row['sequence'] - 1)).fetchone()
+        if (sha256(canonical(value)) != row['document_sha256'] or value['id'] != row['id']
+                or value['task_id'] != identifier or value['sequence'] != row['sequence']
+                or value['validation_sha256'] != sha256(canonical(value['contract']))
+                or value['previous_validation_id'] != (previous['id'] if previous else None)
+                or value['previous_receipt_sha256'] != (previous['document_sha256'] if previous else None)):
+            raise TaskError('作者验证子集的原回执或追加历史摘要不一致。')
+        return value, row['document_sha256']
+
+    def get_author_validation(self, identifier, validation_id=None):
+        task = self._task(task_id(identifier))
+        if validation_id is None:
+            with self.tasks.transaction() as db:
+                row = db.execute('SELECT id FROM author_validation_subsets WHERE task_id=? ORDER BY sequence DESC LIMIT 1',
+                                 (identifier,)).fetchone()
+            if row is None:
+                return None
+            validation_id = row['id']
+        saved = self._stored_author_validation(identifier, validation_id)
+        if saved is None:
+            return None
+        value, digest = saved
+        contract = value['contract']; state, reason = 'recorded', ''
+        parent = self.get(identifier, contract['original_scope_id']); latest = self.get(identifier)
+        if (not parent or parent['state'] != 'recorded' or not latest or latest['id'] != parent['id']
+                or parent['scope_sha256'] != contract['original_scope_sha256']
+                or parent['receipt_sha256'] != contract['original_scope_receipt_sha256']):
+            state, reason = 'source_unavailable', '原 P 范围或来源变化；旧验证子集保留，不能静默改回完整执行。'
+        if not reason and (task['paused'] or any(action in {'finish', 'delete'} for action in task['lifecycle'])):
+            reason = '任务已暂停或结束；验证子集仍可查看。'
+        return dict(**value, receipt_sha256=digest, state=state, disabled_reason=reason,
+                    can_prepare_A_plan=state == 'recorded' and not reason, execution_authorized=False, B_input=False)
+
+    def author_validation_status(self, identifier):
+        self._task(task_id(identifier))
+        with self.tasks.transaction() as db:
+            ids = [row[0] for row in db.execute('SELECT id FROM author_validation_subsets WHERE task_id=? ORDER BY sequence',
+                                               (identifier,))]
+        history = [self.get_author_validation(identifier, key) for key in ids]
+        return dict(task_id=identifier, history=history, latest=history[-1] if history else None,
+                    calls_model=False, submits_HPC=False, execution_authorized=False, B_input=False)
+
+    def create_author_validation(self, identifier, revision, validation_id, scope_id, unit_count, user_intent='', *,
+                                 expected_validation_sha256, guidance_sequence=None):
+        task_id(identifier); task_id(validation_id); task_id(scope_id)
+        expected_validation_sha256 = _digest(expected_validation_sha256)
+        prior = self._stored_author_validation(identifier, validation_id)
+        if prior:
+            contract = prior[0]['contract']
+            if (prior[0]['validation_sha256'] != expected_validation_sha256 or contract['original_scope_id'] != scope_id
+                    or contract['unit_count'] != unit_count or type(unit_count) is not int
+                    or contract['user_intent']['guidance_sequence'] != guidance_sequence
+                    or (user_intent and text(user_intent, 4000) != contract['user_intent']['note'])):
+                raise TaskError('作者验证请求已绑定另一范围或要求，不能覆盖。')
+            return self.get_author_validation(identifier, validation_id)
+        task = self._task(identifier, active=True)
+        if type(revision) is not int or revision != task['revision']:
+            raise StaleTask('任务已更新，请重新查看作者验证子集。')
+        preview = self.preview_author_validation(identifier, scope_id, unit_count, user_intent,
+                                                 guidance_sequence=guidance_sequence)
+        if preview['validation_sha256'] != expected_validation_sha256:
+            raise StaleTask('作者验证来源或运行历史已变化，请重新查看。')
+        with self.tasks.transaction() as db:
+            current = self.tasks._read(db, identifier)
+            parent = db.execute('SELECT id,document_sha256 FROM reference_scope_receipts WHERE task_id=? '
+                                'ORDER BY sequence DESC LIMIT 1', (identifier,)).fetchone()
+            control = db.execute('SELECT action FROM task_control WHERE task_id=? ORDER BY sequence DESC LIMIT 1',
+                                 (identifier,)).fetchone()
+            if (current['revision'] != revision or parent is None or parent['id'] != scope_id
+                    or parent['document_sha256'] != preview['contract']['original_scope_receipt_sha256']
+                    or (control and control[0] == 'pause')
+                    or db.execute("SELECT 1 FROM task_lifecycle WHERE task_id=? AND action IN ('finish','delete')",
+                                  (identifier,)).fetchone()):
+                raise StaleTask('任务或原 P 范围已变化；未保存作者验证子集。')
+            if db.execute('SELECT 1 FROM author_validation_subsets WHERE id=?', (validation_id,)).fetchone():
+                raise StaleTask('作者验证请求已由另一操作保存，请刷新核对原回执。')
+            previous = db.execute('SELECT id,sequence,document_sha256 FROM author_validation_subsets '
+                                  'WHERE task_id=? ORDER BY sequence DESC LIMIT 1', (identifier,)).fetchone()
+            value = dict(version=1, id=validation_id, task_id=identifier,
+                sequence=previous['sequence'] + 1 if previous else 1,
+                previous_validation_id=previous['id'] if previous else None,
+                previous_receipt_sha256=previous['document_sha256'] if previous else None,
+                at=datetime.now(timezone.utc).isoformat(), contract=preview['contract'],
+                validation_sha256=preview['validation_sha256'], service_sha256=sha256(Path(__file__).read_bytes()))
+            db.execute('INSERT INTO author_validation_subsets VALUES (?,?,?,?,?)',
+                       (validation_id, identifier, value['sequence'], canonical(value).decode(), sha256(canonical(value))))
+        return self.get_author_validation(identifier, validation_id)
 
     def _task(self, identifier, *, active=False):
         with self.tasks.transaction() as db:

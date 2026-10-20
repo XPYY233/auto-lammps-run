@@ -77,7 +77,9 @@ class AuthorEnvironmentInventoryTests(unittest.TestCase):
         self.assertEqual(shlex.split(argv[1]),['python3','-I','-S','-c',REMOTE_CODE])
         value=json.loads(b''.join(input_chunks));self.network.append(deepcopy(value))
         report=_remote_inventory(value['request'],action=value['action'],_test_capture=self.metadata)
-        return dict(returncode=0,failure=None,stdout=base64.b64encode(canonical(report)).decode(),stderr='')
+        # The real worker prints Base64(JSON); capture separately encodes stdout.
+        wire=base64.b64encode(canonical(report))+b'\n'
+        return dict(returncode=0,failure=None,stdout=base64.b64encode(wire).decode(),stderr='')
 
     def inspect(self,key='1'*32):return self.service.inspect(self.task,key)
 
@@ -96,6 +98,8 @@ class AuthorEnvironmentInventoryTests(unittest.TestCase):
         for key,value in FLAGS.items():self.assertEqual(report[key],value)
         menu=self.service.planner_environments(self.task,'1'*32)
         self.assertEqual(menu['environments'][0]['executables'][0]['kind'],'python')
+        self.assertEqual([item['kind'] for item in menu['environments'][0]['executables']],['python','lammps','shell'])
+        self.assertEqual(menu['environments'][0]['executables'][1]['sha256'],sha256((self.native/'lmp').read_bytes()))
         self.assertEqual(menu['environments'][0]['executables'][0]['sha256'],candidate['sha256'])
         self.assertFalse(menu['child_process_policy_verified']);self.assertFalse(menu['execution_authorized'])
         self.assertGreaterEqual(len(menu['missing']),2)
