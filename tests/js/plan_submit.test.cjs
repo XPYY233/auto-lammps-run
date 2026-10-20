@@ -16,6 +16,21 @@ function setup(job,review={state:'prepared',approved:true,files:[]},rich=false){
  return {c,elements,calls};
 }
 test('approved fresh plan dispatches through execution without restarting generation',async()=>{const {c,elements,calls}=setup(null);await c.refreshPlanReview();await elements.get('#plan-approve').onclick();assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/execution']);});
+test('a granted cancelled parent can approve the new plan and use only its second execution endpoint',async()=>{
+ const {c,elements,calls}=setup({scheduler_state:'cancelled',state:'attention',accounted:true,
+  job_id:'123',dispatch_count:1,max_attempts:2,can_retry:false,can_retry_after_approval:true},
+  {state:'prepared',approved:false,files:[]});
+ await c.refreshPlanReview();assert.equal(elements.get('#plan-approve').disabled,false);
+ await elements.get('#plan-approve').onclick();
+ assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/plan/approve','/api/tasks/task/execution/retry']);
+});
+test('a cancelled parent without a server-verified recovery grant cannot be approved for another submission',async()=>{
+ const {c,elements,calls}=setup({scheduler_state:'cancelled',state:'attention',accounted:true,
+  job_id:'123',dispatch_count:1,max_attempts:2,can_retry:false,can_retry_after_approval:false},
+  {state:'prepared',approved:false,files:[]});
+ await c.refreshPlanReview();assert.equal(elements.get('#plan-approve').disabled,true);
+ await elements.get('#plan-approve').onclick();assert.equal(calls.filter(x=>x.body).length,0);
+});
 test('three-round limit disables rewrite but keeps a complete plan approvable',async()=>{
  const review={state:'prepared',approved:true,files:[],proposal_rounds:{limit:3,used:3,remaining:0,historical_count_unknown:false}};
  const {c,elements,calls}=setup(null,review);await c.refreshPlanReview();

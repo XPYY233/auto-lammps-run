@@ -10,6 +10,7 @@ import threading
 import uuid
 
 from .candidate_jobs import CandidateHistory
+from .failure_recovery import accounted_recovery_parent
 from .manifest import canonical, sha256
 from .tasks import TaskError, StaleTask, task_id
 
@@ -99,8 +100,10 @@ class ExecutionJobs:
             current_request=self.current_request_id(identifier)
             row=self.ledger.get(current_request)
             return dict(configured=True,worker_alive=live,can_start=False,job=dict(
-                can_retry=(row['state']=='failed' and bool(row['accounted']) and
+                can_retry=(accounted_recovery_parent(self.ledger,row) and
                            evaluation['dispatch_claims']<evaluation['max_attempts'] and self.approved_plan(identifier)),
+                can_retry_after_approval=(accounted_recovery_parent(self.ledger,row) and
+                           evaluation['dispatch_claims']<evaluation['max_attempts']),
                 state=job['state'],label=LABELS.get(job['state'],job['state']),request_id=current_request,job_id=row['job_id'],
                 scheduler_state=row['state'],accounted=bool(row['accounted']),
                 dispatch_count=evaluation['dispatch_claims'],max_attempts=evaluation['max_attempts'],
@@ -152,7 +155,7 @@ class ExecutionJobs:
             job=self.get(identifier)
             if job['state'] in WORKABLE:return self.status(identifier)
             if not self.status(identifier)['job']['can_retry']:
-                raise TaskError('仅已核算失败且仍有提交机会的已批准方案可以再次提交。')
+                raise TaskError('仅已核算失败或有明确开发追加授权的原取消作业，且仍有提交机会的已批准方案可以再次提交。')
             parent=self.current_request_id(identifier)
             plan=self.controller.prepare(identifier,job['evaluation'],retry_after=parent)
             with self.tasks.transaction() as db:

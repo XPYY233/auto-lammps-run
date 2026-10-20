@@ -333,4 +333,162 @@ class AuthorResourceSelectionTests(unittest.TestCase):
         self.assertEqual(self.fx.calls.status()['used_requests'],self.baseline)
 
 
+class InitialAuthorResourceSelectionTests(unittest.TestCase):
+    """First selection uses retained P/tree metadata, without inventing an author plan."""
+    make=AuthorResourceSelectionTests.make
+    prepare=AuthorResourceSelectionTests.prepare
+
+    def setUp(self):
+        self.fx=fixtures.AuthorReferencePlanTests();self.fx.setUp();self.addCleanup(self.fx.doCleanups)
+        self.task=self.fx.task['id'];self.root=self.fx.fixture.root
+        capability=self.fx.evidence['author_source']['capability']
+        request=dict(id='a'*32,repository=capability['repository'],commit=capability['commit'],
+            directory='/synthetic-hpc/author-bootstrap',storage_bytes=512*1024**2,bundle_sha256='b'*64)
+        acquisition=dict(schema_version=1,id=request['id'],repository=request['repository'],commit=request['commit'],
+            location='hpc',state='partial',request_sha256=sha256(canonical(request)),bundle_sha256=request['bundle_sha256'],
+            remote_directory=request['directory']+'/'+request['id'],files=[],inventory_sha256=sha256(canonical([])),
+            source_complete=False,tree_sha1='c'*40,scientific_validation=False,execution_authorized=False,
+            author_identity_verified=False,failures=[dict(reason='selection_required')])
+        tree_request=dict(version=1,acquisition_request=request,receipt_sha256=sha256(canonical(acquisition)),tree_sha1='c'*40)
+        entries=classify_entries([dict(path='README.md',type='blob',mode='100644',size=123,sha='d'*40),
+            dict(path='original/in.lammps',type='blob',mode='100644',size=200,sha='e'*40),
+            dict(path='linked',type='blob',mode='120000',size=2,sha='f'*40)])
+        tree=dict(version=1,state='inspected',request_sha256=sha256(canonical(tree_request)),
+            acquisition_id=request['id'],repository=request['repository'],commit=request['commit'],tree_sha1='c'*40,
+            receipt_sha256=tree_request['receipt_sha256'],scope='reference_only',B_input=False,
+            execution_authorized=False,physical_evaluation_performed=False,scientific_validation=False,
+            entries=entries,summary=inventory_summary(entries,{key:'4'*64 for key in CACHE_KEYS}))
+        self.input=dict(task_id=self.task,scope='reference_only',role='author_reference_human_only',B_input=False,
+            mode='initial_scope_selection',author_plan_request_id=None,tree_request=tree_request,tree_report=tree,
+            acquisition_receipt=acquisition,existing_files=[],
+            reference_sources=deepcopy(self.fx.fixture.input['sources']),reference_scope=deepcopy(self.fx.scope),
+            binding=dict(transport_identity_sha256='5'*64,license_approval_sha256='6'*64))
+        self.provider=Mock(side_effect=lambda _:deepcopy(self.input))
+        self.proposal=dict(status='selected',summary='仅据完整P范围选择待阅读原件，尚未知源码内容。',
+            selections=[dict(path='README.md',reason='Read the original author invocation before planning.',dependency_ids=['shared'])],
+            missing=['Original file contents and author invocation remain unknown.'],limitations=['Tree metadata is not execution evidence.'])
+        self.transport=Mock(side_effect=lambda *args:(200,response(deepcopy(self.proposal))))
+        self.fx.client.transport=self.transport
+        self.service=self.make()
+        self.expected_author_history=[]
+        self.addCleanup(self.assert_no_author_plan)
+        guard=patch('auto_lammps.slurm_read.subprocess.Popen',side_effect=AssertionError('No SSH/process belongs here'))
+        guard.start();self.addCleanup(guard.stop)
+
+    def assert_no_author_plan(self):
+        self.assertEqual(self.fx.service.history(self.task),self.expected_author_history)
+        self.assertEqual(self.fx.service.status(self.task)['used_rounds'],len(self.expected_author_history))
+
+    def test_first_selection_uses_complete_saved_P_without_fabricating_author_plan(self):
+        baseline=deepcopy(self.input)
+        value=self.prepare()
+        self.assertEqual(value['state'],'selected',value)
+        self.assertEqual(value['report']['paths'],['README.md'])
+        self.assertIsNone(value['report']['inherited_author_missing'])
+        self.assertTrue(value['report']['first_selection'])
+        self.assertFalse(value['report']['author_plan_present'])
+        evidence=self.service._stored(self.task,'7'*32)[1]['input']
+        self.assertIsNone(evidence['author_plan'])
+        self.assertEqual(evidence['existing_files'],[])
+        self.assertEqual(evidence['reference_scope']['scope'],self.fx.scope['scope'])
+        self.assertEqual(evidence['sources'],[row for row in self.fx.evidence['sources'] if row['origin']=='paper'])
+        payload=json.loads(self.transport.call_args.args[0])
+        validate_prepared_messages(STAGE,payload['messages'],evidence)
+        body=json.loads(payload['messages'][-1]['content'])
+        self.assertIsNone(body['author_plan'])
+        self.assertEqual(body['reference_scope']['scope']['selected_ids'],['first','second'])
+        self.assertEqual(body['author_resource_selection'],selection_context(evidence))
+        self.assertFalse(body['author_resource_selection']['author_plan_present'])
+        self.assertIn('no author plan',payload['messages'][0]['content'])
+        for key in ('execution_authorized','physical_evaluation_performed','B_input','source_complete','execution_ready'):
+            self.assertIs(value['report'][key],False)
+        self.assertEqual(self.input,baseline)
+        self.assertEqual(self.fx.calls.status()['used_requests'],1)
+        self.assertEqual(self.service.selection(self.task,'7'*32),value['report'])
+
+    def test_first_selection_same_ID_and_history_do_not_repeat_provider_or_model(self):
+        original=self.prepare()
+        self.provider.reset_mock();self.transport.reset_mock()
+        self.assertEqual(self.prepare(service=self.make()),original)
+        self.assertEqual(self.service.status(self.task)['used_rounds'],1)
+        self.provider.assert_not_called();self.transport.assert_not_called()
+
+    def test_initial_mode_rejects_forged_scope_sources_or_permission_before_cost(self):
+        baseline=deepcopy(self.input)
+        for mutate in (
+            lambda value:value['reference_scope']['scope'].update(selected_ids=['first']),
+            lambda value:value['reference_scope'].update(receipt_sha256='a'*64),
+            lambda value:value['reference_sources'][0].update(text='Forged source'),
+            lambda value:value.update(reference_sources=[]),
+            lambda value:value.update(author_plan_request_id='4'*32),
+            lambda value:value.update(existing_files=[dict(path='README.md',size=123,sha256='a'*64)]),
+            lambda value:value['binding'].update(license_approval_sha256=None),
+            lambda value:value['binding'].update(transport_identity_sha256='wrong'),
+            lambda value:value.update(role='research'),
+            lambda value:value.update(B_input=True),
+            lambda value:value.update(extra='untrusted'),
+            lambda value:value['tree_report'].update(commit='f'*40),
+            lambda value:value['tree_request'].update(receipt_sha256='f'*64),
+        ):
+            with self.subTest(mutation=mutate):
+                self.input=deepcopy(baseline);mutate(self.input)
+                with self.assertRaises((ValueError,KeyError,TypeError)):self.prepare()
+        self.transport.assert_not_called()
+        self.assertEqual(self.service.history(self.task),[])
+        self.assertEqual(self.fx.calls.status()['used_requests'],0)
+
+    def test_initial_mode_cannot_discard_an_existing_author_plan(self):
+        self.fx.value.update(status='needs_clarification',questions=['Keep prior synthetic author needs.'])
+        self.fx.client.transport=self.fx.transport
+        self.fx.service.prepare(self.task,'4'*32,self.fx.client,connection_revision=1,credential_generation=1)
+        before=deepcopy(self.fx.service.history(self.task))
+        self.expected_author_history=before
+        self.fx.client.transport=self.transport
+        self.transport.reset_mock()
+        with self.assertRaisesRegex(TaskError,'已有前稿必须完整继承'):self.prepare()
+        self.assertEqual(self.fx.service.history(self.task),before)
+        self.assertEqual(self.service.status(self.task)['used_rounds'],0)
+        self.transport.assert_not_called()
+
+    def test_initial_selection_three_rounds_revise_full_previous_answer_in_same_counter(self):
+        self.proposal['full_invalid_answer']='Retain the entire rejected answer. '*200
+        for key in ('7','8','9'):
+            self.assertEqual(self.prepare(key*32,revision_note='Correct this exact previous answer')['state'],'invalid_output')
+        context=self.service._stored(self.task,'9'*32)[1]
+        self.assertEqual(context['revision']['complete_previous_answer'],self.proposal)
+        self.assertEqual(context['revision']['parent_request'],'8'*32)
+        self.assertFalse(context['revision']['target_scope_reduction_allowed'])
+        with self.assertRaisesRegex(TaskError,'最多三轮'):self.prepare('e'*32)
+        self.assertEqual(self.service.status(self.task)['used_rounds'],3)
+        self.assertEqual(self.fx.calls.status()['used_requests'],3)
+
+    def test_initial_unknown_stops_new_IDs_and_preserves_one_charge(self):
+        self.transport.side_effect=TimeoutError('Synthetic unknown')
+        original=self.prepare()
+        self.assertEqual(original['state'],'unknown')
+        with self.assertRaisesRegex(TaskError,'未知'):self.prepare('8'*32,service=self.make())
+        self.assertEqual(self.prepare(),original)
+        self.assertEqual(self.transport.call_count,1)
+        self.assertEqual(self.fx.calls.status()['used_requests'],1)
+
+    def test_initial_selection_requires_mandatory_adapter_and_rejects_invented_prior_plan(self):
+        evidence=self.service._input(self.task)
+        for change in (dict(author_plan={'report':{}}),dict(existing_files=[dict(path='README.md')])):
+            with self.subTest(change=change),self.assertRaisesRegex(TaskError,'伪造前稿或已有原件'):
+                selection_context(dict(evidence,**change))
+        from auto_lammps.scientific_adapters import ScientificAdapterError
+        with patch('auto_lammps.author_resource_selection.selection_context',return_value=None):
+            with self.assertRaises((TaskError,ScientificAdapterError)):self.prepare()
+        self.assertEqual(self.service.status(self.task)['used_rounds'],0)
+        self.assertEqual(self.fx.calls.status()['used_requests'],0)
+        self.transport.assert_not_called()
+
+    def test_changed_scope_or_read_permission_blocks_acquisition_not_history(self):
+        original=self.prepare()
+        self.input['binding']['license_approval_sha256']='a'*64
+        self.assertEqual(self.service.get(self.task,'7'*32),original)
+        with self.assertRaisesRegex(TaskError,'已变化'):self.service.selection(self.task,'7'*32)
+        self.assertEqual(self.transport.call_count,1)
+
+
 if __name__=='__main__':unittest.main()

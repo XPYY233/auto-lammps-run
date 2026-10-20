@@ -11,8 +11,9 @@ from pathlib import Path
 import re
 
 from .author_reference_plan import (AuthorReferencePlan, MAX_ROUNDS, _MODEL_FIELDS,
-                                    _source_capability_members)
+                                    _source, _source_capability_members)
 from .author_reference_resources import AuthorReferenceResources
+from .condition_generation import source_bundle
 from .deepseek import ModelError, request_body
 from .manifest import canonical, private_directory, sha256
 from .potential_acquisition import safe_path
@@ -31,6 +32,7 @@ FLAGS = dict(scope='reference_only', role='author_reference_human_only', B_input
              scientific_status='not_evaluated', proposal_status='model_proposed_not_verified')
 _INPUT = {'task_id', 'scope', 'role', 'B_input', 'author_plan_request_id', 'tree_request',
           'tree_report', 'acquisition_receipt', 'existing_files', 'binding'}
+_INITIAL_INPUT = _INPUT | {'mode', 'reference_sources', 'reference_scope'}
 
 
 def _hash(value):
@@ -61,7 +63,10 @@ def selection_context(evidence):
             reason=string(2000),dependency_ids=dict(type='array',minItems=1,maxItems=512,uniqueItems=True,
                 items=dependency_type)))
     strings=dict(type='array',maxItems=64,items=string(2000))
-    return dict(tool='original_author_resource_selection',version=VERSION,
+    initial=evidence.get('first_selection') is True
+    if initial and (evidence.get('author_plan') is not None or evidence['existing_files']):
+        raise TaskError('首次原件选择不能伪造前稿或已有原件。')
+    result=dict(tool='original_author_resource_selection',version=VERSION,
         source_sha256=sha256(Path(__file__).read_bytes()),scope='reference_only',B_input=False,
         execution_authorized=False,physical_evaluation_performed=False,
         repository=evidence['repository'],commit=evidence['commit'],
@@ -80,6 +85,11 @@ def selection_context(evidence):
             required=['status','summary','selections','missing','limitations'],properties=dict(
                 status=dict(type='string',enum=['selected','needs_clarification']),summary=string(4000),
                 selections=dict(type='array',maxItems=MAX_FILES,items=row),missing=strings,limitations=strings)))
+    if initial:
+        result.update(first_selection=True,author_plan_present=False)
+        result['rules'][2]='Use only the unchanged complete selected P scope and its shared dependency IDs; no author plan has been generated yet.'
+        result['rules'].insert(3,'Original author file contents are not yet available. Select for reading only, retain unknown contents and invocation needs; never invent a previous author plan or claim the files are applicable.')
+    return result
 
 
 def validate_selection(evidence, value):
@@ -120,18 +130,24 @@ def validate_selection(evidence, value):
         raise TaskError('选取建议须至少包含一个新文件；无可选文件时应保留具体缺项。')
     if value['status']=='needs_clarification' and not missing:
         raise TaskError('待澄清的资料选择须保留具体缺项。')
-    return dict(version=VERSION,**FLAGS,status=value['status'],summary=text(value['summary'],4000),
+    initial=evidence.get('first_selection') is True
+    report=dict(version=VERSION,**FLAGS,status=value['status'],summary=text(value['summary'],4000),
         repository=evidence['repository'],commit=evidence['commit'],tree_sha1=evidence['tree_sha1'],
         tree_report_sha256=evidence['tree_report_sha256'],acquisition_receipt_sha256=evidence['acquisition_receipt_sha256'],
         selections=selected,paths=[row['path'] for row in selected],total_bytes=total,missing=missing,
-        inherited_author_missing=deepcopy(evidence['author_plan']['report']),limitations=limitations,
+        inherited_author_missing=None if initial else deepcopy(evidence['author_plan']['report']),limitations=limitations,
         source_complete=False,execution_ready=False,scientific_applicability_verified=False)
+    if initial:report.update(first_selection=True,author_plan_present=False)
+    return report
 
 
 class AuthorResourceSelection:
     """Three selection versions per task, separate from author-plan versions.
 
-    ``reference_provider(task_id)`` returns only the strict ``_INPUT`` metadata.
+    ``reference_provider(task_id)`` returns only strict ``_INPUT`` metadata, or
+    ``_INITIAL_INPUT`` with mode ``initial_scope_selection`` before any author
+    plan exists. Initial selection binds the current saved P scope and sources;
+    it does not synthesize an author-plan draft to unlock file reading.
     The caller authenticates its inspection record and saved connection binding;
     this service also rechecks the report/receipt and the original planner/scope.
     ``connection_provider`` has exactly AuthorReferencePlan's reference binding.
@@ -173,7 +189,8 @@ class AuthorResourceSelection:
         with self.tasks.transaction() as db:self._task(db,identifier,active=True)
         try:raw=self.reference_provider(identifier)
         except Exception:raise TaskError('固定作者缓存树与原件记录当前不可核验；未调用模型。') from None
-        if (not isinstance(raw,dict) or set(raw)!=_INPUT or raw['task_id']!=identifier
+        initial=isinstance(raw,dict) and raw.get('mode')=='initial_scope_selection'
+        if (not isinstance(raw,dict) or set(raw)!=(_INITIAL_INPUT if initial else _INPUT) or raw['task_id']!=identifier
                 or raw['scope']!='reference_only' or raw['role']!='author_reference_human_only'
                 or raw['B_input'] is not False):
             raise TaskError('资料选择输入只接受同任务的固定参考端记录。')
@@ -182,17 +199,40 @@ class AuthorResourceSelection:
             raise TaskError('资料选择需要原保存连接与许可摘要。')
         for value in binding.values():_hash(value)
         history=self.plans.history(identifier)
-        if not history or history[-1]['request_id']!=raw['author_plan_request_id']:
-            raise TaskError('资料选择必须继承本任务当前完整作者方案，不能另选旧稿。')
-        saved=self.plans._stored(identifier,raw['author_plan_request_id'])
-        _,author,receipt,_=saved
-        if (not receipt or receipt['state']!='needs_clarification' or not receipt.get('report')
-                or receipt['report'].get('status')!='needs_clarification'):
-            raise TaskError('资料选择需要已收到并保存的作者原件缺项方案，未知请求须先核对。')
-        original=author['input'];scope=self.scopes.get(identifier)
-        if (not scope or scope['id']!=original['reference_scope']['id']
-                or scope['scope_sha256']!=original['reference_scope']['scope_sha256']):
-            raise TaskError('原P范围已变化，不能在取件选择中缩减或替换。')
+        author_plan=None
+        if initial:
+            if history or raw['author_plan_request_id'] is not None or raw['existing_files']!=[]:
+                raise TaskError('首次原件选择仅用于尚无作者方案和原件的任务；已有前稿必须完整继承。')
+            scope=self.scopes.get(identifier)
+            if (not scope or scope.get('state')!='recorded' or scope.get('task_id')!=identifier
+                    or raw['reference_scope']!=scope):
+                raise TaskError('首次原件选择须保留本任务当前完整且来源有效的已记录P范围。')
+            provenance=scope['scope']['provenance']
+            paper=self.papers.get(provenance['paper_id'])
+            if provenance['paper']!={key:paper[key] for key in ('title','doi')}:
+                raise TaskError('首次原件选择的P范围与登记论文身份不一致。')
+            retained=self.scopes.targets._input(identifier,active=False)['sources']
+            if raw['reference_sources']!=retained or any(row.get('origin')!='paper' for row in retained):
+                raise TaskError('首次原件选择的论文来源必须是原P核定保留的完整原文。')
+            sources=[_source(row['id'],'paper',row['locator'],row['text']) for row in source_bundle(retained)]
+            original=dict(paper_id=paper['id'],paper={key:paper[key] for key in ('title','doi')},
+                reference_scope=dict(id=scope['id'],receipt_sha256=_hash(scope['receipt_sha256']),
+                    scope_sha256=_hash(scope['scope_sha256']),scope=deepcopy(scope['scope'])),
+                sources=sources,author_source=dict(capability=None,files=[]))
+        else:
+            if not history or history[-1]['request_id']!=raw['author_plan_request_id']:
+                raise TaskError('资料选择必须继承本任务当前完整作者方案，不能另选旧稿。')
+            saved=self.plans._stored(identifier,raw['author_plan_request_id'])
+            _,author,receipt,_=saved
+            if (not receipt or receipt['state']!='needs_clarification' or not receipt.get('report')
+                    or receipt['report'].get('status')!='needs_clarification'):
+                raise TaskError('资料选择需要已收到并保存的作者原件缺项方案，未知请求须先核对。')
+            original=author['input'];scope=self.scopes.get(identifier)
+            if (not scope or scope['id']!=original['reference_scope']['id']
+                    or scope['scope_sha256']!=original['reference_scope']['scope_sha256']):
+                raise TaskError('原P范围已变化，不能在取件选择中缩减或替换。')
+            author_plan=dict(request_id=raw['author_plan_request_id'],context_sha256=sha256(canonical(author)),
+                             receipt_sha256=sha256(canonical(receipt)),report=deepcopy(receipt['report']))
         tree_request=raw['tree_request'];tree=raw['tree_report'];acquisition=raw['acquisition_receipt']
         try:
             RemoteResources.validate_tree_report(tree_request,tree)
@@ -206,7 +246,7 @@ class AuthorResourceSelection:
         except (ValueError,KeyError,TypeError):
             raise TaskError('Git树、原获取回执或固定仓库/版本身份不一致。') from None
         members=_source_capability_members(original['author_source']['capability'])
-        if not members or any((row['repository'],row['commit'])!=(request['repository'],request['commit']) for row in members):
+        if not initial and (not members or any((row['repository'],row['commit'])!=(request['repository'],request['commit']) for row in members)):
             raise TaskError('缓存Git树不能换用另一作者仓库或commit。')
         existing=raw['existing_files']
         if not isinstance(existing,list) or len(existing)>MAX_FILES:
@@ -225,14 +265,15 @@ class AuthorResourceSelection:
             raise TaskError('已有作者原件不能被删去或改写摘要。')
         available=[deepcopy(row) for row in tree['entries'] if row['status']=='supported_blob'
                    and row['path'] not in known and row['size']<=MAX_BLOB]
-        return dict(version=VERSION,**FLAGS,task_id=identifier,paper_id=original['paper_id'],paper=deepcopy(original['paper']),
+        evidence=dict(version=VERSION,**FLAGS,task_id=identifier,paper_id=original['paper_id'],paper=deepcopy(original['paper']),
             reference_scope=deepcopy(original['reference_scope']),sources=deepcopy(original['sources']),
-            author_plan=dict(request_id=raw['author_plan_request_id'],context_sha256=sha256(canonical(author)),
-                             receipt_sha256=sha256(canonical(receipt)),report=deepcopy(receipt['report'])),
+            author_plan=author_plan,
             repository=request['repository'],commit=request['commit'],tree_sha1=tree['tree_sha1'],
             acquisition_request=deepcopy(request),acquisition_receipt_sha256=tree_request['receipt_sha256'],
             tree_report_sha256=sha256(canonical(tree)),tree_report=deepcopy(tree),available_files=available,
             existing_files=list(known.values()),binding=deepcopy(binding))
+        if initial:evidence['first_selection']=True
+        return evidence
 
     def _stored(self,identifier,request):
         with self.tasks.transaction() as db:
@@ -340,13 +381,26 @@ class AuthorResourceSelection:
         source_pages=view.pop('sources')
         view['source_pages_binding']=dict(sha256=sha256(canonical(source_pages)),
             source_count=len(source_pages),
-            use='Path selection only; complete P scope and author answer retain their source excerpts. '
-                'Full paper pages remain bound in the trusted input, not reinterpreted in this step.')
+            use=('Path selection only; complete P scope retains its source excerpts and no author plan exists. '
+                 if evidence.get('first_selection') is True else
+                 'Path selection only; complete P scope and author answer retain their source excerpts. ')
+                +'Full paper pages remain bound in the trusted input, not reinterpreted in this step.')
         view['available_files']={row['path']:row['size'] for row in evidence['available_files']}
-        payload=dict(**view,author_resource_selection=selection_context(evidence),
+        contract=selection_context(evidence)
+        if (not isinstance(contract,dict) or contract.get('tool')!='original_author_resource_selection'
+                or contract.get('version')!=VERSION or contract.get('scope')!='reference_only'
+                or contract.get('source_sha256')!=sha256(Path(__file__).read_bytes())
+                or any(contract.get(key) is not False for key in
+                       ('B_input','execution_authorized','physical_evaluation_performed'))
+                or not isinstance(contract.get('output_types'),dict) or not contract['output_types']):
+            raise TaskError('作者资料选择的强制Adapter合同无效；未创建版本或调用模型。')
+        payload=dict(**view,author_resource_selection=contract,
                      resource_selection_revision=revision,user_revision_note=note)
-        messages=[dict(role='system',content=(
-            'Select the ORIGINAL AUTHOR files needed for the unchanged supplied P scope and saved author clarification. '
+        instruction=('Select the ORIGINAL AUTHOR files needed for the unchanged complete supplied P scope. '
+            'This is the first selection: no author plan or original file contents have been supplied. '
+            if evidence.get('first_selection') is True else
+            'Select the ORIGINAL AUTHOR files needed for the unchanged supplied P scope and saved author clarification. ')
+        messages=[dict(role='system',content=(instruction+
             'Return the complete JSON object in author_resource_selection.output_types. Choose concrete paths only from '
             'available_files keys (the values are file byte sizes). Reasons and dependency IDs are proposed '
             'scientific choices, not verified file contents. '

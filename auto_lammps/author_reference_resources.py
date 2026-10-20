@@ -51,6 +51,8 @@ class AuthorReferenceResources:
                                '"immutable author resource history"); END')
 
     def _binding(self, identifier):
+        if identifier not in self.workspace.bindings and self.workspace.initial is not None:
+            return self.workspace.initial.resource_binding(identifier)
         binding, paper, receipt, _ = self.workspace._metadata(identifier, require_scope=False)
         transport = getattr(binding['reader'], 'transport', None)
         if not isinstance(transport, SavedHPCTransport):
@@ -178,6 +180,8 @@ class AuthorReferenceResources:
         enabled,reason = True,''
         try:
             context,_=self._binding(identifier)
+            if identifier not in self.workspace.bindings and self.workspace.initial is not None:
+                raise TaskError('请先核对固定仓库清单与许可证，再由应用 AI 选择本次范围所需原件。')
             for row,summary in zip(rows,history):
                 summary['can_inspect_tree'] &= self._same_binding(row['context'],context)
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied):
@@ -284,6 +288,8 @@ class AuthorReferenceResources:
 
     def acquire(self, identifier, request):
         task_id(identifier);task_id(request)
+        if identifier not in self.workspace.bindings and self.workspace.initial is not None:
+            raise TaskError('首次资料接入只允许固定清单核验及所选原件获取，不默认下载整仓。')
         with self._lease(identifier):
             with self.tasks.transaction() as db:
                 owner=db.execute('SELECT task_id FROM author_resource_requests WHERE id=?',(request,)).fetchone()

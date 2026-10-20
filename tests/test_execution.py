@@ -16,7 +16,7 @@ from auto_lammps.batch_plan import BatchEnvironment
 from auto_lammps.candidate_jobs import CandidateService
 from auto_lammps.execution import CandidateExecution, ExistingAuthorization
 from auto_lammps.following import FollowingService
-from auto_lammps.ledger import Conflict, Ledger, Policy
+from auto_lammps.ledger import Conflict, Ledger, Policy, Resources
 from auto_lammps.manifest import canonical, sha256
 from auto_lammps.reconciliation import ReconciliationService
 from auto_lammps.slurm_read import Observation, SlurmReader
@@ -28,6 +28,27 @@ import test_agent_candidates as candidates
 import test_runtime_launcher as runtime_fixtures
 from test_candidate_jobs import frozen_research
 from test_analysis import DATA, PLAN
+
+
+def grant_cancelled_development(fixture, *, additional_core_seconds=None):
+    """Synthetic ledger-only formal pairing; no author outputs enter B inputs."""
+    ledger = fixture.ledger
+    with ledger._transaction() as db:
+        previous = ledger._policy(db, 'synthetic')
+    ledger.amend_campaign_policy('synthetic',
+        Policy(100000000, 32, 604800, 128*1024*1024, 16*1024*1024, 1, 'b'*64),
+        expected_previous_sha256=sha256(canonical(previous)))
+    author = ledger.register_evaluation('synthetic', task_sha256='e'*64, repetition=0,
+                                       role='reference', system_sha256='a'*64)
+    source = ledger.reserve(author, 'synthetic-accounting-only-A', 'f'*64, Resources(32, 3600, 1024, 1024))
+    ledger.begin_dispatch(source['id']); ledger.accepted(source['id'], '987', {})
+    ledger.observe(source['id'], '987', 'completed', {})
+    ledger.account(source['id'], 115200, 'f'*64)
+    ledger.approve_reference_derived_b_limit(fixture.evaluation, author, [source['id']],
+        scope_sha256='a'*64, evidence_sha256='b'*64, approval_sha256='c'*64)
+    return ledger.approve_formal_b_development_supplement(fixture.evaluation, fixture.request_id,
+        additional_core_seconds=additional_core_seconds or fixture.resources.core_seconds*2,
+        approval_sha256='d'*64)
 
 
 class ExecutionTests(unittest.TestCase):
@@ -117,6 +138,40 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotEqual(revised['row']['id'],rid)
         self.assertEqual(revised['snapshot'].digest,digest)
         self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['dispatch_claims'],1)
+
+    def test_cancelled_retry_requires_exact_supplement_and_keeps_two_hpc_attempts(self):
+        parent = self.request_id
+        self.ledger.begin_dispatch(parent); self.ledger.accepted(parent, '123', {})
+        self.ledger.observe(parent, '123', 'cancelled', {}); self.ledger.account(parent, 1, 'a'*64)
+        with self.assertRaisesRegex(Conflict, 'explicitly granted'):
+            self.controller.prepare(self.doc['id'], self.evaluation, retry_after=parent)
+        grant = grant_cancelled_development(self)
+        before = self.ledger.get(parent)
+        events = self.ledger.events(parent)
+        retry = self.controller.prepare(self.doc['id'], self.evaluation, retry_after=parent)
+        same = self.controller.prepare(self.doc['id'], self.evaluation, retry_after=parent)
+        self.assertEqual(retry['row']['id'], same['row']['id'])
+        self.assertNotEqual(retry['row']['id'], parent)
+        self.assertEqual(self.ledger.get(parent), before)
+        self.assertEqual(self.ledger.events(parent), events)
+        self.assertEqual(retry['snapshot'].digest, self.plan['snapshot'].digest)
+        self.assertEqual(self.ledger.formal_b_development_supplement(self.evaluation, parent), grant)
+        self.assertIsNone(self.ledger.formal_b_development_supplement(self.evaluation, retry['row']['id']))
+        state = self.ledger.evaluation_snapshot(self.evaluation)
+        self.assertEqual((state['dispatch_claims'], state['max_attempts']), (1, 2))
+        self.assertEqual(state['reserved_attempts'], 2)
+        self.assertEqual(before['state'], 'cancelled')
+        self.assertEqual(before['actual_core_seconds'], 1)
+
+    def test_cancelled_unaccounted_or_unknown_parent_never_queries_supplement(self):
+        parent = self.request_id
+        self.ledger.begin_dispatch(parent); self.ledger.accepted(parent, '123', {})
+        with patch.object(self.ledger, 'formal_b_development_supplement', side_effect=AssertionError('No terminal grant')):
+            with self.assertRaises(Conflict):
+                self.controller.prepare(self.doc['id'], self.evaluation, retry_after=parent)
+            self.ledger.observe(parent, '123', 'cancelled', {})
+            with self.assertRaises(Conflict):
+                self.controller.prepare(self.doc['id'], self.evaluation, retry_after=parent)
 
     def authorize_fixture(self):
         self.remote.private(self.remote.control/(self.request_id+'.json'),canonical(runtime_fixtures.signed(self.payload)))

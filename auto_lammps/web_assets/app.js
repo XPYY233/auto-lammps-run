@@ -1224,6 +1224,7 @@ async function refreshPlanReview(){
   const active=['queued','running','waiting','dispatching'].includes(job.state);
   const unresolved=['unknown','reconcile_required'].includes(job.scheduler_state);
   const blocked=!executionReadable||execution.configured===false;
+  renderFormalBRetestBudget(id,panel,execution.formal_b_retest);
   recheck.disabled=!sameDraft.can_recheck||active||unresolved||blocked;
   recheck.onclick=()=>action(async()=>{
     if(recheck.disabled)return;
@@ -1236,7 +1237,7 @@ async function refreshPlanReview(){
     await afterChange('原稿已交给应用内 AI 重新审核；不会生成新稿或提交 HPC。');
     await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
-  const retryAvailable=job.scheduler_state==='failed'&&job.accounted&&job.dispatch_count<job.max_attempts;
+  const retryAvailable=Boolean(job.can_retry||job.can_retry_after_approval);
   const approve=$('#plan-approve');approve.disabled=!prepared||active||blocked||(dispatched&&!retryAvailable);
   approve.textContent=retryAvailable?`使用第 ${job.dispatch_count+1} 次机会提交 HPC`:dispatched?'已提交 · 作业 '+job.job_id:active?'正在提交，请等待回执':unresolved?'核对已有提交回执':review.approved?'提交已批准方案':'批准并提交 HPC';
   $('#plan-note').textContent=blocked?'执行回执暂不可读取或执行服务未配置；已暂停批准与修改，请刷新核对。':dispatched?'作业 '+job.job_id+' · '+(requestStates[job.scheduler_state]||job.label)+'。状态与提交次数见上方；本按钮不会重复提交。':
@@ -1266,6 +1267,32 @@ async function refreshPlanReview(){
     await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
   renderNextAction();
+}
+
+function renderFormalBRetestBudget(id,parent,data){
+ let panel=$('#formal-b-retest-budget');
+ if(!panel){panel=node('section',undefined,'result-widget');panel.id='formal-b-retest-budget';parent.append(panel);}
+ panel.replaceChildren();panel.dataset.task=id;panel.hidden=!data?.can_add_supplement&&!data?.grant;
+ if(panel.hidden)return;
+ const alive=()=>current?.id===id&&panel.dataset.task===id&&!$('#task-view').hidden;
+ panel.append(node('h4','第二次 B 开发复测额度'),node('p','原评测失败、取消与超支继续保留；追加额度只用于同一任务的第二次提交，不清零历史，不自动调用模型或提交计算。','form-note'));
+ if(data.grant){
+  panel.append(node('p',`已记录追加 ${(data.grant.additional_core_seconds/3600).toFixed(2)} CPU 核时；当前剩余 ${((data.resource_limit?.remaining_core_seconds||0)/3600).toFixed(2)} CPU 核时。`,'form-note'));return;
+ }
+ const hours=node('input');hours.type='number';hours.min='0.01';hours.step='0.01';hours.setAttribute('aria-label','第二次开发复测新增 CPU 核时');
+ const note=node('textarea');note.setAttribute('aria-label','补充核时授权说明');note.placeholder='记录你明确批准的额度与开发复测用途；原失败和费用继续保留。';
+ const confirm=node('button','记录补充核时授权（不提交计算）','quiet'),feedback=node('p','','form-note');feedback.setAttribute('role','status');
+ let pending=false;
+ confirm.onclick=async()=>{
+  if(!alive()||pending)return;
+  const amount=Number(hours.value),reason=note.value.trim(),seconds=Math.round(amount*3600);
+  if(!Number.isFinite(amount)||amount<=0||!Number.isSafeInteger(seconds)||!seconds||!reason){feedback.textContent='请填写明确的正数核时和授权说明。';return;}
+  pending=true;confirm.disabled=true;
+  try{await api(`/api/tasks/${id}/execution/development-supplement`,{revision:current.revision,parent_request_id:data.parent_request_id,additional_core_seconds:seconds,note:reason});if(alive())await refreshPlanReview();}
+  catch(error){if(alive())feedback.textContent=error.message;}
+  finally{pending=false;if(alive())confirm.disabled=false;}
+ };
+ panel.append(hours,note,confirm,feedback);
 }
 
 function clearCandidateView() {
@@ -3270,6 +3297,7 @@ async function renderAuthorResourcePanel(id,parent,state){
  try{
   const data=await api(`/api/tasks/${id}/author-resources`);if(!alive())return;
   panel.replaceChildren(node('h4','补齐固定版本作者资料'),node('p','复用当前论文已批准的仓库、版本和 HPC 连接，将原件保存到超算。不调用模型、不提交计算，原方案、范围和轮次保留。','form-note'));
+  if(data.initial){await renderInitialAuthorResources(id,parent,panel,state,data.initial,alive);return;}
   const latest=data.latest;
   if(latest){
    panel.append(node('p',`${latest.repository} · ${latest.commit} · 已获取 ${latest.files.length} 个文件；原件${latest.source_complete?'完整':'尚未完整'}。`,'form-note'));
@@ -3323,6 +3351,52 @@ async function renderAuthorResourcePanel(id,parent,state){
    for(const [label,names] of [['未读文件（未冒称已检查）',read.unread_files],['截断文件（仅保留有界片段）',read.truncated_files]])if(names?.length){const detail=node('details');detail.append(node('summary',label));for(const name of names)detail.append(node('p',name));panel.append(detail);}
   }
  }catch(error){if(alive())panel.replaceChildren(node('p','作者资料入口暂不可核验：'+error.message,'form-note'));}
+}
+async function renderInitialAuthorResources(id,parent,panel,state,data,alive){
+ if(!alive())return;
+ panel.replaceChildren(node('h4','接入本次复现范围的作者原件'),node('p','先核对已登记仓库的固定版本和许可证，再让应用 AI 根据已保存的 P 范围选择原件。这里只读取资料，不执行作者代码、不批准计算。','form-note'));
+ const latest=data.latest,pending=Boolean(state.bootstrapPending);
+ const feedback=node('p',state.bootstrapError||data.disabled_reason||'','form-note');feedback.setAttribute('role','status');
+ const action=async(suffix,body)=>{
+  if(!alive()||state.bootstrapPending)return;
+  state.bootstrapPending=body.request_id;state.bootstrapError='';
+  feedback.textContent='正在核对本任务资料记录，请勿重复点击。';
+  for(const button of panel.querySelectorAll?.('button')||[])button.disabled=true;
+  try{await api(`/api/tasks/${id}/author-resources/bootstrap${suffix}`,body);}
+  catch(error){state.bootstrapError=error.message;}
+  finally{state.bootstrapPending=null;if(alive())await renderAuthorResourcePanel(id,parent,state);}
+ };
+ if(latest){
+  panel.append(node('p',`${latest.repository} · 固定版本 ${latest.commit}`,'form-note'));
+  panel.append(node('p',`清单状态 ${latest.state} · ${latest.tree_entries||0} 项；这不是源码已获取或计算就绪。`,'form-note'));
+  for(const file of latest.license_evidence?.files||[]){
+   const detail=node('details');detail.append(node('summary',`查看许可证原文：${file.path}`));
+   const pre=node('pre');pre.textContent=file.text;detail.append(pre,node('p',`SHA-256 ${file.sha256}`,'form-note'));panel.append(detail);
+  }
+ }
+ panel.append(feedback);
+ if(latest?.recoverable){
+  const reconcile=node('button',pending?'正在核对原请求…':'核对原清单请求（不重新获取）','quiet');
+  reconcile.disabled=pending||!data.enabled;reconcile.onclick=()=>action('/reconcile',{request_id:latest.request_id});panel.append(reconcile);
+ }else if(latest?.state!=='metadata_ready'){
+  const inspect=node('button',pending?'正在核对清单…':'核对固定仓库清单与许可证','quiet');inspect.disabled=pending||!data.enabled;
+  inspect.onclick=()=>action('',{request_id:crypto.randomUUID().replaceAll('-','')});panel.append(inspect);
+ }
+ if(latest?.state==='metadata_ready'&&!data.reading_approved){
+  const files=latest.license_evidence?.files||[];
+  if(!files.length)panel.append(node('p','未取得许可证原文，不能确认阅读用途或获取作者源码。请保留此候选的缺项。','form-note'));
+  const label=node('label'),check=node('input');check.type='checkbox';check.setAttribute('aria-label','确认已查看许可证，仅认可本项目读取作者原件');
+  check.disabled=pending||!files.length||!data.receipt_sha256;
+  label.append(check,node('span','已查看许可证，仅认可本项目读取作者原件；不批准执行或重新分发。'));panel.append(label);
+  const approve=node('button','确认阅读用途','quiet');approve.disabled=true;
+  check.onchange=()=>{approve.disabled=!check.checked||pending||check.disabled;};
+  approve.onclick=()=>{if(!check.checked||check.disabled)return;return action('/read-approval',{request_id:latest.request_id,receipt_sha256:data.receipt_sha256,note:'已查看界面展示的固定版本许可证原文，仅确认本项目阅读原件用途；不批准执行或重新分发。'});};panel.append(approve);
+ }
+ if(data.reading_approved){
+  panel.append(node('p','已记录本项目阅读用途确认。下一步由应用 AI 选择文件，随后在此获取和读取原件。','form-note'));
+  await renderAuthorResourceSelections(id,panel,state);
+ }
+ for(const missing of data.missing||[])panel.append(node('p',missing,'form-note'));
 }
 async function renderAuthorResourceSelections(id,parent,state){
  if(current?.id!==id||parent.dataset.task!==id)return;

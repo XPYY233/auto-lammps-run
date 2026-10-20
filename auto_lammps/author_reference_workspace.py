@@ -25,6 +25,7 @@ class AuthorReferenceWorkspace:
         self.tasks,self.papers,self.scopes=tasks,papers,scopes
         self.bindings=bindings;self.model_provider=model_provider
         self.execution=None
+        self.initial=None
         self.model_calls=model_calls
         self.current=ContextVar('author_reference_current',default=None)
         self.locks=private_directory(tasks.path.parent/'author-workspace-locks')
@@ -43,6 +44,8 @@ class AuthorReferenceWorkspace:
 
     def _resource_selection_input(self,identifier):
         """Read only pinned retained metadata; no source fetch or model on GET."""
+        if identifier not in self.bindings and self.initial is not None:
+            return self.initial.selection_input(identifier)
         binding,_,receipt,_=self._metadata(identifier)
         context,_=self.resources._binding(identifier)
         for row in reversed(self.resources._rows(identifier)):
@@ -87,6 +90,8 @@ class AuthorReferenceWorkspace:
         task=self.tasks.get(identifier)
         if task['mode']!='reproduction':raise TaskError('作者运行方案只属于论文参考任务。')
         binding=self.bindings.get(identifier)
+        if binding is None and self.initial is not None:
+            binding=self.initial.load_binding(identifier)
         if binding is None:raise TaskError('已保存的作者源码、许可与固定部署尚未连接；未发起读取或模型调用。')
         with self.tasks.transaction() as db:
             papers=[r[0] for r in db.execute('SELECT paper_id FROM paper_tasks WHERE task_id=?',(identifier,))]
@@ -200,6 +205,9 @@ class AuthorReferenceWorkspace:
         if isinstance(getattr(binding['reader'],'transport',None),SavedHPCTransport):
             from .selected_author_source_reader import SelectedAuthorSourceReader
             for report,context in self.selected_resources.completed(identifier):
+                if (binding['format']=='selected_acquisition_v1'
+                        and sha256(canonical(report))==sha256(canonical(receipt))):
+                    continue
                 source=context['source_context']
                 policy=dict(host_alias=source['host_alias'],remote_directory=source['remote_directory'],
                     reference_task_id=identifier,repository=source['repository'],commit=source['commit'],
@@ -297,7 +305,7 @@ class AuthorReferenceWorkspace:
             ready=True
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
             reason=str(error) if isinstance(error,TaskError) else '作者来源或固定部署暂未通过核验。'
-        result.update(configured=identifier in self.bindings,enabled=ready,
+        result.update(configured=identifier in self.bindings or ready,enabled=ready,
             can_prepare=ready and result['remaining_rounds']>0 and not result['pending_reconciliation'],
             disabled_reason=reason,source_reads_on_GET=False,can_submit=False,can_approve=False)
         execution=self.execution_status(identifier)

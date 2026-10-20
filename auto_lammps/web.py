@@ -22,7 +22,7 @@ from .papers import PaperStore
 from .deepseek import DeepSeekClient, ModelCalls, ModelError
 from .condition_generation import complete_condition_draft, generate_condition_draft, legacy_condition_request_status
 from .reference_generation import accounting_binding, generate_reference_draft, recover_reference_draft
-from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256
+from .manifest import ManifestError, canonical, read_file, root_descriptor, sha256, private_directory
 from .candidate_jobs import CandidateHistory, CandidateService
 from .agent_candidates import CandidateError, PlanIterationLimit
 from .results import ResultsReader, ResultUnavailable
@@ -107,6 +107,12 @@ class NewTask(Input):
 
 class Revision(Input):
     revision: StrictInt = Field(ge=1)
+
+
+class FormalBDevelopmentSupplementInput(Revision):
+    parent_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    additional_core_seconds: StrictInt = Field(gt=0,le=2**53)
+    note: str = Field(min_length=1,max_length=2000)
 
 
 class TaskLifecycleInput(Revision):
@@ -249,6 +255,11 @@ class AuthorPlanInput(Input):
 
 class AuthorResourceInput(Input):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+class AuthorReadApprovalInput(AuthorResourceInput):
+    receipt_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    note: str = Field(default='', max_length=2000)
 
 
 class AuthorSelectedResourceInput(AuthorResourceInput):
@@ -620,6 +631,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         model_provider=workbench_context,connection_provider=reference_target_connection,
         model_calls=model_client.calls if model_client else None)
     if author_workspace.tasks.path!=store.path:raise ValueError('Author workspace must share the current task store')
+    from .author_resource_bootstrap import AuthorResourceBootstrap
+    from .author_initial_workspace import InitialAuthorWorkspace
+    if isinstance(author_workspace,AuthorReferenceWorkspace):
+        author_workspace.initial=InitialAuthorWorkspace(author_workspace,
+            AuthorResourceBootstrap(store,author_workspace.papers,author_workspace.scopes,discoveries,hpc))
     if author_execution_config is not None:
         if author_workspace.execution is not None:raise ValueError('Use one author execution configuration')
         from .author_dispatch_config import load_author_dispatch
@@ -1494,7 +1510,41 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
 
     @app.get('/api/tasks/{identifier}/author-resources')
     def author_resource_status(identifier: str):
-        return author_workspace.resources.status(identifier)
+        result=author_workspace.resources.status(identifier)
+        if identifier not in author_workspace.bindings:
+            result['initial']=author_workspace.initial.status(identifier)
+        return result
+
+    @app.get('/api/tasks/{identifier}/author-resources/bootstrap')
+    def author_resource_bootstrap_status(identifier: str):
+        return author_workspace.initial.status(identifier)
+
+    @app.post('/api/tasks/{identifier}/author-resources/bootstrap')
+    def author_resource_bootstrap_inspect(identifier: str,data: AuthorResourceInput):
+        try:
+            author_workspace.initial.bootstrap.inspect(identifier,data.request_id)
+            return author_workspace.initial.status(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '固定仓库清单或许可原件核对未完成；原记录保留。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-resources/bootstrap/reconcile')
+    def author_resource_bootstrap_reconcile(identifier: str,data: AuthorResourceInput):
+        try:
+            author_workspace.initial.bootstrap.reconcile(identifier,data.request_id)
+            return author_workspace.initial.status(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '原初始资料请求尚未核对；未重新取件。'
+            return JSONResponse(dict(detail=message),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-resources/bootstrap/read-approval')
+    def author_resource_read_approval(identifier: str,data: AuthorReadApprovalInput):
+        try:
+            return author_workspace.initial.approve_reading(identifier,data.request_id,
+                data.receipt_sha256,note=data.note)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied) as error:
+            message=str(error) if isinstance(error,TaskError) else '阅读用途认可与当前许可、范围或连接不符；未授权执行。'
+            return JSONResponse(dict(detail=message),status_code=422)
 
     @app.get('/api/tasks/{identifier}/author-resources/selections')
     def author_resource_selection_status(identifier: str):
@@ -1922,8 +1972,49 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if execution_jobs is None:
             return dict(configured=False,worker_alive=False,can_start=False,job=None,message='自动执行服务尚未接入，任务已保存。')
         result=execution_jobs.status(identifier)
+        job=execution_jobs.get(identifier)
+        if job:
+            snapshot=execution_jobs.ledger.evaluation_snapshot(job['evaluation'])
+            limit=snapshot.get('task_resource_limit') or {}
+            grant=execution_jobs.ledger.formal_b_development_supplement(job['evaluation'])
+            row=execution_jobs.ledger.get(execution_jobs.current_request_id(identifier))
+            result['formal_b_retest']=dict(grant=grant,resource_limit=limit,
+                can_add_supplement=bool(limit.get('formal_b_budget') and grant is None
+                    and row['state']=='cancelled' and row['accounted'] and row['dispatch_claimed']
+                    and snapshot['dispatch_claims']==1 and snapshot['max_attempts']==2),
+                parent_request_id=row['id'],submits_HPC=False,calls_model=False)
         if workflow:result['automatic_workflow']=workflow.status(identifier)
         return result
+
+    @app.post('/api/tasks/{identifier}/execution/development-supplement')
+    @serialized_task_action
+    def execution_development_supplement(identifier: str,data: FormalBDevelopmentSupplementInput):
+        require_open_task(identifier)
+        if store.get(identifier)['revision']!=data.revision:
+            raise StaleTask('任务已更新，请刷新后核对补充授权。')
+        if execution_jobs is None:raise TaskError('自动执行服务尚未接入。')
+        job=execution_jobs.get(identifier)
+        if job is None or execution_jobs.current_request_id(identifier)!=data.parent_request_id:
+            raise TaskError('补充额度必须绑定本任务当前原取消请求。')
+        from .ledger import LedgerError
+        evidence=dict(version=1,purpose='formal_b_second_submission_development',task_id=identifier,
+            evaluation=job['evaluation'],parent_request=data.parent_request_id,
+            additional_core_seconds=data.additional_core_seconds,note=data.note,
+            preserve_original_failure=True,preserve_original_charges=True,max_HPC_submissions=2)
+        digest=sha256(canonical(evidence));path=private_directory(store.path.parent/'execution-development-approvals')/(digest+'.json')
+        try:
+            raw=canonical(evidence)
+            try:
+                fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            except FileExistsError:
+                if path.is_symlink() or path.read_bytes()!=raw:raise TaskError('原补充授权证据摘要不一致。')
+            else:
+                with os.fdopen(fd,'wb') as handle:handle.write(raw);handle.flush();os.fsync(handle.fileno())
+            grant=execution_jobs.ledger.approve_formal_b_development_supplement(job['evaluation'],data.parent_request_id,
+                additional_core_seconds=data.additional_core_seconds,approval_sha256=digest)
+        except (ValueError,OSError,LedgerError):
+            return JSONResponse(dict(detail='补充授权与原评测、取消费用或两次提交上限不符；原记录保留，未发起计算。'),status_code=409)
+        return dict(task_id=identifier,grant=grant,submits_HPC=False,calls_model=False)
 
     @app.post('/api/tasks/{identifier}/execution',status_code=202)
     @serialized_task_action

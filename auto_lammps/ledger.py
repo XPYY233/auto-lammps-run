@@ -499,6 +499,130 @@ class Ledger:
             return document
 
     @staticmethod
+    def _formal_b_development_supplement(db, evaluation, parent_request=None):
+        """Verify an additive second-submission grant without changing old charges."""
+        events = db.execute('SELECT e.request_id,e.payload FROM events e JOIN requests r '
+            'ON r.id=e.request_id WHERE r.evaluation=? AND '
+            "e.kind='formal_b_development_supplement_approved' ORDER BY e.seq", (evaluation,)).fetchall()
+        if not events:
+            return None
+        if len(events) != 1:
+            raise Conflict('Formal B development supplement has conflicting records')
+        saved = json.loads(events[0]['payload'])
+        required = {'version','purpose','campaign','evaluation','task_sha256','parent_request',
+            'prior_request_ids','baseline_charged_core_seconds','parent_actual_core_seconds',
+            'additional_core_seconds','original_formal_limit_core_seconds','formal_limit_sha256',
+            'approval_sha256','grant_sha256'}
+        if not isinstance(saved, dict) or set(saved) != required:
+            raise Conflict('Formal B development supplement record is invalid')
+        document = {k:v for k,v in saved.items() if k != 'grant_sha256'}
+        if (saved['grant_sha256'] != hashlib.sha256(_json(document).encode()).hexdigest()
+                or saved['version'] != 1 or saved['purpose'] != 'formal_b_second_submission_development'
+                or saved['evaluation'] != evaluation or events[0]['request_id'] != saved['parent_request']):
+            raise Conflict('Formal B development supplement binding changed')
+        ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+        identity = json.loads(ev['identity']) if ev else {}
+        paired = db.execute('SELECT * FROM formal_b_resource_limits WHERE evaluation=?', (evaluation,)).fetchone()
+        parent = Ledger._request(db, saved['parent_request'])
+        maximum, scope = Ledger._attempt_allowance(db, ev) if ev else (None,None)
+        if (ev is None or identity.get('role') != 'agent' or maximum != 2 or scope != 'standard'
+                or paired is None or paired['task_sha256'] != identity.get('task')
+                or saved['campaign'] != ev['campaign'] or saved['task_sha256'] != identity.get('task')
+                or saved['formal_limit_sha256'] != hashlib.sha256(_json(dict(paired)).encode()).hexdigest()
+                or saved['original_formal_limit_core_seconds'] != paired['core_seconds']
+                or parent['evaluation'] != evaluation or parent['state'] != 'cancelled'
+                or not parent['accounted'] or not parent['dispatch_claimed'] or not parent['job_id']
+                or parent['actual_core_seconds'] != saved['parent_actual_core_seconds']
+                or parent['charge_core_seconds'] != saved['parent_actual_core_seconds']):
+            raise Conflict('Formal B development supplement no longer matches its accounted parent')
+        try:
+            _digest(saved['approval_sha256']); _digest(saved['grant_sha256'])
+            _positive(saved['additional_core_seconds']); _positive(saved['parent_actual_core_seconds'])
+            _positive(saved['baseline_charged_core_seconds'])
+            ids = saved['prior_request_ids']
+            if (not isinstance(ids,list) or not ids or ids != sorted(set(ids))
+                    or saved['parent_request'] not in ids):
+                raise ValueError('Invalid prior requests')
+            prior = [Ledger._request(db, _identifier(value)) for value in ids]
+            for row in prior:
+                owner = db.execute('SELECT * FROM evaluations WHERE id=?', (row['evaluation'],)).fetchone()
+                owner_identity = json.loads(owner['identity'])
+                if (owner['campaign'] != ev['campaign'] or owner_identity['task'] != identity['task']
+                        or owner_identity['role'] != 'agent' or row['state'] in ACTIVE):
+                    raise ValueError('Invalid prior request binding')
+            if (sum(row['charge_core_seconds'] for row in prior) != saved['baseline_charged_core_seconds']
+                    or sum(row['dispatch_claimed'] for row in prior) != 1):
+                raise ValueError('Invalid prior accounting baseline')
+        except (ValueError,TypeError,KeyError) as error:
+            raise Conflict('Formal B development supplement accounting proof changed') from error
+        if parent_request is not None and parent_request != saved['parent_request']:
+            return None
+        return saved
+
+    def formal_b_development_supplement(self, evaluation, parent_request=None):
+        """Read an immutable grant; no authorization, model call or dispatch occurs."""
+        _identifier(evaluation)
+        if parent_request is not None:
+            _identifier(parent_request)
+        db = self._connect()
+        try:
+            db.execute('BEGIN')
+            return self._formal_b_development_supplement(db, evaluation, parent_request)
+        finally:
+            db.close()
+
+    def approve_formal_b_development_supplement(self, evaluation, parent_request, *,
+                                               additional_core_seconds, approval_sha256):
+        """Trusted explicit one-time budget for the original formal B's second run.
+
+        The old formal cap and any overrun remain immutable. The additive ceiling
+        starts at the verified prior charge, counts all subsequent reservations,
+        and grants neither another identity nor a third submission.
+        """
+        _identifier(evaluation); _identifier(parent_request)
+        _positive(additional_core_seconds); _digest(approval_sha256)
+        with self._transaction() as db:
+            old = self._formal_b_development_supplement(db, evaluation)
+            if old:
+                if (old['parent_request'] != parent_request
+                        or old['additional_core_seconds'] != additional_core_seconds
+                        or old['approval_sha256'] != approval_sha256):
+                    raise Conflict('Cannot replace formal B development supplement approval')
+                return old
+            ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
+            paired = db.execute('SELECT * FROM formal_b_resource_limits WHERE evaluation=?', (evaluation,)).fetchone()
+            parent = self._request(db, parent_request)
+            identity = json.loads(ev['identity']) if ev else {}
+            maximum, scope = self._attempt_allowance(db, ev) if ev else (None,None)
+            if (ev is None or paired is None or identity.get('role') != 'agent'
+                    or paired['task_sha256'] != identity.get('task') or maximum != 2 or scope != 'standard'
+                    or parent['evaluation'] != evaluation or parent['state'] != 'cancelled'
+                    or not parent['accounted'] or not parent['dispatch_claimed'] or not parent['job_id']
+                    or parent['actual_core_seconds'] is None or parent['actual_core_seconds'] <= 0
+                    or parent['charge_core_seconds'] != parent['actual_core_seconds']
+                    or approval_sha256 == paired['approval_sha256']):
+                raise Conflict('Supplement requires a separately approved accounted cancelled formal B parent')
+            rows = [row for row in self._campaign_requests(db, ev['campaign'])
+                    if json.loads(row['evaluation_identity'])['task'] == identity['task']
+                    and json.loads(row['evaluation_identity'])['role'] == 'agent']
+            submitted = [row for row in rows if row['dispatch_claimed']]
+            if (len(submitted) != 1 or submitted[0]['id'] != parent_request
+                    or any(row['state'] in ACTIVE or (row['dispatch_claimed'] and not row['accounted']) for row in rows)):
+                raise Conflict('Supplement requires only the original accounted submission and no active requests')
+            document = dict(version=1,purpose='formal_b_second_submission_development',
+                campaign=ev['campaign'],evaluation=evaluation,task_sha256=identity['task'],
+                parent_request=parent_request,prior_request_ids=sorted(row['id'] for row in rows),
+                baseline_charged_core_seconds=sum(row['charge_core_seconds'] for row in rows),
+                parent_actual_core_seconds=parent['actual_core_seconds'],
+                additional_core_seconds=additional_core_seconds,
+                original_formal_limit_core_seconds=paired['core_seconds'],
+                formal_limit_sha256=hashlib.sha256(_json(dict(paired)).encode()).hexdigest(),
+                approval_sha256=approval_sha256)
+            document['grant_sha256'] = hashlib.sha256(_json(document).encode()).hexdigest()
+            self._event(db,parent_request,'formal_b_development_supplement_approved',document)
+            return document
+
+    @staticmethod
     def _task_resource_status(db, evaluation):
         ev = db.execute('SELECT * FROM evaluations WHERE id=?', (evaluation,)).fetchone()
         limit = db.execute('SELECT * FROM task_resource_limits WHERE campaign=?', (ev['campaign'],)).fetchone()
@@ -521,9 +645,18 @@ class Ledger:
         if paired is not None:
             charged = sum(r['charge_core_seconds'] for r in rows
                 if json.loads(r['identity'])['task'] == task and json.loads(r['identity'])['role'] == 'agent')
-            limits.append(dict(limit_core_seconds=paired['core_seconds'], charged_or_reserved_core_seconds=charged,
-                remaining_core_seconds=max(0, paired['core_seconds']-charged), gpu_allowed=False,
-                approval_sha256=paired['approval_sha256'], formal_b_budget=dict(paired)))
+            supplement = Ledger._formal_b_development_supplement(db, evaluation)
+            ceiling = (supplement['baseline_charged_core_seconds'] + supplement['additional_core_seconds']
+                       if supplement else paired['core_seconds'])
+            item = dict(limit_core_seconds=ceiling, charged_or_reserved_core_seconds=charged,
+                remaining_core_seconds=max(0, ceiling-charged), gpu_allowed=False,
+                approval_sha256=supplement['approval_sha256'] if supplement else paired['approval_sha256'],
+                formal_b_budget=dict(paired))
+            if supplement:
+                item.update(development_supplement=supplement,
+                    original_formal_limit_core_seconds=paired['core_seconds'],
+                    original_formal_overrun_core_seconds=max(0,supplement['baseline_charged_core_seconds']-paired['core_seconds']))
+            limits.append(item)
         return min(limits, key=lambda item: (item['remaining_core_seconds'], item['limit_core_seconds'])) if limits else None
 
     @staticmethod

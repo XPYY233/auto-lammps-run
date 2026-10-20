@@ -117,6 +117,37 @@ class ExecutionJobTests(unittest.TestCase):
         with self.assertRaises(TaskError):self.jobs.retry(self.task,self.revision)
         with self.assertRaises(StaleTask):self.jobs.retry(self.task,self.revision-1)
 
+    def test_cancelled_retry_uses_only_granted_second_slot_and_survives_restart(self):
+        self.enqueue()
+        ledger, parent = self.f.ledger, self.f.request_id
+        ledger.begin_dispatch(parent); ledger.accepted(parent, '123', {})
+        ledger.observe(parent, '123', 'cancelled', {}); ledger.account(parent, 1, 'a'*64)
+        job_id = self.jobs.get(self.task)['id']
+        with self.f.tasks.transaction() as db:
+            self.jobs._event(db, job_id, 'attention', 'synthetic_accounted_cancellation')
+        self.assertFalse(self.jobs.status(self.task)['job']['can_retry'])
+        with self.assertRaises(TaskError): self.jobs.retry(self.task, self.revision)
+        grant = execution.grant_cancelled_development(self.f)
+        before = ledger.get(parent)
+        self.assertTrue(self.jobs.status(self.task)['job']['can_retry'])
+        first = self.jobs.retry(self.task, self.revision)
+        retry = first['job']['request_id']
+        self.assertEqual(self.jobs.retry(self.task, self.revision)['job']['request_id'], retry)
+        reopened = self.service()
+        prepared = self.f.controller.prepare(self.task, self.f.evaluation, retry_after=reopened.retry_parent(self.task))
+        self.assertEqual(prepared['row']['id'], retry)
+        self.assertEqual(ledger.get(parent), before)
+        ledger.begin_dispatch(retry); ledger.accepted(retry, '124', {})
+        ledger.observe(retry, '124', 'cancelled', {}); ledger.account(retry, 1, 'a'*64)
+        with self.f.tasks.transaction() as db:
+            self.jobs._event(db, job_id, 'attention', 'synthetic_second_cancellation')
+        status = self.jobs.status(self.task)['job']
+        self.assertFalse(status['can_retry'])
+        self.assertEqual((status['dispatch_count'], status['max_attempts']), (2, 2))
+        with self.assertRaises(TaskError): self.jobs.retry(self.task, self.revision)
+        self.assertEqual(ledger.formal_b_development_supplement(self.f.evaluation, parent), grant)
+        self.assertEqual(ledger.get(parent)['state'], 'cancelled')
+
     def test_restart_resumes_existing_queued_intent(self):
         self.f.authorize_fixture();self.enqueue();reopened=self.service()
         with self.f.transports():

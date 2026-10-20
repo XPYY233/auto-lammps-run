@@ -7,6 +7,7 @@ from . import runtime_launcher as runtime
 from .agent_candidates import CandidateError, research_inputs
 from .batch_plan import render_batch
 from .candidate_jobs import CandidateHistory
+from .failure_recovery import accounted_recovery_parent
 from .ledger import Conflict, Resources
 from .manifest import Snapshot, canonical, private_directory, read_file, root_descriptor, sha256
 from .submission import Submission
@@ -137,9 +138,9 @@ class CandidateExecution:
         base='candidate_'+job['id']+'_'+digest[:12]
         if retry_after is not None:
             previous=self.ledger.get(retry_after)
-            if (previous['evaluation']!=evaluation or previous['state']!='failed'
-                    or not previous['accounted'] or not previous['dispatch_claimed']):
-                raise Conflict('Retry requires an accounted failed submission of this evaluation')
+            if (previous['evaluation']!=evaluation or not accounted_recovery_parent(self.ledger,previous)
+                    or not previous['dispatch_claimed']):
+                raise Conflict('Retry requires an accounted failure or explicitly granted cancelled parent of this evaluation')
             if previous['manifest_sha256']!=digest and not self.tasks.plan_approved(task_id,'plan:'+digest):
                 raise Conflict('A revised retry plan requires approval of its exact snapshot')
             base += '_retry_'+previous['id']

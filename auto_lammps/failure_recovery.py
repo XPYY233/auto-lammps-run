@@ -6,6 +6,21 @@ from .manifest import canonical, sha256, Snapshot
 from . import runtime_launcher as runtime
 
 
+def accounted_recovery_parent(ledger, row):
+    """Existing failure, or the exact cancelled parent of a trusted B grant.
+
+    This is a read-only admission check, never an approval or another attempt.
+    The ledger validates the additive grant and its original accounting proof.
+    """
+    if not row['accounted']:
+        return False
+    if row['state'] == 'failed':
+        return True
+    if row['state'] != 'cancelled' or not row['dispatch_claimed']:
+        return False
+    return ledger.formal_b_development_supplement(row['evaluation'], row['id']) is not None
+
+
 def failure_context(jobs, identifier):
     """Collect only the latest accounted failure of this frozen research task."""
     from .agent_candidates import research_inputs
@@ -17,7 +32,7 @@ def failure_context(jobs, identifier):
     evaluation=jobs.ledger.evaluation_snapshot(row['evaluation'])
     if evaluation['identity']['role']!='agent' or evaluation['identity']['task']!=inputs['condition_record_sha256']:
         raise ValueError('Failure evidence must belong to this frozen research evaluation')
-    if row['state']!='failed' or not row['accounted']:return None
+    if not accounted_recovery_parent(jobs.ledger, row):return None
     receipt=jobs.controller.following.analysis.collector.fetch(row['id'])
     if receipt['state']!='collected':raise ValueError('Failure outputs have not been verified')
     folder=Path(receipt['directory'])/'payload'
@@ -36,7 +51,7 @@ def failure_context(jobs, identifier):
     if generation['input']['condition_record_sha256']!=inputs['condition_record_sha256']:
         raise ValueError('Failed proposal does not match frozen conditions')
     return dict(request_id=row['id'],job_id=row['job_id'],manifest_sha256=row['manifest_sha256'],
-        condition_sha256=inputs['condition_record_sha256'],scheduler_state='failed',logs=logs,
+        condition_sha256=inputs['condition_record_sha256'],scheduler_state=row['state'],logs=logs,
         collection_sha256=sha256(canonical(receipt['header'])),scientific_status='not_evaluated',
         failed_proposal=generation['proposal'])
 
