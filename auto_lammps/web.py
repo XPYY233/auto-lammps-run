@@ -115,6 +115,13 @@ class FormalBDevelopmentSupplementInput(Revision):
     note: str = Field(min_length=1,max_length=2000)
 
 
+class SupplierCheckedReviewInput(Revision):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    original_request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    supplier_checked: StrictBool
+    note: str = Field(min_length=1,max_length=2000)
+
+
 class TaskLifecycleInput(Revision):
     lifecycle_revision: StrictInt = Field(ge=0)
     action: str
@@ -372,6 +379,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         if candidate_service:
             from .failure_recovery import failure_context
             candidate_service.failure_context_provider=lambda identifier:failure_context(execution_jobs,identifier)
+            def candidate_resource_budget(identifier,base_resources):
+                evaluation=execution_jobs.evaluation_for(identifier)
+                if evaluation is None:return None
+                limit=execution_jobs.ledger.evaluation_snapshot(evaluation).get('task_resource_limit')
+                if limit is None:return None
+                if limit['remaining_core_seconds']<=0:
+                    raise TaskError('本任务计算额度已用完；未消耗新的方案轮次或模型调用。')
+                return dict(remaining_core_seconds=limit['remaining_core_seconds'],
+                    approval_sha256=limit['approval_sha256'],gpu_allowed=False)
+            candidate_service.resources_provider=candidate_resource_budget
             execution_jobs.on_failure=lambda identifier:candidate_service.enqueue(identifier,store.get(identifier)['revision'],
                 answers='应用自动恢复：读取本任务最新已核验失败日志，诊断并最小修改现有方案；保留全部需求。修订待批准，不自动再次提交。')
     papers = PaperStore(store) if papers is None else papers
@@ -636,6 +653,21 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     if isinstance(author_workspace,AuthorReferenceWorkspace):
         author_workspace.initial=InitialAuthorWorkspace(author_workspace,
             AuthorResourceBootstrap(store,author_workspace.papers,author_workspace.scopes,discoveries,hpc))
+        from .author_environment_inventory import AuthorEnvironmentInventory
+        def existing_author_environment(identifier):
+            if store.get(identifier)['mode']!='reproduction':raise TaskError('此环境核对属于作者参考任务。')
+            if execution_jobs is None:raise TaskError('本项目已有CPU部署尚未连接。')
+            from .hpc_transport import SavedHPCTransport
+            controller=execution_jobs.controller;transport=controller.staging.client.transport
+            if not isinstance(transport,SavedHPCTransport):raise TaskError('已有部署必须使用本项目保存的HPC连接。')
+            return dict(profile_path=str(controller.runtime_profile_path),
+                profile_sha256=controller.authorization.pins['profile_sha256'],
+                connection_revision=transport.revision,host_alias=transport.host_alias,
+                python_candidates=[dict(id='deployment_python',label='已登记CPU部署的Python解释器（待元数据核验）',path=controller.environment.python_path)],
+                required_distributions=[])
+        author_environment_inventory=AuthorEnvironmentInventory(store,hpc,
+            profile_provider=existing_author_environment,audit_directory=store.path.parent/'author-environment-inventory')
+        if execution_jobs is not None:author_workspace.environment_inventory=author_environment_inventory
     if author_execution_config is not None:
         if author_workspace.execution is not None:raise ValueError('Use one author execution configuration')
         from .author_dispatch_config import load_author_dispatch
@@ -1508,6 +1540,30 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def author_execution_follow(identifier: str,data: Input):
         return author_execution_action(lambda:author_workspace.follow_execution(identifier))
 
+    @app.get('/api/tasks/{identifier}/author-environment')
+    def author_environment_status(identifier: str):
+        value=author_environment_inventory.status(identifier)
+        value.update(configured=execution_jobs is not None and store.get(identifier)['mode']=='reproduction',
+            note='仅核对已有CPU部署与解释器字节；所需科研依赖、作者入口和子进程策略尚需核定，不授权执行。')
+        return value
+
+    def author_environment_action(identifier,data,action):
+        require_open_task(identifier)
+        if store.get(identifier)['mode']!='reproduction':raise TaskError('此环境核对只属于作者参考任务。')
+        try:
+            getattr(author_environment_inventory,action)(identifier,data.request_id)
+            return author_environment_status(identifier)
+        except (ValueError,KeyError,TypeError,OSError,runtime_denied):
+            return JSONResponse(dict(detail='现有环境元数据尚未核验；原记录保留，未运行作者代码或提交计算。'),status_code=422)
+
+    @app.post('/api/tasks/{identifier}/author-environment')
+    def author_environment_inspect(identifier: str,data: AuthorResourceInput):
+        return author_environment_action(identifier,data,'inspect')
+
+    @app.post('/api/tasks/{identifier}/author-environment/reconcile')
+    def author_environment_reconcile(identifier: str,data: AuthorResourceInput):
+        return author_environment_action(identifier,data,'reconcile')
+
     @app.get('/api/tasks/{identifier}/author-resources')
     def author_resource_status(identifier: str):
         result=author_workspace.resources.status(identifier)
@@ -2087,6 +2143,16 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         from .plan_workspace import workspace
         review['workspace'] = workspace(candidate_service, identifier)
         return review
+
+    @app.post('/api/tasks/{identifier}/plan/recheck-after-supplier-check', status_code=202)
+    @serialized_task_action
+    def plan_recheck_after_supplier_check(identifier: str,data: SupplierCheckedReviewInput):
+        require_open_task(identifier)
+        if store.paused(identifier):raise TaskError('任务已暂停，请先继续任务再重新审核原稿。')
+        if candidate_service is None:raise TaskError('方案服务尚未接入。')
+        if not data.supplier_checked:raise TaskError('必须先明确核对这笔供应商记录；未自动重发。')
+        return candidate_service.enqueue_review_after_supplier_check(identifier,data.revision,
+            request_id=data.request_id,original_request_id=data.original_request_id,note=data.note)
 
     @app.post('/api/tasks/{identifier}/plan/recheck', status_code=202)
     @serialized_task_action

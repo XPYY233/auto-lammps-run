@@ -26,6 +26,7 @@ class AuthorReferenceWorkspace:
         self.bindings=bindings;self.model_provider=model_provider
         self.execution=None
         self.initial=None
+        self.environment_inventory=None
         self.model_calls=model_calls
         self.current=ContextVar('author_reference_current',default=None)
         self.locks=private_directory(tasks.path.parent/'author-workspace-locks')
@@ -124,7 +125,76 @@ class AuthorReferenceWorkspace:
         if require_scope and (not scope or scope['state']!='recorded'):raise TaskError('请先保存并核对来自 P 的目标与共享依赖范围。')
         if self.tasks.paused(identifier) or self.tasks.lifecycle(identifier)['user_finished'] or self.tasks.lifecycle(identifier)['deleted']:
             raise TaskError('任务已暂停或结束；旧方案仍可查看。')
-        return binding,paper,receipt,scope
+        return self._environment_metadata(identifier,binding),paper,receipt,scope
+
+    def _environment_metadata(self,identifier,binding):
+        """Append current saved metadata menus; never check the remote on GET.
+
+        Reading permission, original source pins and an executable metadata
+        receipt are separate evidence. None of them authorizes an author entry
+        point or an otherwise unreviewed child process.
+        """
+        inventory=self.environment_inventory
+        if inventory is None:return binding
+        result=dict(binding,deployment=deepcopy(binding['deployment']),missing=deepcopy(binding.get('missing',[])))
+        evidence=dict(state='unavailable',execution_authorized=False,execution_ready=False,
+                      reads_remote=False,calls_model=False)
+        gaps=[]
+        try:
+            if inventory.tasks.path.resolve()!=self.tasks.path.resolve():
+                raise TaskError('环境记录不属于当前项目。')
+            latest=inventory.status(identifier)['latest']
+            if latest is None:
+                # Optional new metadata must not invalidate an already pinned
+                # author deployment or invent a new preparation prerequisite.
+                return binding
+            elif latest['state']!='metadata_ready':
+                evidence.update(state=latest['state'],request_id=latest['request_id'])
+                gaps.append('本任务最新环境核验尚未就绪；原回执保留，未自动重新检查。')
+            else:
+                menu=inventory.planner_environments(identifier,latest['request_id'])
+                current,environment_transport=inventory._context(identifier)
+                reader_transport=getattr(binding['reader'],'transport',None)
+                if not isinstance(reader_transport,SavedHPCTransport):
+                    raise TaskError('作者读取尚未绑定保存的项目连接。')
+                # The alias is only a transport label. Everything identifying
+                # the saved project/profile/revision/credential must match.
+                author_identity={key:value for key,value in reader_transport.identity.items() if key!='host_alias'}
+                environment_identity={key:value for key,value in environment_transport.identity.items() if key!='host_alias'}
+                if (reader_transport._identity()!=reader_transport.identity
+                        or environment_transport._identity()!=environment_transport.identity
+                        or author_identity!=environment_identity
+                        or menu['task_id']!=identifier or menu['metadata_status']!='metadata_ready'
+                        or menu['report_sha256']!=latest['report_sha256']
+                        or any(menu.get(key) is not False for key in ('B_input','execution_authorized',
+                            'physical_evaluation_performed','scientific_validation','execution_ready',
+                            'child_process_policy_verified','author_entrypoints_reviewed'))):
+                    raise TaskError('环境与作者保存连接或原回执不一致。')
+                deployment=result['deployment'];environments=deepcopy(deployment['environments'])
+                existing={item['id']:item for item in environments}
+                for item in menu['environments']:
+                    if item['id'] in existing:
+                        if existing[item['id']]!=item:raise TaskError('环境菜单编号冲突；原菜单保留。')
+                    else:
+                        environments.append(deepcopy(item));existing[item['id']]=item
+                candidate=dict(deployment,environments=environments)
+                _deployment(candidate)
+                result['deployment']=candidate
+                gaps.extend(menu['missing'])
+                if not current['required_distributions']:
+                    gaps.append('此次仅核验解释器元数据；作者流程所需依赖尚待核验，不能视为依赖完备。')
+                evidence.update(state='metadata_ready',request_id=latest['request_id'],
+                    report_sha256=latest['report_sha256'],
+                    checked_distributions=deepcopy(current['required_distributions']),
+                    author_dependencies_complete=False)
+        except (ValueError,KeyError,TypeError,OSError,ExecutionDenied):
+            evidence.update(state='unavailable')
+            gaps=['已有环境来源、保存连接或核验回执已变化或尚未核实；旧菜单与历史保留，未自动访问HPC。']
+        for gap in gaps:
+            if gap not in result['missing']:result['missing'].append(gap)
+            if gap not in result['deployment']['missing']:result['deployment']['missing'].append(gap)
+        result['environment_metadata']=evidence
+        return result
 
     def _source(self,identifier,binding,receipt,*,cached_only=False):
         reader=binding['reader'];legacy=binding['format']=='legacy_selected_resource_v3'

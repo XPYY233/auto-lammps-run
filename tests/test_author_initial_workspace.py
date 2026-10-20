@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from auto_lammps.author_initial_workspace import InitialAuthorWorkspace, READING_PURPOSE
+from auto_lammps.author_initial_workspace import InitialAuthorWorkspace, READING_PURPOSE, _reading_selections
 from auto_lammps.author_reference_workspace import AuthorReferenceWorkspace
-from auto_lammps.author_source_worker import MAX_LINES
+from auto_lammps.author_source_worker import MAX_LINES, MAX_TEXT_BYTES
 from auto_lammps.manifest import canonical, sha256
 from auto_lammps.reference_selected_resources import ReferenceSelectedResources
 from auto_lammps.reference_scope import ReferenceScopeService
@@ -309,6 +309,67 @@ class InitialAuthorWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(reads), 1)
         self.assertEqual(reads[0]['selections'][0]['path'], 'input.lmp')
         self.assertEqual(self.workspace.planner.history(self.task), [])
+        self.model.assert_not_called()
+
+    def test_metadata_budget_prefers_source_then_documentation_and_keeps_explicit_unread_reasons(self):
+        files = [dict(path='small.txt', size=1), dict(path='data.csv', size=200),
+                 dict(path='large.txt', size=16*1024+1), dict(path='README.md', size=1024),
+                 dict(path='script.mod', size=MAX_TEXT_BYTES-1024)]
+        selections, unread, total = _reading_selections(files)
+        self.assertEqual(total, MAX_TEXT_BYTES)
+        self.assertEqual(selections, [dict(path=path, start_line=1, end_line=MAX_LINES)
+                                     for path in ('script.mod', 'README.md')])
+        self.assertEqual({row['path']: row['reason'] for row in unread},
+            {'small.txt': 'source_text_byte_budget', 'data.csv': 'raw_data_not_source_text',
+             'large.txt': 'large_text_not_source_description'})
+
+    def test_fifty_small_source_files_read_with_templates_and_large_data_retained_unread(self):
+        extensions = ('.py', '.sh', '.in', '.mod', '.prm', '.meam', '.json')
+        data = {'source/file-'+str(index)+extensions[index % len(extensions)]: b'synthetic source\n'*120
+                for index in range(35)}
+        data['README.md'] = b'synthetic documentation\n'*500
+        data.update({'notes/small-'+str(index)+'.txt': b'synthetic note\n'*180 for index in range(14)})
+        data['data/large.txt'] = b'x'*(1500*1024)
+        data.update({'data/raw-'+str(index)+('.csv' if index % 2 else '.dat'): b'0 1\n'*5000
+                     for index in range(6)})
+        self.assertEqual(len(data), 57)
+        self.fx.repository.files.update(data)
+        self.approve()
+        receipt = self.acquire(paths=tuple(data))
+        binding = self.initial.load_binding(self.task)
+        self.assertEqual(len(binding['selections']), 50)
+        self.assertEqual(len(binding['unread_files']), 7)
+        self.assertEqual(binding['text_selection_bytes'],
+            sum(row['size'] for row in receipt['files'] if row['path'] not in binding['unread_files']))
+        self.assertLess(binding['text_selection_bytes'], MAX_TEXT_BYTES)
+        self.assertEqual(binding['text_selection_byte_limit'], MAX_TEXT_BYTES)
+        for extension in ('.mod', '.prm', '.meam'):
+            self.assertTrue(any(row['path'].endswith(extension) for row in binding['selections']))
+        reasons = {row['path']: row['reason'] for row in binding['unread_file_reasons']}
+        self.assertEqual(reasons['data/large.txt'], 'large_text_not_source_description')
+        self.assertEqual(sum(reason == 'raw_data_not_source_text' for reason in reasons.values()), 6)
+        self.assertTrue(any('TXT超过16KiB' in item for item in binding['missing']))
+        reads = []
+
+        def capture(command, **options):
+            envelope = json.loads(b''.join(options['input_chunks']))
+            reads.append(envelope['request'])
+            with patch('sys.platform', 'linux'), patch.dict(os.environ, {'SSH_CONNECTION': 'synthetic only'}):
+                report = source_worker.read_source_report(envelope['request'])
+            return dict(returncode=0, failure='', stdout=base64.b64encode(canonical(report)).decode(), stderr='')
+
+        def reader(*args, **kwargs):
+            return SelectedAuthorSourceReader(*args, **kwargs, capture=capture)
+
+        with patch('auto_lammps.author_initial_workspace.SelectedAuthorSourceReader', side_effect=reader), \
+                patch('urllib.request.build_opener', side_effect=AssertionError('No API or network')):
+            result = self.workspace.collect_sources(self.task)
+        self.assertEqual((result['files'], result['read_files']), (57, 50))
+        self.assertEqual(set(result['unread_files']), set(binding['unread_files']))
+        requested = {row['path'] for request in reads for row in request['selections']}
+        self.assertEqual(len(requested), 50)
+        self.assertFalse(requested.intersection(binding['unread_files']))
+        self.assertEqual(self.actions, ['acquire'])
         self.model.assert_not_called()
 
 

@@ -1225,6 +1225,7 @@ async function refreshPlanReview(){
   const unresolved=['unknown','reconcile_required'].includes(job.scheduler_state);
   const blocked=!executionReadable||execution.configured===false;
   renderFormalBRetestBudget(id,panel,execution.formal_b_retest);
+  renderSupplierCheckedReview(id,panel,sameDraft.supplier_check_recoveries||[]);
   recheck.disabled=!sameDraft.can_recheck||active||unresolved||blocked;
   recheck.onclick=()=>action(async()=>{
     if(recheck.disabled)return;
@@ -1267,6 +1268,30 @@ async function refreshPlanReview(){
     await refreshPlanReview();await refreshCandidate();await refreshActivity();
   });
   renderNextAction();
+}
+
+function renderSupplierCheckedReview(id,parent,options){
+ let panel=$('#supplier-checked-review');if(!panel){panel=node('section',undefined,'result-widget');panel.id='supplier-checked-review';parent.append(panel);}
+ panel.replaceChildren();panel.dataset.task=id;panel.hidden=!options.length;if(panel.hidden)return;
+ const alive=()=>current?.id===id&&panel.dataset.task===id&&!$('#task-view').hidden;
+ panel.append(node('h4','核对供应商后继续审核原稿'),node('p','旧请求的发送、用量和费用不作推定，未知记录保留。明确核对后，应用以当前 Adapter 审核同一完整原稿；这是新增审核调用，不重新生成方案或提交计算。','form-note'));
+ for(const option of options){
+  panel.append(node('p',`原审核 ${option.original_request_id} · ${option.reason||''}`,'form-note'));
+  const check=node('input');check.type='checkbox';check.setAttribute('aria-label','已核对该笔供应商记录，允许保留未知费用并继续审核同一原稿');check.checked=Boolean(option.supplier_checked);
+  const label=node('label');label.append(check,node('span','已核对该笔供应商记录，保留旧未知费用，允许继续审核同一原稿。'));
+  const button=node('button','继续审核原稿（已核对供应商）','quiet'),feedback=node('p','','form-note');feedback.setAttribute('role','status');
+  button.disabled=!option.can_recover||!check.checked;let pending=false;
+  check.onchange=()=>button.disabled=pending||!option.can_recover||!check.checked;
+  button.onclick=async()=>{
+   if(!alive()||pending||!check.checked||!option.can_recover)return;
+   pending=true;button.disabled=true;const request=option.recovery_request_id||crypto.randomUUID().replaceAll('-','');
+   try{await api(`/api/tasks/${id}/plan/recheck-after-supplier-check`,{revision:current.revision,request_id:request,
+    original_request_id:option.original_request_id,supplier_checked:true,note:'已核对这笔供应商记录，保留原未知发送/费用；允许使用当前Adapter继续审核同一完整原稿，不重写科研方案、不提交HPC。'});
+    if(alive()){await refreshCandidate();await refreshPlanReview();await refreshActivity();}}
+   catch(error){if(alive())feedback.textContent=error.message;}
+   finally{pending=false;if(alive())button.disabled=!option.can_recover||!check.checked;}
+  };panel.append(label,button,feedback);
+ }
 }
 
 function renderFormalBRetestBudget(id,parent,data){
@@ -3297,7 +3322,7 @@ async function renderAuthorResourcePanel(id,parent,state){
  try{
   const data=await api(`/api/tasks/${id}/author-resources`);if(!alive())return;
   panel.replaceChildren(node('h4','补齐固定版本作者资料'),node('p','复用当前论文已批准的仓库、版本和 HPC 连接，将原件保存到超算。不调用模型、不提交计算，原方案、范围和轮次保留。','form-note'));
-  if(data.initial){await renderInitialAuthorResources(id,parent,panel,state,data.initial,alive);return;}
+  if(data.initial){await renderInitialAuthorResources(id,parent,panel,state,data.initial,alive);if(alive())appendAuthorEnvironmentButton(id,panel,state);return;}
   const latest=data.latest;
   if(latest){
    panel.append(node('p',`${latest.repository} · ${latest.commit} · 已获取 ${latest.files.length} 个文件；原件${latest.source_complete?'完整':'尚未完整'}。`,'form-note'));
@@ -3350,7 +3375,33 @@ async function renderAuthorResourcePanel(id,parent,state){
    const read=state.resourceRead;panel.append(node('p',`已读 ${read.read_files}/${read.files} 个文件，保留 ${read.source_fragments} 个来源片段；未调用模型或新增计算。`,'form-note'));
    for(const [label,names] of [['未读文件（未冒称已检查）',read.unread_files],['截断文件（仅保留有界片段）',read.truncated_files]])if(names?.length){const detail=node('details');detail.append(node('summary',label));for(const name of names)detail.append(node('p',name));panel.append(detail);}
   }
+  appendAuthorEnvironmentButton(id,panel,state);
  }catch(error){if(alive())panel.replaceChildren(node('p','作者资料入口暂不可核验：'+error.message,'form-note'));}
+}
+function appendAuthorEnvironmentButton(id,parent,state){
+ const button=node('button','核对已有 CPU/Python 环境（不运行计算）','quiet');
+ button.onclick=()=>renderAuthorEnvironment(id,parent,state);parent.append(button);
+}
+async function renderAuthorEnvironment(id,parent,state){
+ if(current?.id!==id||parent.dataset.task!==id)return;
+ let panel=$('#author-environment-panel');if(!panel){panel=node('section',undefined,'result-widget');panel.id='author-environment-panel';parent.append(panel);}panel.dataset.task=id;
+ const alive=()=>current?.id===id&&parent.dataset.task===id&&panel.dataset.task===id&&!$('#task-view').hidden;
+ try{
+  const data=await api(`/api/tasks/${id}/author-environment`);if(!alive())return;
+  panel.replaceChildren(node('h4','复用已有CPU部署：核对解释器元数据'),node('p',data.note,'form-note'));
+  const latest=data.latest,feedback=node('p',state.environmentError||latest?.state||'尚未核对。','form-note');feedback.setAttribute('role','status');panel.append(feedback);
+  if(latest?.report){for(const item of latest.report.python_candidates||[])panel.append(node('p',`${item.label} · ${item.status} · SHA-256 ${item.sha256||'待核验'}`,'form-note'));
+   const detail=node('details');detail.append(node('summary','查看已有部署文件、Python版本、元数据与明确缺项'));const pre=node('pre');pre.textContent=JSON.stringify(latest.report,null,2);detail.append(pre);panel.append(detail);}
+  const unknown=latest?.state==='unknown';
+  const inspect=node('button',state.environmentPending?'正在核对环境元数据…':unknown?'核对原环境检查请求':'核对已有CPU部署与Python元数据','quiet');inspect.disabled=Boolean(state.environmentPending)||!data.configured||latest?.state==='metadata_ready';
+  inspect.onclick=async()=>{
+   if(!alive()||state.environmentPending)return;
+   state.environmentPending=unknown?latest.request_id:crypto.randomUUID().replaceAll('-','');inspect.disabled=true;feedback.textContent='仅核对已登记环境元数据，不安装、不运行作者代码或物理计算。';
+   try{await api(`/api/tasks/${id}/author-environment${unknown?'/reconcile':''}`,{request_id:state.environmentPending});state.environmentError='';}
+   catch(error){state.environmentError=error.message;}
+   finally{state.environmentPending=null;if(alive())await renderAuthorEnvironment(id,parent,state);}
+  };panel.append(inspect);
+ }catch(error){if(alive())panel.replaceChildren(node('p','环境元数据入口暂不可用：'+error.message,'form-note'));}
 }
 async function renderInitialAuthorResources(id,parent,panel,state,data,alive){
  if(!alive())return;

@@ -11,7 +11,7 @@ import json
 from pathlib import PurePosixPath
 import re
 
-from .author_source_worker import MAX_FILE_BYTES, MAX_LINES
+from .author_source_worker import MAX_FILE_BYTES, MAX_LINES, MAX_TEXT_BYTES
 from .hpc_transport import SavedHPCTransport
 from .manifest import canonical, sha256
 from .remote_resources import tool_bundle
@@ -23,12 +23,59 @@ from .tasks import TaskError, task_id, text
 FLAGS = dict(scope='reference_only', B_input=False, execution_authorized=False,
              physical_evaluation_performed=False, scientific_validation=False)
 READING_PURPOSE = 'read_author_originals_for_this_research_project'
-_TEXT_EXTENSIONS = {'.py', '.sh', '.in', '.lmp', '.lammps', '.md', '.txt',
-                    '.json', '.yaml', '.yml', '.toml', '.cfg'}
+_SOURCE_EXTENSIONS = {'.py', '.sh', '.in', '.lmp', '.lammps', '.mod', '.prm', '.meam',
+                      '.json', '.yaml', '.yml', '.toml', '.cfg', '.c', '.h', '.cc',
+                      '.cpp', '.hpp', '.f', '.f90', '.f95'}
+_DOCUMENT_EXTENSIONS = {'.md', '.rst'}
 _TEXT_NAMES = {'readme', 'license', 'copying', 'makefile'}
+_SMALL_TEXT_BYTES = 16 * 1024
+_UNREAD_REASONS = {
+    'raw_data_not_source_text': '原始数据保留，未作为作者源码或说明文本读取',
+    'large_text_not_source_description': 'TXT超过16KiB小文本上限，原文件保留未读',
+    'unsupported_source_text_format': '未识别为可读取的源码或说明文本格式，原文件保留未读',
+    'source_text_byte_budget': '超过本套源码文本256KiB总字节预算，原文件保留未读',
+    'reader_file_size_limit': '超过既有单文件读取上限，原文件保留未读',
+}
 _MISSING = ['许可证使用范围尚未核验；本次仅确认本项目研究用途的原件阅读。',
             '作者执行环境、可执行程序和执行许可尚未核验。',
             '所选原件完整不代表整个仓库、势函数配套或科学适用性已核验。']
+
+
+def _reading_selections(files):
+    """Plan bounded text windows using retained metadata, never file contents.
+
+    Count whole-file bytes conservatively before applying the existing 400-line
+    window. Data files remain in the acquisition receipt, explicitly unread.
+    """
+    candidates, omitted = [], {}
+    for row in files:
+        path = PurePosixPath(row['path'])
+        suffix = path.suffix.lower()
+        if suffix in _SOURCE_EXTENSIONS:
+            priority = 0
+        elif suffix in _DOCUMENT_EXTENSIONS or path.name.lower() in _TEXT_NAMES:
+            priority = 1
+        elif suffix == '.txt' and row['size'] <= _SMALL_TEXT_BYTES:
+            priority = 2
+        else:
+            reason = ('large_text_not_source_description' if suffix == '.txt' else
+                      'raw_data_not_source_text' if suffix in {'.csv', '.dat', '.data', '.dump', '.lammpstrj', '.xyz'}
+                      else 'unsupported_source_text_format')
+            omitted[row['path']] = reason
+            continue
+        candidates.append((priority, row['path'], row))
+    selections, total = [], 0
+    for _, _, row in sorted(candidates):
+        if row['size'] > MAX_FILE_BYTES:
+            omitted[row['path']] = 'reader_file_size_limit'
+        elif total + row['size'] > MAX_TEXT_BYTES:
+            omitted[row['path']] = 'source_text_byte_budget'
+        else:
+            total += row['size']
+            selections.append(dict(path=row['path'], start_line=1, end_line=MAX_LINES))
+    unread = [dict(path=row['path'], size=row['size'], reason=omitted[row['path']])
+              for row in files if row['path'] in omitted]
+    return selections, unread, total
 
 
 class InitialAuthorWorkspace:
@@ -213,16 +260,16 @@ class InitialAuthorWorkspace:
             selection_request=context['request'], tree_inventory=context['inventory'],
             original_receipt=context['acquisition_receipt'], transport=transport)
         reader.capability(receipt, purpose='author_reference')
-        selections = [dict(path=row['path'], start_line=1, end_line=MAX_LINES) for row in receipt['files']
-            if row['size'] <= MAX_FILE_BYTES and (PurePosixPath(row['path']).suffix.lower() in _TEXT_EXTENSIONS
-                or PurePosixPath(row['path']).name.lower() in _TEXT_NAMES)]
+        selections, unread_reasons, text_bytes = _reading_selections(receipt['files'])
         if not selections:
             raise TaskError('所选原件已保存，但没有可由现有有界文本工具读取的文件；原二进制文件保留未读。')
-        selected_paths = {row['path'] for row in selections}
-        unread = [row['path'] for row in receipt['files'] if row['path'] not in selected_paths]
+        unread = [row['path'] for row in unread_reasons]
+        reading_gaps = [_UNREAD_REASONS[reason]+'：'+', '.join(row['path'] for row in unread_reasons
+                        if row['reason'] == reason)
+                        for reason in _UNREAD_REASONS if any(row['reason'] == reason for row in unread_reasons)]
         missing = list(dict.fromkeys(_MISSING + metadata['catalog_association'].get('missing', [])
             + context['selection_report'].get('missing', [])
-            + (['以下原件未作为文本读取：'+', '.join(unread)] if unread else [])))
+            + reading_gaps))
         association = dict(scope='reference_only', paper_id=metadata['paper_id'], paper=deepcopy(metadata['paper']),
             repository=receipt['repository'], commit=receipt['commit'], resource_receipt_sha256=digest,
             reading_approved=True, execution_authorized=False)
@@ -246,7 +293,8 @@ class InitialAuthorWorkspace:
             verify_license=verify, receipt_file_sha256=digest,
             receipt_proof=dict(kind='canonical_selected_receipt', operation_id=context['operation_id'],
                                sha256=digest, disk_artifact=False),
-            selections=selections, unread_files=unread, invocation_paths=[],
+            selections=selections, unread_files=unread, unread_file_reasons=unread_reasons,
+            text_selection_bytes=text_bytes, text_selection_byte_limit=MAX_TEXT_BYTES, invocation_paths=[],
             deployment=dict(environments=[], analysis_capabilities=[], resources=dict(gpu_allowed=False),
                             missing=deepcopy(missing)), missing=missing)
 

@@ -657,7 +657,27 @@ def output_prefix(layout):
     return '/output/' if layout == 'isolated' else ''
 
 
-def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated', answers=None, guidance=None, packages=(), initial_geometry=None):
+def validate_execution_budget(resources, budget):
+    """Only answer-free, controller-approved CPU limits enter a model request."""
+    if budget is None:
+        return None
+    keys = {'remaining_core_seconds','reserved_core_seconds','cores','wall_seconds',
+            'gpu_allowed','approval_sha256'}
+    if (not isinstance(resources,Resources) or not isinstance(budget,dict) or set(budget) != keys
+            or budget['gpu_allowed'] is not False
+            or any(type(budget[name]) is not int or budget[name] <= 0 for name in
+                   ('remaining_core_seconds','reserved_core_seconds','cores','wall_seconds'))
+            or not isinstance(budget['approval_sha256'],str)
+            or not re.fullmatch('[a-f0-9]{64}',budget['approval_sha256'])
+            or budget['cores'] != resources.cores or budget['wall_seconds'] != resources.wall_seconds
+            or budget['reserved_core_seconds'] != resources.core_seconds
+            or resources.wall_seconds % 60
+            or resources.core_seconds > budget['remaining_core_seconds']):
+        raise CandidateError('Approved task execution budget is invalid or differs from candidate resources')
+    return dict(budget)
+
+
+def candidate_messages(task_text, *, units, resource_summaries, max_atoms, output_layout='isolated', answers=None, guidance=None, packages=(), initial_geometry=None, execution_resources=None, execution_budget=None):
     from .resource_limits import description as resource_policy_description
     prefix = output_prefix(output_layout)
     _text(task_text, 24000)
@@ -856,6 +876,17 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
                                    'site_thermodynamics_contract':SITE_THERMODYNAMICS_GUIDE},
                'configured_engine_packages':sorted(packages),
                'answers': answers or '', 'guidance': list(guidance or [])}
+    if execution_budget is not None:
+        budget = validate_execution_budget(execution_resources,execution_budget)
+        instruction += ('\nThe application-supplied execution_resources and execution_budget are the actual '
+            'binding limits for THIS task. They are stricter than the general campaign maximum above. '
+            'CPU only; no GPU. The wall time is rounded down to whole minutes without changing core count. '
+            'Keep the entire frozen scientific scope, conditions and requested outputs. Use these limits '
+            'when planning and minimally revising the retained proposal. Do not enlarge the allowance, '
+            'silently reduce sampling, invent runtime estimates, or claim the budget proves feasibility. '
+            'If the full requested calculation cannot be supported within the supplied limits, explain '
+            'the unresolved issue through the existing clarification contract.')
+        context.update(execution_resources=vars(execution_resources),execution_budget=budget)
     if initial_geometry is not None:
         context['initial_geometry'] = initial_geometry
     return [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': canonical(context).decode()}]
@@ -904,6 +935,11 @@ def review_candidate_plan(client, adapter, *, proposal, task_text, units, compat
         resource_metadata=canonical(compatible).decode(),
         geometry_checks=canonical(geometry_checks).decode(),
         analysis_plan=canonical(proposal['analysis'].get('plan')).decode())
+    execution_budget = context.get('execution_budget')
+    if execution_budget is not None:
+        validate_execution_budget(Resources(**context['resources']),execution_budget)
+        review_sources['resource_metadata'] = canonical(dict(potential_resources=compatible,
+            execution_resources=context['resources'],execution_budget=execution_budget)).decode()
     review_id=sha256(canonical({'base':request_id,'review':attempt,'proposal':proposal,
         'protocol_version':PLAN_REVIEW_VERSION, 'thinking':True, 'reasoning_effort':'low',
         'max_output_tokens':client.calls.config.max_output_tokens}))[:32]
@@ -1000,6 +1036,11 @@ def review_candidate_plan(client, adapter, *, proposal, task_text, units, compat
                 'conventional bcc basis [0,0,0],[0.5,0.5,0.5]; one-based LAMMPS atom IDs')}).decode()}]
     review_evidence = {**adapter_evidence, 'proposal': proposal,
                        'requirements': required, 'artifact_sources': review_sources}
+    if execution_budget is not None:
+        review_messages[0]['content'] += (' The execution_budget in resource_metadata is the binding '
+            'approved CPU-only limit for this task. Check the supplied actual reserved resources; '
+            'a general campaign ceiling or older resource suggestion cannot enlarge this allowance. '
+            'Do not infer runtime feasibility from an approved reservation or change the frozen scientific scope.')
     try:
         review_messages, _ = prepare_stage_messages('candidate_review', review_messages, review_evidence)
     except ScientificAdapterError as error:
@@ -1055,7 +1096,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                              before_proposal_request=None, proposal_round_budget=None, output_layout='isolated',
                              answers=None, guidance=None, require_analysis_plan=False, review_plan=False, failure_context=None,
                              initial_geometry=None, review_recovery=None,
-                             before_review_request=None, on_review=None):
+                             before_review_request=None, on_review=None, execution_budget=None):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -1064,6 +1105,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     """
     if not isinstance(resources, Resources) or resources.storage_bytes <= 262144:
         raise CandidateError('Explicit resources and space for controller receipts are required')
+    execution_budget = validate_execution_budget(resources,execution_budget)
     if condition_record_sha256 is not None and (not isinstance(condition_record_sha256, str)
                                                 or not re.fullmatch('[a-f0-9]{64}', condition_record_sha256)):
         raise CandidateError('Invalid frozen condition record digest')
@@ -1084,10 +1126,13 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         runtime = geometry_runtime()
     messages = candidate_messages(task_text, units=units, resource_summaries=compatible, max_atoms=max_atoms,
                                   output_layout=output_layout, answers=answers, guidance=guidance, packages=adapter.packages,
-                                  initial_geometry=initial_geometry)
+                                  initial_geometry=initial_geometry,execution_resources=resources,
+                                  execution_budget=execution_budget)
     from .scientific_adapters import ScientificAdapterError, prepare_stage_messages, validate_prepared_messages
     adapter_evidence = {'task_text': task_text, 'units': units, 'resources': compatible, 'max_atoms': max_atoms,
                         'initial_geometry': initial_geometry, 'answers': answers or '', 'guidance': list(guidance or [])}
+    if execution_budget is not None:
+        adapter_evidence.update(execution_resources=vars(resources),execution_budget=execution_budget)
     try:
         messages, _ = prepare_stage_messages('candidate_proposal', messages, adapter_evidence)
     except ScientificAdapterError as error:
@@ -1111,6 +1156,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'requested_model': getattr(client,'model',client.calls.config.model),
                'thinking': getattr(client, 'thinking', False),
                'condition_record_sha256': condition_record_sha256}
+    if execution_budget is not None:
+        context['execution_budget'] = execution_budget
     if initial_geometry is not None:
         context['initial_geometry'] = initial_geometry
     if output_layout != 'isolated':
@@ -1176,7 +1223,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     receipts=[completion['receipt']]
     if failure_context is not None:
         from .failure_recovery import diagnose
-        recovery=diagnose(client,failure_context,proposal,on_stage=on_stage)
+        failure_evidence = failure_context
+        if execution_budget is not None:
+            failure_evidence = {**failure_context,'execution_resources':vars(resources),
+                                'execution_budget':execution_budget}
+        recovery=diagnose(client,failure_evidence,proposal,on_stage=on_stage)
         receipts.append(recovery['receipt'])
         # Keep the hashed generation context immutable: messages is also stored
         # in context and in-place append would change its identity afterwards.
@@ -1384,7 +1435,7 @@ def research_inputs(tasks, identifier, revision):
     return result
 
 
-def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, previous_proposal=None, on_proposal=None, before_proposal_request=None, proposal_round_budget=None, output_layout='isolated', answers=None, guidance=None, review_plan=False, failure_context=None, initial_geometry=None, review_recovery=None, before_review_request=None, on_review=None):
+def generate_research_candidate(client, tasks, identifier, revision, adapter, *, resources, store, max_atoms=100000, on_stage=None, previous_proposal=None, on_proposal=None, before_proposal_request=None, proposal_round_budget=None, output_layout='isolated', answers=None, guidance=None, review_plan=False, failure_context=None, initial_geometry=None, review_recovery=None, before_review_request=None, on_review=None, execution_budget=None):
     """Research bridge; reference tasks still need the separate release/isolation gate."""
     inputs = research_inputs(tasks, identifier, revision)
     if initial_geometry is not None:
@@ -1399,4 +1450,5 @@ def generate_research_candidate(client, tasks, identifier, revision, adapter, *,
                                     previous_proposal=previous_proposal,on_proposal=on_proposal,
                                     before_proposal_request=before_proposal_request,proposal_round_budget=proposal_round_budget,
                                     failure_context=failure_context, review_recovery=review_recovery,
-                                    before_review_request=before_review_request, on_review=on_review)
+                                    before_review_request=before_review_request, on_review=on_review,
+                                    execution_budget=execution_budget)
