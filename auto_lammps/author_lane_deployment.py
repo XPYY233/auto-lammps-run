@@ -80,7 +80,8 @@ def _remote_install(request, *, action='install', _test_host=False):
                 if create:
                     try: os.mkdir(part, mode=0o700, dir_fd=fd)
                     except FileExistsError: pass
-                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                access = os.O_RDONLY if index == len(path.parts) - 2 else getattr(os, 'O_PATH', os.O_RDONLY)
+                next_fd = os.open(part, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd); fd = next_fd
                 if private and index == len(path.parts) - 2:
                     info = os.fstat(fd)
@@ -624,10 +625,9 @@ class AuthorLaneDeployment:
         latest=inventory.status(identifier)['latest']
         if latest is None:
             inventory.inspect(identifier,sha256(('accounted-inputs:'+identifier+':'+request).encode())[:32])
-        elif latest['state']=='unknown':
-            inventory.reconcile(identifier,latest['request_id'])
-        elif latest['state']=='not_started':
-            inventory.inspect(identifier,sha256(('accounted-inputs:'+identifier+':'+request+':'+latest['request_id']).encode())[:32])
+        else:
+            if latest['state']=='unknown':latest=inventory.reconcile(identifier,latest['request_id'])
+            if latest['state']=='not_started':inventory.inspect(identifier,latest['request_id'])
         inventory.planner_inputs(identifier)
         self.policy.approved(identifier)
         latest_lane=self.status(identifier)['latest']

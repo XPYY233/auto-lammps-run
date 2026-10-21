@@ -2,6 +2,7 @@
 import base64
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -74,9 +75,58 @@ class AuthorReferenceInputTests(unittest.TestCase):
         self.capture.side_effect=self.transfer
         self.assertEqual(self.service.reconcile(self.task,'d'*32)['state'],'not_started')
         self.assertFalse((self.root/'Auto-LAMMPS-Reference-Input-Audit').exists())
+        saved=self.service._stored(self.task,'d'*32)[0]['context']
+        self.assertEqual(self.inspect()['state'],'metadata_ready')
+        self.assertEqual(self.service._stored(self.task,'d'*32)[0]['context'],saved)
+        self.assertEqual(len(self.service.status(self.task)['history']),1)
+        self.assertEqual([row['action'] for row in self.network],['reconcile','inspect'])
         receipt=dict(kind='author_source',task_id=self.task,request_id='a'*32,job_id='1',manifest_sha256='b'*64,
             receipt_sha256='c'*64,binding_sha256='d'*64,root=str(self.run),files=[])
         with self.assertRaises(TaskError):validate_reference_inputs([receipt],self.task)
+
+    def test_search_only_ancestor_requires_no_directory_listing_but_final_root_remains_private(self):
+        real_open=os.open;search_flag=1<<30;ancestor=self.root.parts[1];visited=[]
+        def open_search(path,flags,*args,**kwargs):
+            if kwargs.get('dir_fd') is not None and str(path)==ancestor and flags&os.O_DIRECTORY:
+                visited.append(flags)
+                if not flags&search_flag:raise PermissionError('synthetic search-only ancestor')
+            return real_open(path,flags&~search_flag,*args,**kwargs)
+        with patch.object(os,'O_PATH',search_flag,create=True),patch('os.open',side_effect=open_search):
+            self.assertEqual(self.inspect()['state'],'metadata_ready')
+        self.assertTrue(visited);self.assertTrue(all(flags&os.O_NOFOLLOW for flags in visited))
+        self.run.chmod(0o755)
+        self.capture.side_effect=self.transfer
+        with self.assertRaisesRegex(ValueError,'private_reference_root'):
+            context,_=self.service._context(self.task,'e'*32)
+            _remote_inputs(context['request'],_test_host=True)
+
+    def test_repaired_observer_preserves_original_intent_and_rejects_changed_run_binding(self):
+        self.capture.side_effect=OSError('initial metadata transport failure')
+        self.assertEqual(self.inspect()['state'],'unknown')
+        original=self.service._stored(self.task,'d'*32)[0]['context']
+        self.capture.side_effect=self.transfer
+        repaired=REMOTE_CODE+'\n# synthetic metadata observer repair\n'
+        with patch('auto_lammps.author_reference_inputs.REMOTE_CODE',repaired):
+            absent=self.service.reconcile(self.task,'d'*32)
+            self.assertEqual(absent['state'],'not_started')
+            result=self.inspect();self.assertEqual(result['state'],'metadata_ready')
+            event=result['events'][-1]
+            self.assertEqual(event['request_worker_sha256'],original['request']['worker_sha256'])
+            self.assertEqual(event['observer_worker_sha256'],sha256(repaired.encode()))
+            self.assertNotEqual(event['observer_worker_sha256'],event['request_worker_sha256'])
+            self.assertEqual(self.service.planner_inputs(self.task),[result['input_receipt']])
+            self.binding['root']='/changed/accounted/root'
+            with self.assertRaisesRegex(TaskError,'来源'):self.service.planner_inputs(self.task)
+        self.assertEqual(self.service._stored(self.task,'d'*32)[0]['context'],original)
+
+    def test_private_transport_diagnostics_are_retained_without_browser_exception_text(self):
+        self.capture.side_effect=OSError('SYNTHETIC PRIVATE permission denied')
+        result=self.inspect();self.assertEqual(result['state'],'unknown')
+        self.assertNotIn('PRIVATE',json.dumps(result))
+        capture=json.loads((self.service.audit/('d'*32+'-1-transport.json')).read_bytes())
+        self.assertEqual(capture['exception_type'],'OSError')
+        self.assertIn('permission denied',capture['exception_message'])
+        self.assertEqual(result['events'][0]['transport_capture_sha256'],sha256(canonical(capture)))
 
 
 if __name__=='__main__':unittest.main()

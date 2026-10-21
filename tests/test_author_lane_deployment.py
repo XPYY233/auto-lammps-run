@@ -2,6 +2,7 @@
 import base64
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import shlex
 import sqlite3
@@ -120,6 +121,30 @@ class AuthorLaneDeploymentTests(unittest.TestCase):
         self.assertEqual(self.service.install(self.task,'1'*32),result);self.assertEqual(len(self.network),1)
         self.assertEqual([row['kind'] for row in result['events']],
             ['metadata_install_approved','metadata_install_intent','metadata_install_receipt'])
+
+    def test_metadata_install_walks_search_only_ancestors_without_listing_them(self):
+        self.approve();real_open=os.open;search_flag=1<<30;ancestor=self.root.parts[1];visited=[]
+        def open_search(path,flags,*args,**kwargs):
+            if kwargs.get('dir_fd') is not None and str(path)==ancestor and flags&os.O_DIRECTORY:
+                visited.append(flags)
+                if not flags&search_flag:raise PermissionError('synthetic search-only ancestor')
+            return real_open(path,flags&~search_flag,*args,**kwargs)
+        with patch.object(os,'O_PATH',search_flag,create=True),patch('os.open',side_effect=open_search):
+            self.assertEqual(self.service.install(self.task,'1'*32)['state'],'metadata_installed')
+        self.assertTrue(visited);self.assertTrue(all(flags&os.O_NOFOLLOW for flags in visited))
+
+    def test_normal_resource_action_recovers_unknown_then_resumes_original_metadata_request(self):
+        inventory=Mock();original='d'*32
+        inventory.status.return_value=dict(latest=dict(state='unknown',request_id=original))
+        inventory.reconcile.return_value=dict(state='not_started',request_id=original)
+        self.service.policy=SimpleNamespace(inputs=inventory,approved=Mock())
+        with patch.object(self.workspace.scopes,'get_author_validation',return_value=dict(
+                state='recorded',can_prepare_A_plan=True)),patch.object(self.service,'status',return_value=dict(
+                latest=dict(state='metadata_installed',candidate=dict(source_review_sha256='f'*64)))),patch.object(self.service,'activate'):
+            result=self.service.ensure_resources(self.task,'b'*32)
+        inventory.reconcile.assert_called_once_with(self.task,original)
+        inventory.inspect.assert_called_once_with(self.task,original)
+        self.assertEqual(result['state'],'resources_ready');self.capture.assert_not_called()
 
     def test_current_helper_review_must_be_real_and_cannot_borrow_old_B_hashes(self):
         service=self.make(False);candidate=service.preview(self.task,'2'*32)

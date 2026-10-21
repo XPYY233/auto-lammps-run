@@ -11,9 +11,11 @@ import fcntl
 import json
 import os
 from pathlib import Path, PurePosixPath
+import traceback
 
 from .author_reference_plan import AuthorReferencePlan, author_source_inputs, _deployment
 from .author_source_reader import AuthorSourceReader
+from .deepseek import ModelError
 from .hpc_transport import SavedHPCTransport
 from .manifest import canonical, private_directory, sha256
 from .runtime_launcher import ExecutionDenied, read_regular
@@ -473,6 +475,17 @@ class AuthorReferenceWorkspace:
             finally:self.current.reset(token)
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
             if isinstance(error,TaskError):raise
+            # Preserve bounded diagnostics privately; opaque preflight failures
+            # otherwise force another blind retry without a model request.
+            trace=private_directory(self.tasks.path.parent/'author-workspace-errors')
+            stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+            path=trace/(request+'-'+stamp+'.json')
+            trace_fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+            with os.fdopen(trace_fd,'wb') as stream:
+                stream.write(canonical(dict(task_id=identifier,request_id=request,
+                    exception=type(error).__name__,traceback=traceback.format_exc()[-16384:])))
+            if isinstance(error,ModelError) and str(error)=='input_too_large':
+                raise TaskError('完整作者来源、前稿与反馈超过模型输入容量；未截断、未发送。应用需调整重复输入后恢复同一任务。') from None
             raise TaskError('固定作者来源、读取选择或部署配置未通过核验；未自动重发，已有记录保留。') from None
         finally:os.close(fd)
 

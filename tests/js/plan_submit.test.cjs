@@ -6,7 +6,7 @@ function setup(job,review={state:'prepared',approved:true,files:[]},rich=false){
  const elements=new Map(),calls=[];
  const el=(tag,text,cls)=>({tag,hidden:false,disabled:false,dataset:{},className:cls||'',classList:{add(){}},textContent:text||'',innerHTML:'',value:'',children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},focus(){}});
  const c=vm.createContext({current:{id:'task',revision:7},executionState:null,requestStates:{running:'运行中'},schema:{automatic_workflow:{configured:true}},node:el,
- window:{markdownit:MarkdownIt},document:{createElement:el},crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
+ window:{markdownit:MarkdownIt},document:{createElement:el,createTextNode:text=>el('#text',text)},crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
  $:s=>{if(!elements.has(s))elements.set(s,el());return elements.get(s)},
  api:async(path,body)=>{calls.push({path,body});if(path.endsWith('/plan'))return review;if(path.endsWith('/execution')&&!body)return {job};if(path==='/api/tasks/task')return {id:'task',revision:7};return {};},
  notice:()=>{},action:fn=>fn(),afterChange:async()=>{},refreshCandidate:async()=>{},refreshActivity:async()=>{},renderNextAction:()=>{}});
@@ -16,6 +16,18 @@ function setup(job,review={state:'prepared',approved:true,files:[]},rich=false){
  return {c,elements,calls};
 }
 test('approved fresh plan dispatches through execution without restarting generation',async()=>{const {c,elements,calls}=setup(null);await c.refreshPlanReview();await elements.get('#plan-approve').onclick();assert.deepEqual(calls.filter(x=>x.body).map(x=>x.path),['/api/tasks/task/execution']);});
+test('saved original requires explicit unresolved-review acceptance and never regenerates',async()=>{
+ const review={state:'clarification',approved:false,files:[],workspace:{versions:[],current:{version:1,historical:true,files:[],structure:{},additional_structures:[],resources:{},analysis:{},potential:{}}},
+  saved_plan_options:[{proposal_round:5,snapshot_sha256:'b'.repeat(64),review_feedback:{report:{issues:['Complete unresolved sampling issue.'],summary:'Original rejection.'}}}]};
+ const {c,elements,calls}=setup({state:'attention',scheduler_state:'cancelled',job_id:'123',can_retry_after_approval:true},review);
+ await c.refreshPlanReview();const all=e=>[e,...e.children.flatMap(all)];
+ const controls=all(elements.get('#plan-version-list')),button=controls.find(e=>e.tag==='button'),check=controls.find(e=>e.type==='checkbox');
+ assert.ok(controls.some(e=>e.textContent==='未解决审核问题：Complete unresolved sampling issue.'));
+ assert.equal(button.disabled,true);check.checked=true;check.onchange();assert.equal(button.disabled,false);
+ await button.onclick();const writes=calls.filter(x=>x.body);
+ assert.deepEqual(writes.map(x=>x.path),['/api/tasks/task/plan/select-saved']);
+ assert.equal(writes[0].body.accept_unresolved_review,true);assert.equal(writes[0].body.snapshot_sha256,'b'.repeat(64));
+});
 test('a granted cancelled parent can approve the new plan and use only its second execution endpoint',async()=>{
  const {c,elements,calls}=setup({scheduler_state:'cancelled',state:'attention',accounted:true,
   job_id:'123',dispatch_count:1,max_attempts:2,can_retry:false,can_retry_after_approval:true},

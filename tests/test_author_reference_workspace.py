@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from auto_lammps.author_reference_workspace import AuthorReferenceWorkspace
+from auto_lammps.deepseek import ModelError
 from auto_lammps.manifest import canonical,sha256
 from auto_lammps.tasks import TaskError
 from auto_lammps.web import create_app
@@ -106,6 +107,17 @@ class AuthorWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.fx.reader.calls,1)
         again=self.post('5'*32);self.assertEqual(again.status_code,422,again.text)
         self.assertEqual(self.fx.reader.calls,1);self.assertEqual(self.fx.client.transport.call_count,1)
+
+    def test_model_input_preflight_reports_capacity_and_keeps_private_diagnostics(self):
+        self.workspace.planner.prepare=Mock(side_effect=ModelError('input_too_large'))
+        result=self.post()
+        self.assertEqual(result.status_code,422,result.text)
+        self.assertIn('超过模型输入容量',result.json()['detail'])
+        self.assertFalse(result.json()['request_recorded'])
+        self.assertEqual(self.fx.sent,[])
+        traces=list((self.fx.tasks.path.parent/'author-workspace-errors').glob('*.json'))
+        self.assertEqual(len(traces),1)
+        self.assertIn('input_too_large',traces[0].read_text())
 
     def test_browser_cannot_supply_scientific_source_or_allow_dispatch(self):
         for payload in (dict(source='private replacement'),dict(deployment={}),dict(execution_authorized=True)):

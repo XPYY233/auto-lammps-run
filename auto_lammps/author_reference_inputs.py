@@ -56,8 +56,12 @@ def _remote_inputs(request, *, action='inspect', _test_host=False):
             raise ValueError('invalid_reference_root')
         fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
         try:
-            for part in PurePosixPath(path).parts[1:]:
-                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd);os.close(fd);fd=child
+            parts=PurePosixPath(path).parts[1:]
+            for index,part in enumerate(parts):
+                # HPC ancestors may grant search without directory-list access.
+                # Only the final private root needs a readable directory fd.
+                access=os.O_RDONLY if index==len(parts)-1 else getattr(os,'O_PATH',os.O_RDONLY)
+                child=os.open(part,access|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd);os.close(fd);fd=child
             info=os.fstat(fd)
             if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode)&0o077:raise ValueError('private_reference_root_required')
             return fd
@@ -236,14 +240,20 @@ class AuthorReferenceInputs:
         rows=self._stored(identifier)
         if not rows:return []
         row=rows[-1];current,_=self._context(identifier,row['context']['request']['id'])
-        if current!=row['context']:raise TaskError('原参考输入来源或记账身份已变化；不能沿用旧回执。')
+        if not self._same_binding(current,row['context']):raise TaskError('原参考输入来源或记账身份已变化；不能沿用旧回执。')
         value=self._summary(row)
         if value['state']!='metadata_ready':raise TaskError('原参考输入元数据尚未核验，未知请求须核对原请求。')
         return [value['input_receipt']]
 
     def inspect(self,identifier,request):
         existing=self.get(identifier,request)
-        if existing:return existing
+        if existing:
+            if existing['state']!='not_started':return existing
+            row=self._stored(identifier,request)[0]
+            current,transport=self._context(identifier,request)
+            if not self._same_binding(current,row['context']):raise TaskError('旧输入来源或保存连接已变化，未迁移原请求。')
+            # Only a verified absent request can resume; unknown never resends.
+            return self._observe(identifier,request,'inspect',transport)
         context,transport=self._context(identifier,request)
         if any(self._summary(row)['state']=='unknown' for row in self._stored(identifier)):
             raise TaskError('旧参考输入仍有未知核验，请核对原请求，不能换号重发。')
@@ -257,14 +267,25 @@ class AuthorReferenceInputs:
         row=rows[0]
         if self._summary(row)['state']!='unknown':return self._summary(row)
         current,transport=self._context(identifier,request)
-        if current!=row['context']:raise TaskError('旧输入来源或保存连接已变化，未迁移原请求。')
+        if not self._same_binding(current,row['context']):raise TaskError('旧输入来源或保存连接已变化，未迁移原请求。')
         return self._observe(identifier,request,'reconcile',transport)
+
+    @staticmethod
+    def _same_binding(current,stored):
+        # A repaired metadata observer can recover the immutable original intent.
+        # Source/run/connection bindings remain exact; observer bytes are recorded
+        # separately on every event rather than rewriting the request's worker.
+        value=deepcopy(current)
+        value['request']['worker_sha256']=stored['request']['worker_sha256']
+        return value==stored
 
     def _observe(self,identifier,request,action,transport):
         context=self._stored(identifier,request)[0]['context'];remote=context['request']
         command=transport.command(context['host_alias'],['python3','-I','-S','-c',REMOTE_CODE])
         try:result=self.capture(command,timeout=60,max_bytes=2*1024**2,input_chunks=[canonical(dict(request=remote,action=action))])
-        except (OSError,ValueError):result=dict(returncode=None,failure='reference_input_transport_unverified',stdout='')
+        except (OSError,ValueError) as error:
+            result=dict(returncode=None,failure='reference_input_transport_unverified',stdout='',
+                exception_type=type(error).__name__,exception_message=str(error))
         fixed=dict(version=1,purpose=remote['purpose'],id=request,task_id=identifier,request_sha256=sha256(canonical(remote)),
             binding_sha256=remote['binding_sha256'],worker_sha256=remote['worker_sha256'],**{key:FLAGS[key] for key in
                 ('scope','B_input','execution_authorized','physical_evaluation_performed','scientific_validation')})
@@ -291,9 +312,13 @@ class AuthorReferenceInputs:
             except (ValueError,TypeError,KeyError):pass
         if report is None:report=dict(fixed,state='unknown',files=[],omitted=[],submission_environment=None)
         event=dict(at=datetime.now(timezone.utc).isoformat(),action=action,report=report,
-                   transport={key:result.get(key) for key in ('returncode','failure')})
+                   transport={key:result.get(key) for key in ('returncode','failure')},
+                   request_worker_sha256=remote['worker_sha256'],observer_worker_sha256=sha256(REMOTE_CODE.encode()),
+                   transport_capture_sha256=sha256(canonical(result)))
         with self.tasks.transaction() as db:
             sequence=db.execute('SELECT COALESCE(MAX(sequence),0)+1 FROM author_reference_input_events WHERE id=?',(request,)).fetchone()[0]
             db.execute('INSERT INTO author_reference_input_events VALUES(?,?,?,?)',(request,sequence,canonical(event).decode(),sha256(canonical(event))))
         _write_new(self.audit/(request+'-'+str(sequence)+'.json'),event)
+        # Keep private stderr for real failures; browser summaries stay sanitized.
+        _write_new(self.audit/(request+'-'+str(sequence)+'-transport.json'),result)
         return self.get(identifier,request)
