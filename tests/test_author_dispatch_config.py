@@ -8,7 +8,7 @@ from pathlib import Path
 import shlex
 import struct
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 from fastapi.testclient import TestClient
 
@@ -181,6 +181,32 @@ class AuthorDispatchConfigTests(unittest.TestCase):
         visible=client.get('/api/tasks/'+self.task+'/author-plan').json()
         self.assertTrue(visible['execution']['latest']['approved'])
         self.assertEqual(visible['execution']['latest']['requests'][0]['actual_core_seconds'],320)
+
+    def test_unready_status_never_rebuilds_author_source_environment_or_lane(self):
+        service=load_author_dispatch(self.workspace,self.path,None)
+        lane=Mock();lane.planner_binding.side_effect=AssertionError('Unready GET must not rebuild a lane')
+        histories=[[],[dict(receipt=None,state='unknown')],
+            [dict(receipt={},state='needs_clarification',report={})],
+            [dict(receipt={},state='invalid_output',report=None)]]
+        with patch.object(self.workspace,'lane_deployment',lane),patch.object(self.workspace,'_metadata',
+                side_effect=AssertionError('Unready GET must not load author metadata')) as metadata:
+            for history in histories:
+                with self.subTest(state=history[0]['state'] if history else 'absent'),\
+                        patch.object(self.workspace.planner,'history',return_value=history):
+                    result=service.status(self.task)
+                    self.assertFalse(result['can_prepare']);self.assertFalse(result['can_submit'])
+                    self.assertTrue(result['disabled_reason'])
+            metadata.assert_not_called();lane.planner_binding.assert_not_called()
+        self.assertEqual(self.io,[])
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['requests'],[])
+
+    def test_ready_plan_still_requires_complete_current_metadata_before_prepare(self):
+        service=load_author_dispatch(self.workspace,self.path,None)
+        with patch.object(self.workspace,'_metadata',side_effect=TaskError('Synthetic source binding changed')) as metadata:
+            with self.assertRaisesRegex(TaskError,'source binding changed'):service.prepare(self.task)
+            metadata.assert_called_once_with(self.task)
+        self.assertEqual(self.io,[])
+        self.assertEqual(self.ledger.evaluation_snapshot(self.evaluation)['requests'],[])
 
     def test_browser_cannot_supply_configuration_paths_commands_or_evaluation(self):
         client=self.http(); url='/api/tasks/'+self.task+'/author-execution'

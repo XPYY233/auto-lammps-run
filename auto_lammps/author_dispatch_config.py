@@ -141,15 +141,18 @@ def load_author_dispatch(workspace, path, hpc):
         row = registrations.get(identifier)
         if row is None:
             raise TaskError('本任务尚未登记作者 A 的可信执行部署。')
-        source, paper, receipt, scope = workspace._metadata(identifier)
-        if getattr(workspace,'lane_deployment',None) is not None:
-            source=workspace.lane_deployment.planner_binding(identifier,source)
+        # Status polling must reject an unready plan before rebuilding every
+        # source/environment/ledger binding (or re-admitting resource policy).
+        # A prepared plan still takes the complete path before any operation.
         history = workspace.planner.history(identifier)
         if not history or any(item['receipt'] is None or item['state'] == 'unknown' for item in history):
             raise TaskError('作者 A 原方案尚未准备或有未知模型请求，不能换旧稿执行。')
         latest = history[-1]
         if latest['state'] != 'prepared' or latest.get('report') is None:
             raise TaskError('最新作者 A 方案尚未完整通过；保留原稿与轮次。')
+        source, paper, receipt, scope = workspace._metadata(identifier)
+        if getattr(workspace,'lane_deployment',None) is not None:
+            source=workspace.lane_deployment.planner_binding(identifier,source)
         _, context, result, _ = workspace.planner._stored(identifier, latest['request_id'])
         evidence = context['input']; report = result['report']
         if (evidence['paper_id'] != paper['id'] or evidence['paper'] != {key:paper[key] for key in ('title','doi')}
