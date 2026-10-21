@@ -14,6 +14,7 @@ import re
 
 from . import remote_stage, remote_submit, runtime_launcher as runtime
 from .author_reference_plan import author_source_inputs
+from .author_program_metadata import runtime_python_candidates
 from .hpc_transport import SavedHPCTransport, transport_identity
 from .manifest import canonical, private_directory, sha256
 from .slurm_read import _capture, _write_new
@@ -317,8 +318,7 @@ class AuthorLaneDeployment:
         inventory = self.workspace.environment_inventory
         if inventory is None: raise TaskError('请先通过普通页面保存已有 CPU/Python 环境核验回执。')
         latest = inventory.status(identifier)['latest']
-        if latest is None or latest['state'] != 'metadata_ready':
-            raise TaskError('已有 CPU/Python 元数据尚未核验；未知请求须核对原请求。')
+        python, _ = runtime_python_candidates(inventory, identifier, latest)
         menu = inventory.planner_environments(identifier, latest['request_id'])
         environment_binding, environment_transport = inventory._context(identifier)
         if (environment_binding['profile_sha256'] != profile_sha
@@ -328,7 +328,6 @@ class AuthorLaneDeployment:
         report = latest['report']
         verified = {row['path']: row['sha256'] for row in report['native_files'] if row['status'] == 'verified'}
         if verified != native['files']: raise TaskError('当前 CPU 固定文件没有完整核验。')
-        python = [row for row in report['python_candidates'] if row['status'] == 'verified']
         if not any(row['path'] == endpoints[0].python_path or row['real_path'] == endpoints[0].python_path for row in python):
             raise TaskError('传输端点解释器尚无相同字节的环境核验。')
         helper_bytes = {name: Path(module.__file__).read_bytes() for name, module in HELPERS.items()}

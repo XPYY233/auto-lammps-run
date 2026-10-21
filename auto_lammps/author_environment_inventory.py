@@ -302,7 +302,8 @@ class AuthorEnvironmentInventory:
         if self.tasks.paused(identifier) or life['deleted'] or life['user_finished']:
             raise TaskError('任务已暂停或结束，环境历史仍保留。')
         raw=self.profile_provider(identifier)
-        if not isinstance(raw,dict) or set(raw)!=_PROVIDER:raise TaskError('已有环境来源只接受服务端固定字段。')
+        if not isinstance(raw,dict) or set(raw) not in (_PROVIDER,_PROVIDER|{'python_dependency_requirements'},
+                _PROVIDER|{'python_dependency_requirements','python_dependency_missing'}):raise TaskError('已有环境来源只接受服务端固定字段。')
         path=Path(raw['profile_path'])
         if not path.is_absolute():raise TaskError('环境profile须为固定私有元数据文件。')
         runtime.hash_value(raw['profile_sha256'])
@@ -326,11 +327,23 @@ class AuthorEnvironmentInventory:
             value=re.sub('[-_.]+','-',name).lower()
             if value in normalized:raise TaskError('所需依赖不能重复。')
             normalized.append(value)
+        requirements=raw.get('python_dependency_requirements')
+        if requirements is not None:
+            from .author_python_dependencies import validate_requirements
+            requirements=validate_requirements(requirements,identifier)
+            if normalized!=requirements['required_distributions']:
+                raise TaskError('元数据查询清单必须完整保留当前原Python文本的显式依赖。')
         transport=SavedHPCTransport(self.hpc,raw['connection_revision'],raw['host_alias'])
         binding=dict(version=VERSION,purpose=PURPOSE,profile_sha256=sha256(data),profile_path=str(path),
             native_files=deepcopy(native['files']),python_candidates=deepcopy(candidates),required_distributions=normalized,
             connection_revision=raw['connection_revision'],host_alias=raw['host_alias'],
             transport_identity_sha256=sha256(canonical(transport.identity)),worker_sha256=sha256(REMOTE_CODE.encode()))
+        if requirements is not None:binding['python_dependency_requirements']=requirements
+        if raw.get('python_dependency_missing'):
+            missing=raw['python_dependency_missing']
+            if not isinstance(missing,list) or len(missing)>8 or any(not isinstance(item,str) or not 1<=len(item)<=2000 for item in missing):
+                raise TaskError('Python源码依赖缺项说明须明确且有界。')
+            binding['python_dependency_missing']=deepcopy(missing)
         return binding,transport
 
     def _stored(self,identifier,request=None):
@@ -357,11 +370,18 @@ class AuthorEnvironmentInventory:
     def _summary(row):
         latest=row['events'][-1] if row['events'] else None
         report=latest['report'] if latest else None
-        return dict(version=VERSION,**FLAGS,task_id=row['context']['task_id'],request_id=row['context']['request']['id'],
+        result=dict(version=VERSION,**FLAGS,task_id=row['context']['task_id'],request_id=row['context']['request']['id'],
             state=report['state'] if report else 'unknown',at=row['at'],report=deepcopy(report),
             report_sha256=sha256(canonical(report)) if report is not None else None,
             context_sha256=row['context_sha256'],events=deepcopy(row['events']),
             missing=deepcopy(report['missing']) if report else ['原环境检查回执待核对，未重复执行。'])
+        requirements=row['context']['binding'].get('python_dependency_requirements')
+        if requirements is not None:
+            from .author_python_dependencies import project_capabilities
+            result['capabilities']=project_capabilities(requirements,report)
+        if row['context']['binding'].get('python_dependency_missing'):
+            result['python_dependency_missing']=deepcopy(row['context']['binding']['python_dependency_missing'])
+        return result
 
     def get(self,identifier,request):
         rows=self._stored(identifier,request)
@@ -446,9 +466,11 @@ class AuthorEnvironmentInventory:
         row=row[0];binding,_=self._context(identifier)
         if binding!=row['context']['binding']:raise TaskError('环境检查来源已变化；旧历史保留，不作为当前菜单。')
         value=self._summary(row);report=value['report'];environments=[]
-        if report is not None and report['state']=='metadata_ready':
+        capabilities=value.get('capabilities')
+        base_ready=bool(capabilities and capabilities['base_native_ready'])
+        if report is not None and (report['state']=='metadata_ready' or base_ready):
             for candidate in report['python_candidates']:
-                if candidate['status']!='verified':continue
+                if candidate['status']!='verified' and not (base_ready and candidate['status']=='dependencies_unverified'):continue
                 identity=sha256(canonical(dict(profile=binding['profile_sha256'],native_files=report['native_files'],python=candidate)))
                 environments.append(dict(id='metadata-python-'+identity[:16],label=candidate['label'],sha256=identity,
                     executables=[dict(id=candidate['id'],label=candidate['label'],sha256=candidate['sha256'],kind='python')]))
@@ -464,7 +486,19 @@ class AuthorEnvironmentInventory:
                     if path not in verified or verified[path]!=binding['native_files'].get(path):
                         raise TaskError('已有程序未通过当前原件摘要核对。')
                     environment['executables'].append(dict(id='deployment_'+kind,label=label,sha256=verified[path],kind=kind))
-        return dict(version=VERSION,**FLAGS,task_id=identifier,request_id=request,report_sha256=value['report_sha256'],
-            metadata_status=value['state'],environments=environments,missing=deepcopy(value['missing']),
+        missing=(deepcopy(_POLICY_MISSING) if base_ready else deepcopy(value['missing']))
+        result=dict(version=VERSION,**FLAGS,task_id=identifier,request_id=request,report_sha256=value['report_sha256'],
+            metadata_status=value['state'],environments=environments,missing=missing,
             environment_evidence=deepcopy(report),calls_model=False,reads_remote=False,
             note='仅证明已有解释器及distribution元数据；不能替代作者入口、子进程、部署或科学适用性审核。')
+        if capabilities is not None:result.update(capabilities=capabilities,raw_missing=deepcopy(value['missing']))
+        if value.get('python_dependency_missing'):result['python_dependency_missing']=value['python_dependency_missing']
+        return result
+
+    def capabilities(self,identifier,request=None):
+        """Current source/profile/transport-bound metadata; no remote action."""
+        rows=self._stored(identifier,request)
+        if not rows:raise TaskError('环境检查回执尚不存在。')
+        row=rows[-1];binding,_=self._context(identifier)
+        if binding!=row['context']['binding']:raise TaskError('依赖来源、环境profile或保存连接已变化；原回执保留。')
+        return self._summary(row).get('capabilities')

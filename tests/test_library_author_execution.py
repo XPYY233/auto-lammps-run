@@ -207,5 +207,47 @@ class LibraryAuthorExecutionTests(unittest.TestCase):
         self.assertFalse(self.lane.policy.is_first_library(self.task))
         self.assertEqual(self.counts(),(1,0,0));self.f.capture.assert_not_called()
 
+    def test_source_bound_python_entry_is_registered_without_authorizing_child_driver(self):
+        from auto_lammps.author_reference_plan import author_source_inputs
+        from auto_lammps.author_python_dependencies import requirements_from_sources,project_capabilities
+        f=self.f;reader=f.fx.reader
+        reader.texts.update({'structure.py':b'import numpy as np\nx = np.array([1, 2])\n',
+            'plot.py':b'import matplotlib.pyplot as plt\n',
+            'driver.py':b'import subprocess\nsubprocess.run(["ssh", "not-permitted"])\n'})
+        reader._write_sources();reader._bind_receipt()
+        f.source=reader.service();f.source.transport=f.transport
+        selections=[dict(path=name,start_line=1,end_line=20) for name in reader.texts]
+        request=reader.request(selections)
+        retained=dict(capability=f.source.capability(reader.receipt,purpose='author_reference'),
+            acquisition_receipt=deepcopy(reader.receipt),reads=[dict(request=request,response=reader.worker(request))])
+        f.workspace._cached_sources.side_effect=lambda *_:deepcopy(retained)
+        requirements=requirements_from_sources(author_source_inputs(retained,self.task),self.task)
+        raw=f.environment['report']['python_candidates'][0]
+        raw.update(status='dependencies_unverified',distributions=[dict(name='numpy',state='installed',version='synthetic'),
+            dict(name='matplotlib',state='missing',version=None)])
+        f.environment.update(state='incomplete',report_sha256=sha256(canonical(f.environment['report'])),
+            capabilities=project_capabilities(requirements,f.environment['report']))
+        f.inventory.capabilities.side_effect=lambda *_:deepcopy(f.environment['capabilities'])
+        self.source['deployment']['environments'][0]['executables'].append(
+            dict(id=raw['id'],label='Synthetic Python',kind='python',sha256=raw['sha256']))
+        self.library.prepare_environment(self.task)
+        result=self.library.approved(self.task)
+        programs=result['candidate']['programs'][0]['executables']
+        self.assertEqual({row['kind'] for row in programs},{'lammps','python'})
+        python=next(row for row in programs if row['kind']=='python')
+        self.assertEqual(python['entrypoints'],[dict(path='structure.py',sha256=sha256(reader.texts['structure.py']))])
+        self.assertEqual(result['candidate']['python']['status'],'dependencies_unverified')
+        gaps=result['review_receipt']['original_python_missing']
+        self.assertEqual({row['path'] for row in gaps},{'plot.py','driver.py'})
+        self.assertFalse(result['review_receipt']['execution_authorized'])
+        self.assertEqual(self.counts(),(1,0,0));self.assertEqual(f.fx.sent,[])
+        prepared=self.ensure()
+        self.assertEqual(prepared['state'],'resources_ready')
+        lane=self.lane.status(self.task)['latest']['candidate']['profile']['author_reference']
+        registered=[program for menu in lane['environments'] for program in menu['executables'] if program['kind']=='python']
+        self.assertTrue(registered)
+        self.assertTrue(all(row['entrypoints']==python['entrypoints'] for row in registered))
+        self.assertEqual(self.counts(),(1,1,0));self.assertEqual(f.fx.sent,[])
+
 
 if __name__=='__main__':unittest.main()

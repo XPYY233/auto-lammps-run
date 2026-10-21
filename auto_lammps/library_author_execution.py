@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .author_reference_plan import author_source_inputs, author_source_text_coverage
+from .author_program_metadata import runtime_python_candidates, python_entrypoints
 from .manifest import canonical, sha256
 from .runtime_launcher import hash_value, read_regular
 from .tasks import TaskError, task_id
@@ -141,23 +142,28 @@ class LibraryAuthorResourcePolicy:
         profile=json.loads(read_regular(self.lane.controller.runtime_profile_path,1000000,private=True))
         native=profile['native_slurm']
         environment=self.workspace.environment_inventory.status(identifier)['latest']
-        if not environment or environment['state']!='metadata_ready':
-            raise TaskError('首次作者 A 需要已有引擎与解释器的真实元数据核验。')
+        binaries,capabilities=runtime_python_candidates(self.workspace.environment_inventory,identifier,environment)
         report=environment['report']
         verified={row['path']:row['sha256'] for row in report['native_files'] if row['status']=='verified'}
         if verified!=native['files']:raise TaskError('资源库作者引擎与当前核验字节不一致。')
-        python=[row for row in report['python_candidates'] if row['status']=='verified' and
+        python=[row for row in binaries if
                 (row['path']==self.lane.controller.environment.python_path or row['real_path']==self.lane.controller.environment.python_path)]
         if len(python)!=1:raise TaskError('首次作者运行器缺少唯一已核验解释器。')
         complete={row['path'] for row in author_source_text_coverage(checked)['complete_files']}
         entries=[{key:row[key] for key in ('path','sha256')} for row in checked['files'] if row['path'] in complete]
         if not entries:raise TaskError('作者入口需要完整原件读取证明；不能猜测入口或摘要。')
+        original_python,python_missing=python_entrypoints(python[0],capabilities,entries)
         programs=[]
         for menu in source['deployment']['environments']:
             engines=[dict(id=program['id'],sha256=program['sha256'],kind='lammps',path=native['engine_path'],
                 launch_mode='mpi',entrypoints=deepcopy(entries),child_process_policy='no_children')
                 for program in menu['executables'] if program['kind']=='lammps' and
                 program['sha256']==native['files'][native['engine_path']]]
+            if original_python:
+                engines.extend(dict(id=program['id'],sha256=program['sha256'],kind='python',path=python[0]['real_path'],
+                    launch_mode='direct',entrypoints=deepcopy(original_python),child_process_policy='reviewed_same_allocation')
+                    for program in menu['executables'] if program['kind']=='python' and
+                    program['id']==python[0]['id'] and program['sha256']==python[0]['sha256'])
             if engines:programs.append(dict(id=menu['id'],label=menu['label'],sha256=menu['sha256'],executables=engines))
         if not programs:raise TaskError('资源库尚无匹配当前已核验 CPU 引擎的作者调用能力。')
         endpoint=self.lane.controller.submission.scheduler.endpoint
@@ -184,6 +190,12 @@ class LibraryAuthorResourcePolicy:
             campaign_approval_sha256=policy['approval_sha256'],accounted_inputs=[],
             new_scientific_review=False,new_user_gate=False,execution_authorized=False,
             scientific_validation=False,child_process_policy='no_children')
+        if capabilities is not None:
+            proof.update(python_dependency_requirements_sha256=capabilities['requirements_sha256'],
+                python_dependency_source_sha256=capabilities['source_sha256'],
+                original_python_entrypoints=original_python,original_python_missing=python_missing,
+                python_entry_policy='complete_original_static_no_child_with_distribution_metadata',
+                formal_python_isolation=False)
         candidate=dict(programs=programs,python=python[0],child_scripts=[],file_modes=[],accounted_inputs=[],
             submission_environment={key:scheduler[key] for key in ('sbatch_path','sbatch_sha256')},
             existing_signing_key_sha256=sha256(key))

@@ -262,7 +262,7 @@ def _source_capability_members(capability):
 
 def _deployment(value):
     required={'environments','analysis_capabilities','resources','missing'}
-    if (not isinstance(value, dict) or set(value)-{'unavailable_capabilities','registered_execution_environment_ids'} != required
+    if (not isinstance(value, dict) or set(value)-{'unavailable_capabilities','registered_execution_environment_ids','python_dependency_metadata'} != required
             or not isinstance(value['environments'], list) or len(value['environments']) > 32
             or not isinstance(value['analysis_capabilities'], list) or len(value['analysis_capabilities']) > 64
             or not isinstance(value['resources'], dict) or len(canonical(value['resources'])) > 8192
@@ -273,6 +273,9 @@ def _deployment(value):
     if 'unavailable_capabilities' in value:result['unavailable_capabilities']=_strings(value['unavailable_capabilities'])
     if 'registered_execution_environment_ids' in value:
         result['registered_execution_environment_ids']=_strings(value['registered_execution_environment_ids'])
+    if 'python_dependency_metadata' in value:
+        from .author_python_dependencies import validate_capabilities
+        result['python_dependency_metadata']=validate_capabilities(value['python_dependency_metadata'])
     seen = set()
     for item in value['environments']:
         if (not isinstance(item, dict) or set(item) != {'id', 'label', 'sha256', 'executables'}

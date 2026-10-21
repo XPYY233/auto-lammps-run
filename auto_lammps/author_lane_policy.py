@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 
 from .author_reference_plan import author_source_inputs
+from .author_program_metadata import runtime_python_candidates
 from .manifest import canonical,sha256
 from .runtime_launcher import hash_value,read_regular,relative
 from .tasks import TaskError
@@ -78,8 +79,8 @@ class InheritedAuthorResourcePolicy:
         entries.sort(key=lambda row:row['path'])
         if not entries:raise TaskError('原资源库没有与应用原调用匹配的既有引擎入口。')
         environment=self.workspace.environment_inventory.status(identifier)['latest']
-        if environment is None or environment['state']!='metadata_ready':raise TaskError('当前固定工具元数据尚未核验。')
-        python=[row for row in environment['report']['python_candidates'] if row['status']=='verified' and
+        binaries,_=runtime_python_candidates(self.workspace.environment_inventory,identifier,environment)
+        python=[row for row in binaries if
             (row['path']==self.lane.controller.environment.python_path or row['real_path']==self.lane.controller.environment.python_path)]
         if len(python)!=1:raise TaskError('原作者运行器缺少唯一已核验的既有解释器。')
         # Execution modes are copied from the old run receipt, never inferred

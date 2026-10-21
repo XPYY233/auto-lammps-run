@@ -678,11 +678,19 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
             from .hpc_transport import SavedHPCTransport
             controller=execution_jobs.controller;transport=controller.staging.client.transport
             if not isinstance(transport,SavedHPCTransport):raise TaskError('已有部署必须使用本项目保存的HPC连接。')
+            from .author_python_dependencies import requirements_from_sources
+            requirements=None;dependency_missing=[]
+            try:
+                checked=author_workspace.cached_environment_sources(identifier)
+                requirements=requirements_from_sources(checked,identifier)
+            except TaskError:
+                dependency_missing=['尚无本任务可核验的原Python全文缓存；此次只核对已有二进制，未推断入口依赖齐全。']
             return dict(profile_path=str(controller.runtime_profile_path),
                 profile_sha256=controller.authorization.pins['profile_sha256'],
                 connection_revision=transport.revision,host_alias=transport.host_alias,
                 python_candidates=[dict(id='deployment_python',label='已登记CPU部署的Python解释器（待元数据核验）',path=controller.environment.python_path)],
-                required_distributions=[])
+                required_distributions=requirements['required_distributions'] if requirements is not None else [],
+                python_dependency_requirements=requirements,python_dependency_missing=dependency_missing)
         author_environment_inventory=AuthorEnvironmentInventory(store,hpc,
             profile_provider=existing_author_environment,audit_directory=store.path.parent/'author-environment-inventory')
         if execution_jobs is not None:author_workspace.environment_inventory=author_environment_inventory

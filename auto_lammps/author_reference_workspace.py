@@ -160,12 +160,12 @@ class AuthorReferenceWorkspace:
             paper={key:paper[key] for key in ('id','title','doi')},receipt=receipt,scope=scope,
             task_revision=task['revision']))
 
-    def _metadata(self,identifier,*,require_scope=True):
-        return self._metadata_read(('metadata',identifier,require_scope),identifier,
-            lambda:self._load_metadata(identifier,require_scope=require_scope),
+    def _metadata(self,identifier,*,require_scope=True,include_environment=True):
+        return self._metadata_read(('metadata',identifier,require_scope,include_environment),identifier,
+            lambda:self._load_metadata(identifier,require_scope=require_scope,include_environment=include_environment),
             fingerprint=self._metadata_fingerprint,clone=self._clone_metadata)
 
-    def _load_metadata(self,identifier,*,require_scope=True):
+    def _load_metadata(self,identifier,*,require_scope=True,include_environment=True):
         task=self.tasks.get(identifier)
         if task['mode']!='reproduction':raise TaskError('作者运行方案只属于论文参考任务。')
         binding=self.bindings.get(identifier)
@@ -203,7 +203,7 @@ class AuthorReferenceWorkspace:
         if require_scope and (not scope or scope['state']!='recorded'):raise TaskError('请先保存并核对来自 P 的目标与共享依赖范围。')
         if self.tasks.paused(identifier) or self.tasks.lifecycle(identifier)['user_finished'] or self.tasks.lifecycle(identifier)['deleted']:
             raise TaskError('任务已暂停或结束；旧方案仍可查看。')
-        return self._environment_metadata(identifier,binding),paper,receipt,scope
+        return (self._environment_metadata(identifier,binding) if include_environment else binding),paper,receipt,scope
 
     def _environment_metadata(self,identifier,binding):
         """Append current saved metadata menus; never check the remote on GET.
@@ -226,7 +226,7 @@ class AuthorReferenceWorkspace:
                 # Optional new metadata must not invalidate an already pinned
                 # author deployment or invent a new preparation prerequisite.
                 return binding
-            elif latest['state']!='metadata_ready':
+            elif latest['state']!='metadata_ready' and not latest.get('capabilities',{}).get('base_native_ready'):
                 evidence.update(state=latest['state'],request_id=latest['request_id'])
                 gaps.append('本任务最新环境核验尚未就绪；原回执保留，未自动重新检查。')
             else:
@@ -242,7 +242,8 @@ class AuthorReferenceWorkspace:
                 if (reader_transport._identity()!=reader_transport.identity
                         or environment_transport._identity()!=environment_transport.identity
                         or author_identity!=environment_identity
-                        or menu['task_id']!=identifier or menu['metadata_status']!='metadata_ready'
+                        or menu['task_id']!=identifier or (menu['metadata_status']!='metadata_ready'
+                            and not menu.get('capabilities',{}).get('base_native_ready'))
                         or menu['report_sha256']!=latest['report_sha256']
                         or any(menu.get(key) is not False for key in ('B_input','execution_authorized',
                             'physical_evaluation_performed','scientific_validation','execution_ready',
@@ -258,6 +259,9 @@ class AuthorReferenceWorkspace:
                 candidate=dict(deployment,environments=environments)
                 _deployment(candidate)
                 result['deployment']=candidate
+                if menu.get('capabilities') is not None:
+                    from .author_python_dependencies import validate_capabilities
+                    result['deployment']['python_dependency_metadata']=validate_capabilities(menu['capabilities'])
                 gaps.extend(menu['missing'])
                 if not current['required_distributions']:
                     gaps.append('此次仅核验解释器元数据；作者流程所需依赖尚待核验，不能视为依赖完备。')
@@ -265,6 +269,8 @@ class AuthorReferenceWorkspace:
                     report_sha256=latest['report_sha256'],
                     checked_distributions=deepcopy(current['required_distributions']),
                     author_dependencies_complete=False)
+                if menu.get('capabilities') is not None:evidence['capabilities']=deepcopy(menu['capabilities'])
+                if menu.get('python_dependency_missing'):evidence['python_dependency_missing']=deepcopy(menu['python_dependency_missing'])
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied):
             evidence.update(state='unavailable')
             gaps=['已有环境来源、保存连接或核验回执已变化或尚未核实；旧菜单与历史保留，未自动访问HPC。']
@@ -443,6 +449,21 @@ class AuthorReferenceWorkspace:
     def _cached_sources(self,identifier,binding,receipt):
         key=('cached_sources',identifier,sha256(canonical(receipt)))
         return self._metadata_read(key,identifier,lambda:self._sources(identifier,binding,receipt,cached_only=True))
+
+    def cached_environment_sources(self,identifier):
+        """Return verified retained source inputs without environment projection.
+
+        The environment inventory may call this while building its own profile;
+        entering that inventory again would recursively rebuild the profile.
+        Existing action-local reads remain isolated and freshly verified at the
+        action boundary. Missing original evidence never initiates a remote read.
+        """
+        task_id(identifier)
+        binding,_,receipt,_=self._metadata(identifier,require_scope=False,include_environment=False)
+        checked=author_source_inputs(self._cached_sources(identifier,binding,receipt),identifier)
+        if checked['capability'] is None or not checked['sources']:
+            raise TaskError('作者环境依赖缺少已核验原件文本缓存；未自动读取HPC或推测源码。')
+        return checked
 
     def cached_analysis_sources(self,identifier):
         """Reference-only retained text; never read remote files or invoke AI."""
