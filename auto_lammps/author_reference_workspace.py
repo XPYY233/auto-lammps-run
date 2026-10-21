@@ -39,7 +39,7 @@ class AuthorReferenceWorkspace:
         self.resources=AuthorReferenceResources(self)
         from .author_resource_selection import AuthorResourceSelection
         self.resource_selections=AuthorResourceSelection(self.planner,self._resource_selection_input,
-                                                        connection_provider=connection_provider)
+                                                        connection_provider=connection_provider,model_calls=model_calls)
         from .author_selected_resource_workspace import AuthorSelectedResourceWorkspace
         self.selected_resources=AuthorSelectedResourceWorkspace(self)
 

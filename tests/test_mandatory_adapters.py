@@ -96,10 +96,14 @@ class MandatoryAdapterTests(unittest.TestCase):
         value = {'summary': '合成原因', 'evidence': ['ERROR: synthetic execution failure'],
             'cause': '合成假设', 'repair': '最小修订', 'proposed_lesson': '待验证经验'}
         self.transport.return_value = 200, response(value)
-        self.failure_call()
+        first = self.failure_call()
+        original = self.calls.lookup(first['request_id'])
         with patch.object(adapters, 'VERSION', adapters.VERSION + 1):
-            with self.assertRaisesRegex(ModelError, 'request_already_reserved'):
-                self.failure_call()
+            reused = self.failure_call()
+        self.assertEqual(reused['request_id'],first['request_id'])
+        self.assertEqual(reused['receipt'],first['receipt'])
+        self.assertEqual(self.calls.lookup(first['request_id']),original)
+        self.assertFalse(reused['scientific_adapter']['completed_response_revalidation']['request_body_replayed'])
         self.transport.assert_called_once()
         self.assertEqual(self.calls.status()['used_requests'], 1)
 

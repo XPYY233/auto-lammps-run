@@ -13,6 +13,17 @@ const nodeCode=source.slice(source.indexOf('function node(tag, value, className)
 const clarifyCode=source.slice(source.indexOf('function questionText('),source.indexOf('function taskState(t)'));
 const TASK='a'.repeat(32);
 
+test('故障诊断期间继续刷新任务进度，终态后停止轮询',async()=>{
+  const code=source.slice(source.indexOf('setInterval(async()=>{'),source.indexOf('function renderSource('));
+  let tick,reads=0;
+  const context=vm.createContext({candidatePolling:false,busy:false,current:{id:TASK},candidateTask:TASK,
+    candidateState:'diagnosing_failure',$:()=>({hidden:false}),document:{querySelector:()=>null},
+    setInterval:fn=>{tick=fn;},refreshCandidate:async()=>{reads++;},renderHistory:async()=>{},
+    refreshModelStatus:async()=>{},refreshPlanReview:async()=>{},refreshActivity:async()=>{},notice:()=>{}});
+  vm.runInContext(code,context);await tick();assert.equal(reads,1);
+  context.candidateState='failed';await tick();assert.equal(reads,1);
+});
+
 function element(tag){
   return {tagName:tag,children:[],className:'',textContent:'',hidden:false,disabled:false,value:'',
     dataset:{},type:'',id:'',placeholder:'',

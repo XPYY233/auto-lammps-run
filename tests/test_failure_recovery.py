@@ -21,7 +21,7 @@ class DiagnosisTests(unittest.TestCase):
         evidence=dict(request_id='failed',logs=[dict(tail='ERROR: Compute used in variable between runs is not current')])
         value=dict(summary='未更新',evidence=['Compute used in variable between runs is not current'],
             cause='调用状态错误',repair='修改消费者',proposed_lesson='定义不是调用')
-        client=Mock();client.complete_json.return_value=dict(value=value,
+        client=Mock();client.calls.lookup.return_value=None;client.complete_json.return_value=dict(value=value,
             receipt=dict(state='completed',output_sha256=sha256(canonical(value))))
         record=diagnose(client,evidence,dict(workflow='old'))
         self.assertEqual(record['validation_status'],'proposed_not_verified')

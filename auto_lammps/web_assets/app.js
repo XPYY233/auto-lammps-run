@@ -1489,7 +1489,7 @@ $('#prepare-candidate').onclick=()=>action(async()=>{
 });
 setInterval(async()=>{
   if(candidatePolling || busy || !current || current.id!==candidateTask || $('#task-view').hidden ||
-     !['queued','running','model_requested','reusing_plan','checking_plan','repairing_plan','preparing_files',null].includes(candidateState)) return;
+     !['queued','running','model_requested','diagnosing_failure','reusing_plan','checking_plan','repairing_plan','preparing_files',null].includes(candidateState)) return;
   candidatePolling=true;
   try {await refreshCandidate();await renderHistory();await refreshModelStatus();await refreshPlanReview();await refreshActivity();}
   catch(error) {notice('暂时无法读取准备进度；不会重新发起模型请求。',true);}

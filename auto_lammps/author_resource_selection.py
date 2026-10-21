@@ -85,6 +85,8 @@ def selection_context(evidence):
             required=['status','summary','selections','missing','limitations'],properties=dict(
                 status=dict(type='string',enum=['selected','needs_clarification']),summary=string(4000),
                 selections=dict(type='array',maxItems=MAX_FILES,items=row),missing=strings,limitations=strings)))
+    if not initial and evidence.get('author_plan',{}).get('source_references_verified') is False:
+        result['rules'].append('The complete unvalidated_proposal and validation_feedback are retained search clues only. Verify every proposed path against available_files; never trust its paths or hashes as source evidence, generate replacement code, or treat the rejected draft as executable.')
     if initial:
         result.update(first_selection=True,author_plan_present=False)
         result['rules'][2]='Use only the unchanged complete selected P scope and its shared dependency IDs; no author plan has been generated yet.'
@@ -156,13 +158,14 @@ class AuthorResourceSelection:
     _model=AuthorReferencePlan._model
     _lease=AuthorReferencePlan._lease
 
-    def __init__(self,author_plans,reference_provider,*,connection_provider):
+    def __init__(self,author_plans,reference_provider,*,connection_provider,model_calls=None):
         if (not isinstance(author_plans,AuthorReferencePlan) or not callable(reference_provider)
                 or not callable(connection_provider)):
             raise TaskError('资料选择需要同一作者方案、受信缓存记录及参考模型连接。')
         self.plans=author_plans;self.tasks=author_plans.tasks;self.papers=author_plans.papers
         self.scopes=author_plans.scopes;self.reference_provider=reference_provider
         self.connection_provider=connection_provider
+        self.model_calls=model_calls
         self.locks=private_directory(self.tasks.path.parent/'author-resource-selection-locks')
         with self.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS author_resource_selection_intents ('
@@ -184,6 +187,28 @@ class AuthorResourceSelection:
                             (request,)).fetchone()[0]
         db.execute('INSERT INTO author_resource_selection_events VALUES(?,?,?,?,?)',
                    (request,sequence,datetime.now(timezone.utc).isoformat(),state,message))
+
+    def _rejected_search_hint(self,author,receipt,request):
+        """Use a received rejected answer for discovery, never as an approved plan."""
+        calls=self.model_calls
+        if (receipt.get('state')!='invalid_output' or calls is None
+                or sha256(str(calls.path.resolve()).encode())!=author['model_binding']['model_ledger_sha256']):
+            raise TaskError('资料选择需要已保存的缺项方案或可核验的原拒绝答复；未知请求须先核对。')
+        call=calls.lookup(request) or {};model=call.get('receipt') or {}
+        saved=receipt.get('model_receipt') or {};answer=model.get('structured_output')
+        if (call.get('request_sha256')!=author['request_sha256']
+                or model.get('request_sha256')!=author['request_sha256']
+                or model.get('provider')!='deepseek'
+                or model.get('requested_model')!=author['model_binding']['model']
+                or model.get('state')!='completed' or model.get('http_status')!=200
+                or model.get('finish_reason')!='stop' or model.get('transport_attempts')!=1
+                or not isinstance(answer,dict) or model.get('output_sha256')!=sha256(canonical(answer))
+                or saved.get('output_sha256')!=model.get('output_sha256')
+                or saved.get('request_sha256')!=author['request_sha256']):
+            raise TaskError('原拒绝答复的请求、用量回执或内容摘要未核对；不能作为选件输入。')
+        return dict(unvalidated_proposal=deepcopy(answer),source_references_verified=False,
+                    validation_feedback=dict(code=receipt.get('error_code'),message=receipt.get('message')),
+                    execution_authorized=False,scientific_validation=False)
 
     def _input(self,identifier):
         with self.tasks.transaction() as db:self._task(db,identifier,active=True)
@@ -224,7 +249,12 @@ class AuthorResourceSelection:
                 raise TaskError('资料选择必须继承本任务当前完整作者方案，不能另选旧稿。')
             saved=self.plans._stored(identifier,raw['author_plan_request_id'])
             _,author,receipt,_=saved
-            if (not receipt or receipt['state']!='needs_clarification' or not receipt.get('report')
+            if not receipt:
+                raise TaskError('资料选择需要已收到并保存的作者原件缺项方案，未知请求须先核对。')
+            hint={}
+            if receipt['state']=='invalid_output':
+                hint=self._rejected_search_hint(author,receipt,raw['author_plan_request_id'])
+            elif (receipt['state']!='needs_clarification' or not receipt.get('report')
                     or receipt['report'].get('status')!='needs_clarification'):
                 raise TaskError('资料选择需要已收到并保存的作者原件缺项方案，未知请求须先核对。')
             original=author['input'];scope=self.scopes.get(identifier)
@@ -232,7 +262,7 @@ class AuthorResourceSelection:
                     or scope['scope_sha256']!=original['reference_scope']['scope_sha256']):
                 raise TaskError('原P范围已变化，不能在取件选择中缩减或替换。')
             author_plan=dict(request_id=raw['author_plan_request_id'],context_sha256=sha256(canonical(author)),
-                             receipt_sha256=sha256(canonical(receipt)),report=deepcopy(receipt['report']))
+                             receipt_sha256=sha256(canonical(receipt)),report=deepcopy(receipt.get('report')),**hint)
         tree_request=raw['tree_request'];tree=raw['tree_report'];acquisition=raw['acquisition_receipt']
         try:
             RemoteResources.validate_tree_report(tree_request,tree)
