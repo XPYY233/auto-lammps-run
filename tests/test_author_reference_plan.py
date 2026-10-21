@@ -146,7 +146,12 @@ class AuthorReferencePlanTests(unittest.TestCase):
         self.assertNotIn('capability',payload['author_source'])
         self.assertEqual(payload['author_source']['capability_binding']['sha256'],
             sha256(canonical(context['input']['author_source']['capability'])))
-        self.assertEqual(payload['author_source']['files'],context['input']['author_source']['files'])
+        self.assertNotIn('files',payload['author_source'])
+        self.assertEqual(payload['original_author_invocation_plan']['original_files'],context['input']['author_source']['files'])
+        self.assertEqual(payload['author_source']['files_binding'],dict(sha256=sha256(canonical(context['input']['author_source']['files'])),content_path='original_author_invocation_plan.original_files',full_value_retained=True))
+        self.assertNotIn('deployment',payload)
+        self.assertEqual(payload['original_author_invocation_plan']['deployment'],context['input']['deployment'])
+        self.assertEqual(payload['deployment_binding']['sha256'],sha256(canonical(context['input']['deployment'])))
         proofs=context['input']['author_source']['reads']
         self.assertEqual(payload['author_source']['read_proofs_sha256'],sha256(canonical(proofs)))
         self.assertEqual(payload['author_source']['reads'],[{key:value for key,value in row.items()

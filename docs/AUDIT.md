@@ -3771,3 +3771,8 @@ FeAl普通修订动作在消耗第3稿前被原参考输入元数据unknown阻�
 普通FeAl修订在模型意图前返回资源回执unverified，保留同ID，不消耗第3稿/HPC。真实install envelope 235116字节、reconcile 235118字节，lane._observe把整包作为一个input_chunk，而既有slurm_read._capture每块最多65536，写入前ValueError被吞成lane_transport_unverified。纠正按既有capture协议分块，不改payload/远端worker/候选字节，并保留受限私有异常。安装后仅普通页面同ID核对not_started再恢复，不能换号或冒称已提交。
 
 实际第三篇首次资源lane也出现同一分块错误，尚未产生A第2稿意图或付费调用；页面“正在准备”仅表示准备链活动，不能据此宣称模型已发送。两篇均保留原lane待同ID恢复。只读诊断初次误查事件state列（实际封装在document），查询失败无写入，已改按实际schema读取。定向17项通过，原信封拼接字节/远端worker摘要不变。
+
+### 2026-10-21 — FeAl完整修订的重复部署菜单导致输入容量阻断
+分块安装已真实恢复metadata_installed；其后FeAl普通修订在新增模型意图前触发input_too_large，仍2/3稿。GET作者状态实测200/3.71秒/737290字节，原5秒超时不是永久锁，撤回死锁假设，不改账本。部署菜单、固定文件表、已记账输入和有界验证合同同时存在于顶层evidence与主动工具完整菜单，是可无损去重项；只将外层重复值改为指向工具菜单的SHA绑定，原全文/前稿/固定参数仍完整提供。来源、能力与输入上限保持不变；真实页面验收另记。
+
+去重新增33项回归中，两个损坏工具菜单反例提前触发AttributeError/KeyError，而非既有受信TaskError；均未创建模型意图或执行。补显式菜单类型/原件字段护栏，保留原主动Adapter后续完整核验，不忽略反例。
