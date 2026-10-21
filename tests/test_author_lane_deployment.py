@@ -81,7 +81,10 @@ class AuthorLaneDeploymentTests(unittest.TestCase):
     def transfer(self, command, *, timeout, max_bytes, input_chunks):
         self.assertEqual(command[0],'synthetic-saved-ssh')
         self.assertEqual(shlex.split(command[1]),[str(self.python),'-I','-S','-c',REMOTE_CODE])
-        envelope=json.loads(b''.join(input_chunks));self.network.append(deepcopy(envelope))
+        chunks=list(input_chunks)
+        self.assertTrue(chunks)
+        self.assertTrue(all(1<=len(chunk)<=65536 for chunk in chunks),'Saved transport rejects oversized stdin chunks')
+        envelope=json.loads(b''.join(chunks));self.network.append(deepcopy(envelope))
         report=_remote_install(envelope['request'],action=envelope['action'],_test_host=True)
         wire=base64.b64encode(canonical(report))+b'\n'
         return dict(returncode=0,failure=None,stdout=base64.b64encode(wire).decode(),stderr='')
@@ -175,7 +178,36 @@ class AuthorLaneDeploymentTests(unittest.TestCase):
         self.capture.side_effect=self.transfer
         result=self.service.reconcile(self.task,'1'*32);self.assertEqual(result['state'],'not_started')
         self.assertFalse((self.root/'author-lanes').exists())
-        self.assertEqual(self.service.install(self.task,'1'*32),result)
+        self.assertTrue(result['can_install'])
+        self.assertEqual(self.service.install(self.task,'1'*32)['state'],'metadata_installed')
+        self.assertEqual([row['action'] for row in self.network],['reconcile','install'])
+        self.assertEqual(len(self.service.status(self.task)['history']),1)
+
+    def test_large_exact_metadata_envelope_is_chunked_and_original_request_recovers(self):
+        original_capture=self.transfer;sent=[]
+        def bounded_capture(command,**kwargs):
+            chunks=list(kwargs['input_chunks']);sent.append(chunks)
+            return original_capture(command,**dict(kwargs,input_chunks=chunks))
+        candidate=self.approve();stored=deepcopy(self.service._stored(self.task,'1'*32)[0]['context'])
+        payload=canonical(dict(request=stored['request'],action='install'))
+        self.assertGreater(len(payload),65536)
+        self.capture.side_effect=bounded_capture
+        self.assertEqual(self.service.install(self.task,'1'*32)['state'],'metadata_installed')
+        self.assertGreater(len(sent[0]),1)
+        self.assertEqual(b''.join(sent[0]),payload)
+        self.assertEqual(self.service._stored(self.task,'1'*32)[0]['context'],stored)
+        self.assertEqual(self.service.get(self.task,'1'*32)['candidate_sha256'],candidate['candidate_sha256'])
+
+    def test_private_transport_exception_is_retained_and_browser_summary_stays_sanitized(self):
+        self.approve();self.capture.side_effect=ValueError('PRIVATE synthetic chunk-size failure')
+        result=self.service.install(self.task,'1'*32);self.assertEqual(result['state'],'unknown')
+        self.assertNotIn('PRIVATE',json.dumps(result))
+        captures=list(self.service.audit.glob('1'*32+'-install-*/capture.json'))
+        self.assertEqual(len(captures),1)
+        value=json.loads(captures[0].read_bytes())
+        self.assertEqual(value['exception_type'],'ValueError')
+        self.assertIn('chunk-size failure',value['exception_message'])
+        self.assertEqual(result['events'][-1]['transport_capture_sha256'],sha256(canonical(value)))
 
     def test_changed_provider_or_connection_does_not_reuse_saved_approval(self):
         self.approve();self.transport.current=2

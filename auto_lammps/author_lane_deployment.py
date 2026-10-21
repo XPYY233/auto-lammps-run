@@ -581,7 +581,7 @@ class AuthorLaneDeployment:
             task_id=context['candidate']['task_id'], request_id=context['candidate']['request_id'],
             candidate=deepcopy(context['candidate']), candidate_sha256=context['candidate_sha256'],
             state=state, metadata_install_approved=approved, can_approve=state == 'previewed',
-            can_install=approved and state == 'approved' and context['candidate']['can_install_metadata'],
+            can_install=approved and state in {'approved','not_started'} and context['candidate']['can_install_metadata'],
             can_reconcile=state == 'unknown', events=deepcopy(events), at=row['at'])
 
     def get(self, identifier, request):
@@ -637,7 +637,7 @@ class AuthorLaneDeployment:
 
     def install(self, identifier, request):
         row, transport = self._current(identifier, request); value = self._summary(row)
-        if value['state'] in {'metadata_installed', 'unknown', 'not_started'}: return value
+        if value['state'] in {'metadata_installed', 'unknown'}: return value
         if not value['can_install']: raise TaskError('请先明确批准同一候选的元数据安装；这不批准作者执行。')
         for other in self._stored(identifier):
             if (other['context']['candidate']['binding_sha256'] == row['context']['candidate']['binding_sha256']
@@ -676,6 +676,10 @@ class AuthorLaneDeployment:
         if latest_lane and latest_lane['state']=='unknown':
             self.reconcile(identifier,latest_lane['request_id'])
             latest_lane=self.status(identifier)['latest']
+        if latest_lane and latest_lane['state']=='not_started':
+            latest_lane=self.install(identifier,latest_lane['request_id'])
+        if latest_lane and latest_lane['state']=='unknown':
+            raise TaskError('作者资源准备回执尚未核实；保留原请求，未消耗模型稿次或提交计算。')
         if latest_lane and latest_lane['state']=='metadata_installed' and 'source_review_sha256' in latest_lane['candidate']:
             try:self._current(identifier,latest_lane['request_id'])
             except TaskError:pass  # Known old installation stays immutable; current bytes need a new lane.
@@ -716,11 +720,14 @@ class AuthorLaneDeployment:
         trace = private_directory(self.audit/(request+'-'+action+'-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')))
         _write_new(trace/'intent.json', dict(action=action, candidate_sha256=context['candidate_sha256'],
             command_sha256=sha256(canonical(command)), request_sha256=sha256(canonical(context['request']))))
+        payload=canonical(dict(request=context['request'],action=action))
         try:
             result = self.capture(command, timeout=60, max_bytes=LIMIT,
-                input_chunks=[canonical(dict(request=context['request'], action=action))])
-        except (OSError, ValueError):
-            result = dict(returncode=None, failure='lane_transport_unverified', stdout='', stderr='')
+                input_chunks=(payload[offset:offset+65536] for offset in range(0,len(payload),65536)))
+        except (OSError, ValueError) as error:
+            result = dict(returncode=None, failure='lane_transport_unverified', stdout='', stderr='',
+                exception_type=type(error).__name__,exception_message=str(error))
+        capture_sha256=_write_new(trace/'capture.json',result)
         # Do not publish remote exception text, commands, credentials or source.
         summary = {key: result.get(key) for key in ('returncode', 'failure')}
         report = None
@@ -742,7 +749,8 @@ class AuthorLaneDeployment:
                     report = decoded
             except (ValueError, KeyError, TypeError): pass
         state = report['state'] if report else 'unknown'
-        _write_new(trace/'transport.json', dict(**summary, report_verified=report is not None, report=report))
+        _write_new(trace/'transport.json', dict(**summary, report_verified=report is not None, report=report,
+            capture_sha256=capture_sha256))
         self._event(request, 'metadata_install_receipt', state, report=report,
-                    transport=summary, candidate_sha256=context['candidate_sha256'])
+                    transport=summary, candidate_sha256=context['candidate_sha256'],transport_capture_sha256=capture_sha256)
         return self.get(identifier, request)
