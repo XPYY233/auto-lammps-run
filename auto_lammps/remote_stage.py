@@ -447,7 +447,7 @@ def copy_geometry_source(catalog_directory, item, output_fd):
         os.close(folder)
 
 
-def _copy_author_source(source_root, item, output_fd):
+def _copy_author_source(source_root, item, output_fd, *, accounted_output=False):
     """Stream one exact original within a private HPC root; never import it."""
     folder = os.dup(source_root)
     try:
@@ -464,7 +464,7 @@ def _copy_author_source(source_root, item, output_fd):
         try:
             before = os.fstat(fd)
             if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid()
-                    or before.st_mode & 0o077 or before.st_size != item['size']):
+                    or before.st_mode & (0o022 if accounted_output else 0o077) or before.st_size != item['size']):
                 raise StageError('Author source is not the pinned private regular file')
             remaining, checksum = before.st_size, hashlib.sha256()
             with os.fdopen(output_fd, 'wb', closefd=False) as output:
@@ -622,7 +622,9 @@ def receive_author(root_path, request_id, package_sha256, stream, *, _profile_pa
                                 os.close(folder); folder = child
                             fd = os.open(parts[-1], os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400, dir_fd=folder)
                             try:
-                                _copy_author_source(source_roots[row['binding_sha256']], row, fd)
+                                accounted_roots={item['binding_sha256'] for item in profile['author_reference'].get('execution_policy',{}).get('accounted_inputs',[])}
+                                _copy_author_source(source_roots[row['binding_sha256']], row, fd,
+                                    accounted_output=row['binding_sha256'] in accounted_roots)
                             finally:
                                 os.close(fd)
                             os.fsync(folder)

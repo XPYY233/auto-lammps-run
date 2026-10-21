@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from auto_lammps.agent_candidates import CandidateError, candidate_messages, validate_body
 from auto_lammps.authorization import candidate_check
-from auto_lammps.candidate_tools import expand_tools, cycle_metadata
+from auto_lammps.candidate_tools import expand_tools, cycle_metadata, VERSION
 import test_atom_swap_candidates as swap_fixture
 
 
@@ -73,7 +73,7 @@ class CycleScreenTests(unittest.TestCase):
         self.assertIn('warren_cowley_first_shell',messages[0]['content'])
         self.assertIn('structural_contract',json.loads(messages[1]['content'])['analysis_adapter'])
         tool=json.loads(messages[1]['content'])['workflow_adapter']
-        self.assertEqual(tool['version'],5)
+        self.assertEqual(tool['version'],VERSION)
         self.assertIn('sample_swap_types',tool['operations'])
         self.assertFalse(tool['limits_grant_resources'])
 
@@ -127,7 +127,7 @@ class CycleFrozenCandidateTests(unittest.TestCase):
         self.assertNotIn('sample_swap_types',script)
         self.assertEqual(len(record['script_screen']['bounded_cycles']),9)
         self.assertEqual(self.transport.call_count,1)
-        self.assertEqual(record['input']['workflow_adapter']['version'],5)
+        self.assertEqual(record['input']['workflow_adapter']['version'],VERSION)
 
     def test_mixed_eighteen_sources_bind_structural_plan_to_the_same_grant(self):
         self.configure()

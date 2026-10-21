@@ -16,6 +16,9 @@ import test_supplier_checked_candidate_review as supplier
 class CandidateReviewFeedbackTests(unittest.TestCase):
     def setUp(self):
         self.f = supplier.SupplierCheckedCandidateReviewTests()
+        # Full prior draft + complete review + failure evidence exceed the tiny
+        # default fixture cap. The application's production gate is unchanged.
+        self.f.max_input_bytes = 131072
         self.f.setUp(); self.addCleanup(self.f.doCleanups)
         self.service, self.client = self.f.service, self.f.client
         self.doc, self.tasks = self.f.doc, self.f.tasks
@@ -79,7 +82,7 @@ class CandidateReviewFeedbackTests(unittest.TestCase):
             payload = json.loads(body); source = json.loads(payload['messages'][1]['content'])
             if 'failure' in source:
                 self.assertEqual(source['failure']['previous_review_feedback'],self.feedback)
-                self.assertEqual(source['failure']['execution_budget']['remaining_core_seconds'],506016)
+                self.assertEqual(source['failure']['current_planning_execution_budget']['remaining_core_seconds'],506016)
                 return 200,response(diagnosis)
             if 'requirement_references' in source:
                 return self.f.valid_review(body,*args)

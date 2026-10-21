@@ -206,7 +206,8 @@ def _source_capability_members(capability):
 
 
 def _deployment(value):
-    if (not isinstance(value, dict) or set(value) != {'environments', 'analysis_capabilities', 'resources', 'missing'}
+    required={'environments','analysis_capabilities','resources','missing'}
+    if (not isinstance(value, dict) or set(value)-{'unavailable_capabilities','registered_execution_environment_ids'} != required
             or not isinstance(value['environments'], list) or len(value['environments']) > 32
             or not isinstance(value['analysis_capabilities'], list) or len(value['analysis_capabilities']) > 64
             or not isinstance(value['resources'], dict) or len(canonical(value['resources'])) > 8192
@@ -214,6 +215,9 @@ def _deployment(value):
         raise TaskError('作者方案需要受信的 CPU 部署菜单与分析能力。')
     result = dict(environments=[], analysis_capabilities=[], resources=deepcopy(value['resources']),
                   missing=_strings(value['missing']))
+    if 'unavailable_capabilities' in value:result['unavailable_capabilities']=_strings(value['unavailable_capabilities'])
+    if 'registered_execution_environment_ids' in value:
+        result['registered_execution_environment_ids']=_strings(value['registered_execution_environment_ids'])
     seen = set()
     for item in value['environments']:
         if (not isinstance(item, dict) or set(item) != {'id', 'label', 'sha256', 'executables'}
@@ -242,7 +246,8 @@ def _deployment(value):
 
 def author_reference_input(value, scope_record, paper_sources, *, validation_record=None):
     """Pure projection after the service has rechecked the saved scope."""
-    if (not isinstance(value, dict) or set(value) not in (_INPUT_FIELDS, _INPUT_FIELDS | {'author_validation_id'})
+    optional = {'author_validation_id', 'reference_inputs'}
+    if (not isinstance(value, dict) or set(value) - optional != _INPUT_FIELDS
             or value['scope'] != 'reference_only' or value['role'] != 'author_reference_human_only'):
         raise TaskError('作者 A 方案仅接受应用参考侧的受信来源，不能接收普通 B 输入。')
     task_id(value['task_id']); task_id(value['paper_id']); task_id(value['scope_id'])
@@ -276,6 +281,9 @@ def author_reference_input(value, scope_record, paper_sources, *, validation_rec
                     scope_sha256=scope_record['scope_sha256'], scope=deepcopy(scope)),
                 author_source=reader, sources=sources, invocation_source_ids=invocation_ids,
                 deployment=_deployment(value['deployment']), missing=_strings(value['missing']))
+    if 'reference_inputs' in value:
+        from .author_reference_inputs import validate_reference_inputs
+        result['reference_inputs'] = validate_reference_inputs(value['reference_inputs'], value['task_id'])
     if 'author_validation_id' in value:
         record = validation_record or {}; contract = record.get('contract', {})
         if (record.get('state') != 'recorded' or record.get('can_prepare_A_plan') is not True
@@ -335,6 +343,8 @@ def plan_selection_context(evidence):
         required=['dependency_id', 'invocation_ids', 'analysis_capability_ids', 'citations', 'missing'],
         properties=dict(dependency_id=dict(type='string', enum=scope['dependency_ids']),
             invocation_ids=strings(MAX_INVOCATIONS, 80), analysis_capability_ids=strings(64, 80), citations=citations, missing=strings(64, 2000)))
+    if evidence.get('reference_inputs'):
+        coverage['properties']['accounted_input_files']=dict(type='array',maxItems=128,items=file_type)
     bounded = evidence.get('author_validation')
     if 'author_validation' in evidence:
         if not isinstance(bounded, dict) or not bounded:
@@ -395,6 +405,13 @@ def plan_selection_context(evidence):
             missing='needs_clarification_is_a_saved_plan_not_execution_authorization',
             execution_approval='not_required_for_nonexecuting_plan_preparation',
             revision='complete_saved_previous_answer_plus_specific_errors_not_start_over'))
+    if 'reference_inputs' in evidence:
+        from .author_reference_inputs import validate_reference_inputs
+        result['accounted_reference_inputs'] = validate_reference_inputs(evidence['reference_inputs'], evidence['task_id'])
+        result['requirements']['accounted_reference_inputs'] = 'separate_previously_accounted_HPC_outputs_with_fixed_current_SHA256; '
+        result['requirements']['accounted_reference_inputs'] += 'may_be_required_inputs_never_repository_source_or_executable_entrypoints; do_not_recompute_verified_shared_inputs'
+    if evidence['deployment'].get('registered_execution_environment_ids'):
+        result['requirements']['execution_environments']='Use only deployment.registered_execution_environment_ids for proposed executable invocations; other retained menus are historical metadata.'
     if bounded:
         result['author_validation'] = deepcopy(bounded)
         result['requirements'].update(
@@ -405,6 +422,8 @@ def plan_selection_context(evidence):
                 'reuse_requires_independently_verified_output_binding_not_supported_here_record_as_missing; '
                 'unsupported_source_parameterization_is_needs_clarification_never_rewrite_author_code',
             validation_limits='development_subset_not_full_paper_success_not_B_scope_not_round_reset')
+        result['requirements']['bounded_physics_first']='Verified accounted_input_files may cover an already-computed raw shared prerequisite only when also required by an original invocation. '
+        result['requirements']['bounded_physics_first']+='Keep every selected dependency; missing postprocessing capabilities stay in coverage.missing as analysis_pending, do not block otherwise complete bounded raw physics or ask a new science approval; proposed may have these postprocessing gaps, questions must not pretend they block the original raw call. Never claim scientific/full-paper success.'
     return result
 
 
@@ -484,6 +503,12 @@ def validate_author_plan(evidence, value):
             states=states, unit_count=bounded['contract']['unit_count'], full_paper_success=False,
             changes_B_scope=False, reused_outputs_verified=False)
     files = {row['path']: row for row in evidence['author_source']['files']}
+    input_files = dict(files)
+    for receipt in evidence.get('reference_inputs', []):
+        for row in receipt['files']:
+            if row['path'] in input_files and input_files[row['path']] != row:
+                raise TaskError('旧参考输出与原作者输入的同路径字节冲突。')
+            input_files[row['path']] = row
     environments = {row['id']: row for row in evidence['deployment']['environments']}
     analyses = {row['id']: row for row in evidence['deployment']['analysis_capabilities']}
     directories = {'.'} | {str(parent) for path in files for parent in PurePosixPath(path).parents if str(parent) != '.'}
@@ -504,6 +529,9 @@ def validate_author_plan(evidence, value):
             raise TaskError('作者方案的调用编号、环境或源码内工作目录无效。')
         seen.add(row['id']); entrypoint = _file(row['entrypoint'], files)
         environment = environments[row['environment_id']]
+        approved=evidence['deployment'].get('registered_execution_environment_ids')
+        if value['status']=='proposed' and approved is not None and row['environment_id'] not in approved:
+            raise TaskError('可执行原调用须选择资源库实际登记的固定入口环境；历史菜单仍保留。')
         programs = {item['id']: item for item in environment['executables']}
         if row['executable_id'] not in programs:
             raise TaskError('作者方案选择了未固定的可执行程序。')
@@ -528,7 +556,7 @@ def validate_author_plan(evidence, value):
         required = row['required_files']
         if not isinstance(required, list) or not 1 <= len(required) <= 128:
             raise TaskError('作者原始输入文件清单为空或超限。')
-        required = [_file(item, files) for item in required]
+        required = [_file(item, input_files) for item in required]
         if len({item['path'] for item in required}) != len(required) or entrypoint not in required:
             raise TaskError('作者文件清单不能重复或遗漏原入口。')
         citations = _citations(row['citations'], sources, required=True)
@@ -562,25 +590,37 @@ def validate_author_plan(evidence, value):
     expected = scope['dependency_ids']
     if len(value['coverage']) != len(expected):
         raise TaskError('作者方案必须逐项对应全部已选择的共享依赖，不能删减范围。')
-    coverage, covered = [], set()
+    coverage, covered, analysis_pending = [], set(), []
+    accounted_files={item['path']:item for receipt in evidence.get('reference_inputs',[]) for item in receipt['files']}
+    actually_required={item['path']:item['sha256'] for call in invocations for item in call['required_files']}
     for row in value['coverage']:
-        if (not isinstance(row, dict) or set(row) != {'dependency_id', 'invocation_ids', 'analysis_capability_ids', 'citations', 'missing'}
+        fields={'dependency_id','invocation_ids','analysis_capability_ids','citations','missing'}
+        if (not isinstance(row, dict) or set(row) not in (fields,fields|{'accounted_input_files'})
                 or row['dependency_id'] not in expected or row['dependency_id'] in covered):
             raise TaskError('作者方案依赖对应编号缺失、新增或重复。')
-        covered.add(row['dependency_id']); missing = _strings(row['missing']); issues.extend(missing)
+        covered.add(row['dependency_id']); missing = _strings(row['missing'])
+        dependency = next(item for item in scope['dependencies'] if item['id'] == row['dependency_id'])
+        deferred=bool(bounded and dependency['data_class']=='postprocessing' and missing)
+        if deferred:analysis_pending.append(dict(dependency_id=row['dependency_id'],missing=deepcopy(missing)))
+        else:issues.extend(missing)
         calls = _ids(row['invocation_ids'], seen, MAX_INVOCATIONS)
         methods = _ids(row['analysis_capability_ids'], set(analyses), 64)
         cites = _citations(row['citations'], sources, required=not missing)
-        if not calls and not methods and not missing:
+        reused=[_file(item,accounted_files) for item in row.get('accounted_input_files',[])]
+        if any(actually_required.get(item['path'])!=item['sha256'] for item in reused):
+            raise TaskError('旧记账覆盖必须是原调用实际需要的固定输入，不能用无关旧文件假覆盖原始求值。')
+        if len({item['path'] for item in reused})!=len(reused):raise TaskError('旧记账输入覆盖不能重复。')
+        if not calls and not methods and not missing and not reused:
             raise TaskError('依赖未对应原调用或分析能力时须列出具体缺项。')
-        dependency = next(item for item in scope['dependencies'] if item['id'] == row['dependency_id'])
-        if dependency['data_class'] == 'raw_lammps' and not calls and not missing:
+        if dependency['data_class'] == 'raw_lammps' and not calls and not missing and not reused:
             raise TaskError('原始 LAMMPS 求值依赖必须对应原作者调用，不能由分析工具代替。')
         for invocation in invocations:
             if invocation['id'] in calls and row['dependency_id'] not in invocation['dependency_ids']:
                 raise TaskError('依赖与作者调用的双向对应不一致。')
-        coverage.append(dict(dependency_id=row['dependency_id'], invocation_ids=calls,
-                             analysis_capabilities=[deepcopy(analyses[item]) for item in methods], citations=cites, missing=missing))
+        normalized=dict(dependency_id=row['dependency_id'],invocation_ids=calls,
+            analysis_capabilities=[deepcopy(analyses[item]) for item in methods],citations=cites,missing=missing)
+        if 'accounted_input_files' in row:normalized['accounted_input_files']=reused
+        coverage.append(normalized)
     for invocation in invocations:
         matched = {row['dependency_id'] for row in coverage if invocation['id'] in row['invocation_ids']}
         if set(invocation['dependency_ids']) != matched or not matched:
@@ -621,6 +661,7 @@ def validate_author_plan(evidence, value):
                 original_files_rewritten=False, execution_approval_required=True)
     if validation is not None:
         report['author_validation'] = validation
+        report['analysis_pending']=analysis_pending
     return report
 
 
@@ -653,6 +694,8 @@ def _revision_sources(previous, current):
         raise TaskError('修订必须保留原作者文件及其大小和 SHA。')
     if any(row not in new_author['reads'] for row in old_author['reads']):
         raise TaskError('修订必须保留上一稿作者读取回执。')
+    if any(row not in current.get('reference_inputs', []) for row in previous.get('reference_inputs', [])):
+        raise TaskError('修订必须保留独立记账参考输入的原回执。')
     if not set(previous['invocation_source_ids']) <= set(current['invocation_source_ids']):
         raise TaskError('修订不能隐藏原作者调用说明。')
     old_deployment, new_deployment = previous['deployment'], current['deployment']

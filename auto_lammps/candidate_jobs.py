@@ -25,7 +25,7 @@ MAX_REVIEW_REQUESTS = 3
 BOOKKEEPING = {'candidate_review_request', 'candidate_model_review', 'review_recovery_requested',
                'review_request', 'model_review', 'config_rebased', 'clarification_answered',
                'model_proposal', 'proposal_request', 'development_recovery_authorized',
-               'review_unknown_disposition'}
+               'review_unknown_disposition','saved_plan_selected'}
 ACTIVE = {'diagnosing_failure','reusing_plan', 'running', 'model_requested', 'checking_plan', 'repairing_plan', 'preparing_files'}
 LABELS = {'proposal_request':'方案生成轮次已登记', 'model_proposal':'方案版本已保存', 'reusing_plan':'沿用上一版方案并重新检查', 'queued': '等待准备', 'running': '核对准备条件', 'model_requested': '生成计算方案',
           'review_recovery_requested':'同一原稿重审已登记', 'review_request':'AI 原稿审核请求已记账',
@@ -865,6 +865,93 @@ class CandidateService:
             with self.tasks.transaction() as db:
                 self.history._event(db, job['id'], state, payload)
 
+    def saved_plan_options(self, identifier):
+        """Only actual prepared snapshots of this frozen task can be selected."""
+        job=self.history.get(identifier)
+        if job is None:return []
+        options=[];seen=set()
+        for event in job['events']:
+            digest=event['payload'].get('snapshot_sha256')
+            if event['state']!='prepared' or not digest or digest in seen:continue
+            seen.add(digest)
+            try:
+                snapshot=Snapshot(self.snapshots/digest,digest);snapshot.verify()
+                with root_descriptor(snapshot.path) as root:
+                    generation=json.loads(read_file(root,'generation.json',2000000))
+                if (generation['input'].get('condition_record_sha256')!=job['condition_sha256']
+                        or generation.get('saved_plan_selection')):continue
+                proposal_sha=sha256(canonical(generation['proposal']))
+                links=[e['payload'] for e in job['events'] if e['state']=='model_proposal'
+                       and e['payload'].get('proposal_sha256')==proposal_sha]
+                if not links:continue
+                key=links[-1]['request_id'];found=self.client.calls.lookup(key)
+                receipt=(found or {}).get('receipt') or {}
+                if (receipt.get('state')!='completed' or receipt.get('output_sha256')!=proposal_sha
+                        or sha256(canonical(receipt.get('structured_output')))!=proposal_sha):continue
+                round_number=next((e['payload'].get('round') for e in job['events']
+                    if e['state']=='proposal_request' and e['payload'].get('request_id')==key),None)
+                previous=dict(value=receipt['structured_output'],request_id=key,
+                              receipt={k:v for k,v in receipt.items() if k!='structured_output'})
+                options.append(dict(snapshot_sha256=digest,proposal_sha256=proposal_sha,
+                                    proposal_request_id=key,proposal_round=round_number,
+                                    review_feedback=self.latest_review_feedback(identifier,previous)))
+            except (OSError,ValueError,KeyError,TypeError):continue
+        return options
+
+    def select_saved_plan(self,identifier,revision,*,snapshot_sha256,request_id,accept_unresolved_review):
+        """Explicit development retest selection; rebind resources, never regenerate science."""
+        request_id=task_id(request_id)
+        if accept_unresolved_review is not True:raise CandidateError('请明确确认保留未解决科研审核问题后选用原稿。')
+        job=self.history.get(identifier)
+        if job is None:raise CandidateError('没有已准备的历史方案。')
+        with self.history.lease(job['id']) as acquired:
+            if not acquired:raise CandidateError('当前方案仍在处理中，请等待原操作结束。')
+            job=self.history.get(identifier)
+            if job['state'] in ACTIVE or job['state']=='queued':raise CandidateError('当前准备仍在进行，不能切换原稿。')
+            if self._review_unresolved(job):raise CandidateError('存在未知审核回执，请先核对供应商；不能借选稿绕过。')
+            inputs=research_inputs(self.tasks,identifier,revision)
+            if inputs['condition_record_sha256']!=job['condition_sha256']:raise CandidateError('历史方案的冻结条件已变化。')
+            existing=[e['payload'] for e in job['events'] if e['state']=='saved_plan_selected' and e['payload'].get('selection_request_id')==request_id]
+            if existing:
+                if existing[0]['source_snapshot_sha256']!=snapshot_sha256:raise CandidateError('选用请求编号不可换稿。')
+                return job
+            option=next((o for o in self.saved_plan_options(identifier) if o['snapshot_sha256']==snapshot_sha256),None)
+            if option is None:raise CandidateError('只能选用本任务真实已准备且来源核验通过的方案。')
+            found=self.client.calls.lookup(option['proposal_request_id']);receipt=found['receipt']
+            previous=dict(value=receipt['structured_output'],request_id=option['proposal_request_id'],
+                          receipt={k:v for k,v in receipt.items() if k!='structured_output'})
+            feedback=self.latest_review_feedback(identifier,previous)
+            resources,budget=self._new_execution_inputs(identifier)
+            if budget is None:raise CandidateError('原稿开发复测需要本任务已批准的实际资源上限。')
+            selection=dict(mode='development_retest_with_unresolved_scientific_review',
+                selection_request_id=request_id,source_snapshot_sha256=snapshot_sha256,
+                proposal_request_id=option['proposal_request_id'],proposal_sha256=option['proposal_sha256'],
+                proposal_round=option['proposal_round'],accept_unresolved_review=True,
+                scientific_review_status='unresolved',review_feedback=feedback)
+            from .agent_candidates import generate_candidate_draft
+            result=generate_candidate_draft(self.client,self.adapter,**inputs,resources=resources,
+                execution_budget=budget,store=self.snapshots,max_atoms=self.max_atoms,output_layout=self.output_layout,
+                previous_proposal=previous,proposal_round_budget=job['proposal_rounds'],require_analysis_plan=True,
+                review_plan=False,saved_plan_selection=selection,
+                guidance=[item['note'] for item in self.tasks.guidance(identifier)])
+            source=Snapshot(self.snapshots/snapshot_sha256,snapshot_sha256).verify()
+            current=result['snapshot'].verify()
+            old_script=next(item['sha256'] for item in source['files'] if item['path']=='in.lammps')
+            new_script=next(item['sha256'] for item in current['files'] if item['path']=='in.lammps')
+            if old_script!=new_script:raise CandidateError('选用原稿不能改变任何科学脚本字节。')
+            from .authorization import candidate_check
+            candidate_check(result['snapshot'],max_atoms=self.max_atoms)
+            if self.tasks.get(identifier)['revision']!=revision:raise CandidateError('选用期间任务已变化。')
+            generation=result['generation']
+            with self.tasks.transaction() as db:
+                self.history._event(db,job['id'],'config_rebased',{'from':job['config_sha256'],'to':self.config_sha256})
+                self.history._event(db,job['id'],'saved_plan_selected',selection)
+                self.history._event(db,job['id'],'prepared',dict(summary=generation['proposal']['summary'],questions=[],
+                    snapshot_sha256=result['snapshot'].digest,request_id=result['request_id'],
+                    geometry=generation['geometry_receipt'],analysis=generation['proposal']['analysis'],
+                    saved_plan_selection=selection))
+            return self.history.get(identifier)
+
     def plan_review(self, identifier):
         """用户审核方案所需的内容：脚本、结构、分析定义与文件摘要（不含模型私密回答）。"""
         public = ('in.lammps', 'structure.data', 'analysis.json', 'generation.json')
@@ -882,12 +969,16 @@ class CandidateService:
                                     {'candidate_review_request','candidate_model_review',
                                      'review_recovery_requested','review_request','model_review'}],
                   'execution_authorized': result.get('execution_authorized', False), 'files': []}
+        review['saved_plan_options']=self.saved_plan_options(identifier)
+        review['saved_plan_selection']=result.get('saved_plan_selection')
         try:
             review['latest_review_feedback'] = self.latest_review_feedback(identifier)
         except (CandidateError,ModelError,TaskError,ManifestError,KeyError,TypeError,ValueError):
             # Retained plans remain readable; an unverified report is never
             # presented as feedback or supplied to the next model request.
             review['latest_review_feedback'] = None
+        if result.get('saved_plan_selection'):
+            review['latest_review_feedback']=result['saved_plan_selection'].get('review_feedback')
         if job['state'] != 'prepared' or not result.get('snapshot_sha256'):
             return review
         digest = result['snapshot_sha256']

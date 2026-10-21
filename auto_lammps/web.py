@@ -3,6 +3,7 @@
 The browser can save operator model connections, and versioned HPC settings. Existing job connections stay fixed.
 """
 import argparse
+from copy import deepcopy
 from contextlib import asynccontextmanager
 import hashlib
 import json
@@ -203,6 +204,11 @@ class PlanRecheckInput(Revision):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$', min_length=32, max_length=32)
 
 
+class SavedPlanSelectionInput(PlanRecheckInput):
+    snapshot_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    accept_unresolved_review: StrictBool
+
+
 class CandidateInput(Revision):
     answers: str | None = Field(default=None, max_length=4000)
 
@@ -376,7 +382,7 @@ class ReferenceScopeCreate(ReferenceScopePreview):
 
 
 def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, candidate_service=None, results_reader=None,
-               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None, author_execution_config=None, reference_target_recovery_authorizations=()):
+               reference_model_client=None, reference_views=None, paper_evidence_views=None, reference_evidence_views=None, paper_workflow_service=None, source_discovery=None, workbench_bridge=None, workbench_bindings=None, model_connections=None, result_assistant_enabled=None, hpc_connections=None, collections_directory=None, execution_jobs=None, discovery_library=None, session_activity=None, geometry_catalog_client=None, reference_output_config=None, reference_outputs_service=None, output_analysis_service=None, author_reference_config=None, author_workspace_service=None, author_execution_config=None, reference_target_recovery_authorizations=(), author_helper_review=None):
     if execution_jobs:
         if execution_jobs.tasks.path!=store.path:raise ValueError('Execution must share the task store')
         controller=execution_jobs.controller
@@ -680,6 +686,23 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         author_environment_inventory=AuthorEnvironmentInventory(store,hpc,
             profile_provider=existing_author_environment,audit_directory=store.path.parent/'author-environment-inventory')
         if execution_jobs is not None:author_workspace.environment_inventory=author_environment_inventory
+        if execution_jobs is not None and reference_outputs_service is not None:
+            from .author_reference_inputs import AuthorReferenceInputs
+            from .author_lane_deployment import AuthorLaneDeployment
+            from .author_lane_policy import InheritedAuthorResourcePolicy
+            author_inputs=AuthorReferenceInputs(author_workspace,reference_outputs_service,
+                audit_directory=store.path.parent/'author-reference-inputs',controller=execution_jobs.controller)
+            author_lane=AuthorLaneDeployment(author_workspace,execution_jobs.controller,hpc,
+                audit_directory=store.path.parent/'author-resource-runtime',reviewed_helpers=author_helper_review)
+            def inherited_author_resource_receipt(identifier):
+                source,_,_,_=author_workspace._metadata(identifier)
+                value=source.get('execution_resource_receipt')
+                if value is None:raise TaskError('作者资源库尚无原已批准执行包回执。')
+                return deepcopy(value)
+            author_lane.policy=InheritedAuthorResourcePolicy(author_lane,author_inputs,
+                resource_receipt_provider=inherited_author_resource_receipt)
+            author_workspace.reference_inputs=author_inputs
+            author_workspace.lane_deployment=author_lane
     if author_execution_config is not None:
         if author_workspace.execution is not None:raise ValueError('Use one author execution configuration')
         from .author_dispatch_config import load_author_dispatch
@@ -1575,6 +1598,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
     def author_execution_follow(identifier: str,data: Input):
         return author_execution_action(lambda:author_workspace.follow_execution(identifier))
 
+    @app.post('/api/tasks/{identifier}/author-execution/resources')
+    def author_execution_resources(identifier: str,data: AuthorResourceInput):
+        require_open_task(identifier)
+        if author_workspace.lane_deployment is None:raise TaskError('当前项目未连接原作者资源运行器。')
+        return author_execution_action(lambda:author_workspace.lane_deployment.ensure_resources(identifier,data.request_id))
+
     @app.get('/api/tasks/{identifier}/author-environment')
     def author_environment_status(identifier: str):
         value=author_environment_inventory.status(identifier)
@@ -2201,6 +2230,20 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         return {'candidate': candidate_service.enqueue_review(identifier, data.revision,
                                                               request_id=data.request_id)}
 
+    @app.post('/api/tasks/{identifier}/plan/select-saved')
+    @serialized_task_action
+    def plan_select_saved(identifier: str,data: SavedPlanSelectionInput):
+        require_open_task(identifier)
+        if store.paused(identifier):raise TaskError('任务已暂停，请先继续任务。')
+        if candidate_service is None:raise TaskError('方案服务尚未接入。')
+        if execution_jobs is not None:
+            execution=execution_jobs.get(identifier)
+            if execution and execution.get('state') in {'queued','running','waiting','dispatching','unknown','reconcile_required'}:
+                raise TaskError('已有计算仍在进行或回执待核对，不能切换方案。')
+        return {'candidate':candidate_service.select_saved_plan(identifier,data.revision,
+            snapshot_sha256=data.snapshot_sha256,request_id=data.request_id,
+            accept_unresolved_review=data.accept_unresolved_review)}
+
     @app.post('/api/tasks/{identifier}/plan/approve')
     @serialized_task_action
     def plan_approve(identifier: str, data: ApprovalInput):
@@ -2382,6 +2425,7 @@ def main():
     parser.add_argument('--reference-output-config',type=Path,help='Private pinned legacy author-output inventory; retrieval only, never physics')
     parser.add_argument('--author-reference-config',type=Path,help='Private reference-only source, license and deployment bindings; plan preparation is not submission')
     parser.add_argument('--author-execution-config',type=Path,help='Explicit private author A accounted execution deployment; user approval remains required')
+    parser.add_argument('--author-helper-review-config',type=Path,help='Private reviewed installed helper manifest; does not grant scientific execution permission')
     parser.add_argument('--workbench-config',type=Path,help='Private registered literature-workbench binding and persistent storage; project API only')
     parser.add_argument('--reference-target-recovery-config',type=Path,
         help='Private explicit same-task P refinement approvals; no execution or unknown-request authorization')
@@ -2454,6 +2498,10 @@ def main():
         from .workbench_runtime import assemble_private_workbench
         workbench_bridge, workbench_bindings = assemble_private_workbench(papers, args.workbench_config)
     reference_views=ReferenceViews(args.reference_reports_directory,papers) if args.reference_reports_directory else None
+    author_helper_review=None
+    if args.author_helper_review_config:
+        from .runtime_launcher import read_regular
+        author_helper_review=json.loads(read_regular(args.author_helper_review_config.absolute(),16384,private=True))
     recovery_authorizations=()
     if args.reference_target_recovery_config:
         recovery_path=args.reference_target_recovery_config.absolute()
@@ -2473,6 +2521,7 @@ def main():
                           reference_output_config=args.reference_output_config,
                           author_reference_config=args.author_reference_config,
                           author_execution_config=args.author_execution_config,
+                          author_helper_review=author_helper_review,
                           reference_target_recovery_authorizations=recovery_authorizations,
                           discovery_library=DiscoveryLibrary(args.resource_discoveries,args.resource_discovery_reviews),
                           session_activity=SessionActivity(args.session_activity_file) if args.session_activity_file else None), host='127.0.0.1', port=args.port,

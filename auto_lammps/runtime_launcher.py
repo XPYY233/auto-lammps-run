@@ -774,15 +774,19 @@ def deployment_parallelism(profile, cores):
     return native
 
 
-def _native_environment_command(native, command):
+def _native_environment_command(native, command, *, child_bin=None):
     # Trusted deployment paths/modules are positional arguments, never shell source.
     # Native MPI uses the scheduler bootstrap; never copy isolated fork/loopback flags.
     script = ('set -eo pipefail\nsource "$1"\nshift\nmodule purge\n'
               'count="$1"\nshift\nfor ((i=0; i<count; i++)); do module load "$1"; shift; done\n'
               'export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 SLURM_EXPORT_ENV=ALL I_MPI_HYDRA_BOOTSTRAP=slurm\n'
               'exec "$@"\n')
+    if child_bin is not None:
+        absolute(child_bin)
+        script = script.replace('exec "$@"', 'export PATH="$1:$PATH"\nshift\nexec "$@"')
     return [native['shell_path'], '--noprofile', '--norc', '-c', script, 'auto-lammps-native',
-            native['bootstrap_path'], str(len(native['modules'])), *native['modules'], *command]
+            native['bootstrap_path'], str(len(native['modules'])), *native['modules'],
+            *([child_bin] if child_bin is not None else []), *command]
 
 
 def native_command(native, *, entrypoint, cores):
@@ -829,6 +833,74 @@ def validate_author_argv(kind, argv, *, working_directory, entrypoint):
     if not matches(argv[0]):
         raise ExecutionDenied('Reviewed author binary must receive its pinned original file as the first operand')
     return 0
+
+
+def author_execution_policy(registered, *, files=None, native=None, runtime_tree=None):
+    """Validate the optional explicitly reviewed original-mode/input policy.
+
+    Historical deployments retain their exact behavior. Accounted outputs are
+    a separate origin kind; they are never asserted to be repository originals.
+    """
+    policy = registered.get('execution_policy')
+    if policy is None: return dict(file_modes={}, child_bin=None, child_executables=[], accounted_inputs=[])
+    if (not isinstance(policy, dict) or set(policy) != {'schema_version', 'review_sha256', 'file_modes',
+            'child_bin_path', 'child_executables', 'accounted_inputs'} or type(policy['schema_version']) is not int
+            or policy['schema_version'] != 1):
+        raise ExecutionDenied('Explicit author execution policy fields are required')
+    hash_value(policy['review_sha256'])
+    modes = {}; children = policy['child_executables']; receipts = policy['accounted_inputs']
+    if not isinstance(policy['file_modes'], list) or len(policy['file_modes']) > 128:
+        raise ExecutionDenied('Bounded reviewed original executable modes are required')
+    known = {row['path']: row for row in files} if files is not None else None
+    for row in policy['file_modes']:
+        if (not isinstance(row, dict) or set(row) != {'path','sha256','mode'}
+                or type(row['mode']) is not int or row['mode'] != 0o500 or row['path'] in modes):
+            raise ExecutionDenied('Only separately reviewed read/execute original-file modes are allowed')
+        relative(row['path']); hash_value(row['sha256'])
+        if known is not None and (row['path'] not in known or known[row['path']]['sha256'] != row['sha256']):
+            raise ExecutionDenied('Reviewed executable mode differs from original bytes')
+        modes[row['path']] = row['mode']
+    if not isinstance(children, list) or len(children) > 16:
+        raise ExecutionDenied('Bounded reviewed child executables are required')
+    child_bin = policy['child_bin_path']
+    if children:
+        absolute(child_bin)
+        if runtime_tree is not None and child_bin != str(absolute(runtime_tree)/'child-bin'):
+            raise ExecutionDenied('Author child aliases must belong to the immutable runtime directory')
+    elif child_bin is not None:
+        raise ExecutionDenied('A child path without reviewed executables is forbidden')
+    names = set()
+    for row in children:
+        if (not isinstance(row, dict) or set(row) != {'name','path','sha256'}
+                or not isinstance(row['name'], str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',row['name'])
+                or row['name'] in names):
+            raise ExecutionDenied('Child aliases must uniquely name fixed reviewed native files')
+        names.add(row['name']); absolute(row['path']); hash_value(row['sha256'])
+        if native is not None and native['files'].get(row['path']) != row['sha256']:
+            raise ExecutionDenied('Child interpreter is absent from the verified native files')
+    if not isinstance(receipts, list) or len(receipts) > 4:
+        raise ExecutionDenied('Bounded accounted original-output input receipts are required')
+    seen = set(); roots = {row['binding_sha256']:row['path'] for row in registered['source_roots']}
+    for receipt in receipts:
+        if (not isinstance(receipt, dict) or set(receipt) != {'kind','task_id','request_id','job_id','manifest_sha256',
+                'receipt_sha256','binding_sha256','root','files'} or receipt['kind'] != 'accounted_reference_output'
+                or any(not isinstance(receipt[key],str) or not re.fullmatch('[a-f0-9]{32}',receipt[key]) for key in ('task_id','request_id'))
+                or not isinstance(receipt['job_id'],str) or not re.fullmatch('[1-9][0-9]{0,19}',receipt['job_id'])):
+            raise ExecutionDenied('Original output inputs must retain their accounted reference identity')
+        for key in ('manifest_sha256','receipt_sha256','binding_sha256'): hash_value(receipt[key])
+        absolute(receipt['root'])
+        if roots.get(receipt['binding_sha256']) != receipt['root'] or receipt['binding_sha256'] in seen:
+            raise ExecutionDenied('Accounted input root is not independently registered')
+        seen.add(receipt['binding_sha256'])
+        if not isinstance(receipt['files'],list) or not 1 <= len(receipt['files']) <= 512:
+            raise ExecutionDenied('Accounted input inventory is incomplete')
+        paths = set()
+        for row in receipt['files']:
+            if (not isinstance(row,dict) or set(row) != {'path','size','sha256'} or row['path'] in paths
+                    or type(row['size']) is not int or row['size'] < 0):
+                raise ExecutionDenied('Invalid independently accounted input file')
+            relative(row['path']);hash_value(row['sha256']);paths.add(row['path'])
+    return dict(file_modes=modes, child_bin=child_bin, child_executables=children, accounted_inputs=receipts)
 
 
 def author_reference_commands(profile, package, *, package_sha256, profile_sha256, work_root, resources):
@@ -883,6 +955,7 @@ def author_reference_commands(profile, package, *, package_sha256, profile_sha25
         if name in inputs or any(name.startswith(old + '/') or old.startswith(name + '/') for old in inputs):
             raise ExecutionDenied('Duplicated or overlapping original-file inventory')
         inputs[name] = row
+    execution_policy = author_execution_policy(registered, files=files, native=native, runtime_tree=profile['runtime_tree'])
     calls = package.get('invocations')
     if not isinstance(calls, list) or not 1 <= len(calls) <= 128:
         raise ExecutionDenied('An explicit bounded original author action list is required')
@@ -956,7 +1029,7 @@ def author_reference_commands(profile, package, *, package_sha256, profile_sha25
             if name in outputs and outputs[name] != row:
                 raise ExecutionDenied('Conflicting shared author output declarations')
             outputs[name] = dict(row)
-        actions.append(dict(id=identifier, argv=_native_environment_command(native, command),
+        actions.append(dict(id=identifier, argv=_native_environment_command(native, command, child_bin=execution_policy['child_bin']),
             original_argv=list(arguments), cwd=str(work / cwd), outputs=[dict(row) for row in produced]))
     if sorted(outputs.values(), key=lambda row: row['path']) != package.get('outputs'):
         raise ExecutionDenied('Collected author outputs differ from their original actions')
@@ -1066,6 +1139,12 @@ def execute_author_native(profile, profile_data, case, package, grant, *, reques
     for path, checksum in native['files'].items():
         if digest(read_regular(path, 1024*1024*1024)) != checksum:
             raise ExecutionDenied('Native author environment file changed: '+Path(path).name)
+    execution_policy = author_execution_policy(profile['author_reference'], files=package['files'],
+        native=native, runtime_tree=profile['runtime_tree'])
+    for child in execution_policy['child_executables']:
+        alias = Path(execution_policy['child_bin'])/child['name']
+        if not alias.is_symlink() or os.readlink(alias) != child['path']:
+            raise ExecutionDenied('Reviewed child interpreter alias changed')
     validate_author_outputs(grant['outputs'], package, input_bytes=0)
     write_once(case/'execution-intent.json', dict(request_id=request_id, job_id=job_id,
         manifest_sha256=manifest_sha256, author_package_sha256=manifest_sha256, role='author_reference',
@@ -1081,9 +1160,15 @@ def execute_author_native(profile, profile_data, case, package, grant, *, reques
         data = read_regular(case/item['path'], item['size'])
         if len(data) != item['size'] or digest(data) != item['sha256']:
             raise ExecutionDenied('Author original changed before working-copy creation')
-        fd = os.open(path, os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW, 0o400)
+        mode = execution_policy['file_modes'].get(item['path'],0o400)
+        fd = os.open(path, os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW, mode)
         with os.fdopen(fd, 'wb') as target:
             target.write(data); target.flush(); os.fsync(target.fileno())
+    # Original state-level invocations may reuse an existing shared precursor;
+    # retain the original wrapper's declared output-directory preparation.
+    # Paths are the already signed literal output list, never new author input.
+    for item in package['outputs']:
+        (output/relative(item['path'])).parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     environment = {key:value for key,value in os.environ.items() if key.startswith('SLURM_')}
     environment.update(PATH='/usr/bin:/bin', LC_ALL='C')
     started = time.monotonic(); code = 0; timed_out = False; completed = 0

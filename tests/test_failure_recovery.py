@@ -80,9 +80,24 @@ class CancelledFailureContextTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_P_A_OR_SCORE_DIFFERENCE_CANARY', canonical(result).decode())
         self.assertIn('ERROR: synthetic runtime condition', result['logs'][0]['tail'])
         self.assertTrue(result['failed_proposal'])
+        import json
+        self.assertEqual(result['failed_execution_resources'],json.loads(before['resources']))
+        self.assertEqual(result['failed_execution_resources_sha256'],sha256(canonical(json.loads(before['resources']))))
+        self.assertEqual(result['failed_execution_accounting'],dict(accounted=True,actual_core_seconds=1))
+        self.assertNotIn('current_planning_execution_budget',result)
         self.assertEqual(self.f.ledger.get(self.parent), before)
         self.assertEqual(self.f.ledger.events(self.parent), events)
         self.fetch.assert_called_once_with(self.parent)
+
+    def test_failed_resources_must_match_the_actual_verified_generation(self):
+        import json
+        self.finish();execution.grant_cancelled_development(self.f)
+        before=self.f.ledger.get(self.parent)
+        altered=json.loads(before['resources']);altered['wall_seconds']+=60
+        with patch.object(self.jobs.ledger,'get',return_value={**before,'resources':json.dumps(altered)}):
+            with self.assertRaisesRegex(ValueError,'verified proposal manifest'):
+                failure_context(self.jobs,self.task)
+        self.assertEqual(self.f.ledger.get(self.parent),before)
 
     def test_unaccounted_cancelled_never_queries_grant_or_collects(self):
         self.finish(account=False)

@@ -27,7 +27,7 @@ from .site_thermodynamics import GUIDE as SITE_THERMODYNAMICS_GUIDE
 from .geometry_catalog import GeometryCatalogError, validate_entry
 from .plan_review import normalized_review_issues
 
-GENERATOR_VERSION = 24
+GENERATOR_VERSION = 25
 PLAN_REVIEW_VERSION = 5
 MAX_PROPOSAL_ROUNDS = 3
 MODEL_PLANNING_GUIDE = (
@@ -54,7 +54,7 @@ COMMANDS = {'neighbor', 'neigh_modify', 'timestep', 'min_style', 'min_modify', '
             'thermo', 'thermo_style', 'thermo_modify', 'velocity', 'fix', 'unfix', 'run',
             'reset_timestep', 'dump', 'dump_modify', 'undump', 'compute', 'uncompute',
             'variable', 'print', 'write_data', 'change_box', 'displace_atoms', 'group', 'load_structure', 'reset_structure', 'delete_atoms', 'write_dump',
-            'begin_cycle', 'end_cycle', 'sample_swap_types', 'save_state', 'scan_sites', 'run_schedule'}
+            'begin_cycle', 'end_cycle', 'sample_swap_types', 'cycle_seed', 'save_state', 'scan_sites', 'run_schedule'}
 FIX_STYLES = {'nve', 'nvt', 'npt', 'box/relax', 'deform', 'setforce', 'momentum', 'ave/time', 'atom/swap'}
 COMPUTE_STYLES = {'temp', 'pressure', 'pe', 'ke', 'stress/atom', 'displace/atom', 'cna/atom', 'centro/atom', 'reduce'}
 RESERVED_OUTPUTS = {'stdout.txt', 'stderr.txt', 'log.lammps'}
@@ -129,7 +129,7 @@ def _geometry_context(max_atoms, initial_geometry):
                 physical_evaluation_performed=False, scientifically_verified=False)
 
 
-def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
+def _atom_swap(tokens, *, type_count, packages, sampled_pairs=(), seed_sequences=()):
     """Declared canonical MC syntax only; no engine or expression evaluation."""
     if 'MC' not in packages:
         raise CandidateError('atom/swap requires MC in the configured engine packages; do not invent availability')
@@ -143,7 +143,10 @@ def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
         raise CandidateError('atom/swap requires the all group and explicit N, X, seed, T, types and ke')
     if not re.fullmatch(r'[A-Za-z0-9_]{1,64}', tokens[1]):
         raise CandidateError('atom/swap fix ID must be a static identifier')
+    sequence = next((item for item in seed_sequences if tokens[6] == '${'+item['variable']+'}'),None)
     for name, value in zip(('N', 'X', 'seed'), tokens[4:7]):
+        if name == 'seed' and sequence is not None:
+            continue
         if not re.fullmatch(r'[0-9]{1,10}', value) or not 1 <= int(value) <= 2147483647:
             raise CandidateError('atom/swap '+name+' must be a positive literal 32-bit integer')
     try:
@@ -176,11 +179,14 @@ def _atom_swap(tokens, *, type_count, packages, sampled_pairs=()):
     if options['ke'] not in (['yes'], ['no']) or options.get('semi-grand', ['no']) != ['no']:
         raise CandidateError('atom/swap requires ke yes/no and preserves composition (semi-grand no)')
     result = dict(fix_id=tokens[1],every_steps=int(tokens[4]),attempts_per_event=int(tokens[5]),
-                  seed=int(tokens[6]),temperature=temperature,
+                  seed=tokens[6] if sequence is not None else int(tokens[6]),temperature=temperature,
                   types=pair if sampled else [int(x) for x in pair],
                   conserve_kinetic_energy=options['ke']==['yes'],composition_preserved=True)
     if sampled:
         result['type_sampler'] = {key:sampled[key] for key in ('prefix','type_count','seed')}
+    if sequence is not None:
+        result['seed_sequence'] = {key:sequence[key] for key in
+            ('prefix','first','stride','last','count','method','persistent_rng')}
     return result
 
 
@@ -228,6 +234,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
     schedule_by_line = {item['line']:item for item in cycles.get('run_schedules', [])}
     current_cycle = None
     sampled_pairs = []
+    seed_sequences = []
     scan_by_line={item['line']:item for item in state_scans['scans']}
     state_by_line={item['line']:item for item in state_scans['states']}
     managed_paths={output_prefix+name for name in state_scans['output_files']}
@@ -270,6 +277,12 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             baseline_swap_indices = {name: swap_creation[name]['index'] for name in active_swaps}
             cycle_start_step, cycle_native_run_steps = current_step, 0
             cycle_index_definitions = set()
+        elif command == 'cycle_seed':
+            sequence = next(item for item in current_cycle['seed_sequences'] if item['line'] == line_number)
+            if sequence['variable'] in variables:
+                raise CandidateError('Cycle seed variables must not replace existing workflow variables')
+            seed_sequences.append(sequence)
+            variables[sequence['variable']] = 'cycle_seed_index'
         elif command == 'sample_swap_types':
             sample = next(item for item in current_cycle['samples'] if item['line'] == line_number)
             if any(name in variables for name in sample['variables']):
@@ -280,6 +293,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
             if active_fixes != baseline_fixes:
                 raise CandidateError('Each bounded cycle must restore its fix lifecycle before repeating')
             sample_names = {name for item in current_cycle['samples'] for name in item['variables']}
+            sample_names.update(item['variable'] for item in current_cycle.get('seed_sequences',[]))
             for name in cycle_index_definitions:
                 if name in variables:
                     raise CandidateError('Delete index variables created inside a cycle before repeating')
@@ -295,6 +309,7 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
                     record_literal_work(index, cycle_start_step, current_step,
                                         line=current_cycle['begin_line'], cycle_id=current_cycle['id'])
             sampled_pairs = []
+            seed_sequences = []
             current_cycle = None
         undefined=set(re.findall(r'\$\{([A-Za-z][A-Za-z0-9_]*)\}',line))-set(variables)
         if undefined:
@@ -380,7 +395,8 @@ def validate_body(body, outputs, *, output_prefix='/output/', structures=None, t
         if command == 'fix' and tokens[1] in active_swaps:
             raise CandidateError('Unfix an active atom/swap before redefining its parameters')
         if command == 'fix' and tokens[3] == 'atom/swap':
-            swap=_atom_swap(tokens,type_count=type_count,packages=packages,sampled_pairs=sampled_pairs)
+            swap=_atom_swap(tokens,type_count=type_count,packages=packages,sampled_pairs=sampled_pairs,
+                            seed_sequences=seed_sequences)
             if current_cycle:
                 swap['cycle_count'] = current_cycle['count']
             active_swaps.add(tokens[1]);swaps.append(swap)
@@ -774,6 +790,10 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
         'implementation parameters and explicit seeds with their rationale in summary. '
         'N is the positive MD-step interval, X is attempts per event (NOT total cycles), seed is a '
         'positive integer, T is a positive finite temperature. Use literal numbers and exactly two '
+        'distinct declared types; the seed alone may instead be the exact ${prefix_seed} placeholder '
+        'of a preceding cycle_seed in this same cycle, under its bounded arithmetic reseed contract. '
+        'Reseeding is not continuous RNG or thermostat-state preservation; the model and static reviewer '
+        'must assess the actual frozen algorithm, never automatically accept scientific equivalence. Use exactly two '
         'distinct declared numeric types per fix, or exactly the two placeholders produced by '
         'sample_swap_types inside the same bounded cycle with the full declared type count. '
         'For multicomponent exchange, independently '
@@ -884,7 +904,10 @@ def candidate_messages(task_text, *, units, resource_summaries, max_atoms, outpu
             'Keep the entire frozen scientific scope, conditions and requested outputs. Use these limits '
             'when planning and minimally revising the retained proposal. Do not enlarge the allowance, '
             'silently reduce sampling, invent runtime estimates, or claim the budget proves feasibility. '
-            'If the full requested calculation cannot be supported within the supplied limits, explain '
+            'Runtime uncertainty alone does not require an additional benchmark submission or prove the '
+            'complete calculation impossible. Do not extrapolate MD throughput from CG minimization timing. '
+            'Retain honest runtime uncertainty and the actual hard scheduler/resource limits. If actual '
+            'evidence establishes that the full requested calculation cannot be supported, explain '
             'the unresolved issue through the existing clarification contract.')
         context.update(execution_resources=vars(execution_resources),execution_budget=budget)
     if initial_geometry is not None:
@@ -972,13 +995,17 @@ def review_candidate_plan(client, adapter, *, proposal, task_text, units, compat
          'initial read_data, atom_modify map, exact potential commands, and all load_structure switches. '
          'capture and emit_table are adapter operations: they MUST expand into variable and print '
          'commands in rendered_script. Those lowered commands are NOT manual writer violations. '
-         'begin_cycle/end_cycle, run_schedule, sample_swap_types, save_state and scan_sites are compiler operations. Their exact bounded '
+         'begin_cycle/end_cycle, run_schedule, sample_swap_types, cycle_seed, save_state and scan_sites are compiler operations. Their exact bounded '
          'loop/label/next/jump and constant type-variable expansions are permitted trusted controls, '
          'not raw model dispatch or extra retries. workflow_screen retains their declared counts. '
          'sample_swap_types chooses i=floor(random(1,n+1)) and r=floor(random(1,n)); '
          'random(lo,hi,seed) samples lo <= value < hi; the upper bound is excluded. '
          'Thus floor(random(1,n+1)) is in 1..n, floor(random(1,n)) is in 1..n-1. '
          'j=r+(r>=i), giving two distinct types in 1..n, never n+1. Audit the complete expression, '
+         'cycle_seed freezes a checked, explicit first+(iteration-1)*stride integer seed for each iteration. '
+         'Its different seeds prevent identical seed initialization, but this is reseeding, NOT a continuous '
+         'MC RNG, preserved thermostat state or proof of independent streams. Judge that actual method '
+         'against frozen scientific requirements; never downgrade a required continuity violation. '
          'not an intermediate bound or variable name. The potential adapter copies verified source bytes '
          'under canonical model filenames and binds pin/checksums/type mapping; a canonical filename '
          'different from the source basename is not a fabricated potential or a provenance failure. '
@@ -1142,7 +1169,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                              answers=None, guidance=None, require_analysis_plan=False, review_plan=False, failure_context=None,
                              initial_geometry=None, review_recovery=None,
                              before_review_request=None, on_review=None, execution_budget=None,
-                             review_feedback=None):
+                             review_feedback=None, saved_plan_selection=None):
     """Trusted product service API; task text must already be permitted for the Agent.
 
     Identical requests share an ID: refresh/restart never sends again. A previous
@@ -1152,6 +1179,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     if not isinstance(resources, Resources) or resources.storage_bytes <= 262144:
         raise CandidateError('Explicit resources and space for controller receipts are required')
     execution_budget = validate_execution_budget(resources,execution_budget)
+    if saved_plan_selection is not None:
+        if (previous_proposal is None or review_plan or failure_context is not None or review_recovery is not None
+                or saved_plan_selection.get('proposal_sha256') != sha256(canonical(previous_proposal['value']))
+                or saved_plan_selection.get('mode') != 'development_retest_with_unresolved_scientific_review'):
+            raise CandidateError('Saved-plan selection requires the unchanged original proposal and no model actions')
     review_feedback = validate_review_feedback(review_feedback,previous_proposal,condition_record_sha256)
     if review_feedback is not None and review_recovery is not None:
         raise CandidateError('Same-plan review cannot apply feedback or revise the proposal')
@@ -1218,6 +1250,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                'condition_record_sha256': condition_record_sha256}
     if execution_budget is not None:
         context['execution_budget'] = execution_budget
+    if saved_plan_selection is not None:
+        context['saved_plan_selection'] = saved_plan_selection
     if review_feedback is not None:
         context['review_feedback_sha256'] = sha256(canonical(review_feedback))
     if initial_geometry is not None:
@@ -1247,6 +1281,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     request_limit=min(MAX_PROPOSAL_ROUNDS,budget['remaining'])
 
     def complete_proposal(key, request_messages, kind):
+        if saved_plan_selection is not None:
+            raise CandidateError('Selecting an existing plan cannot call or revise a model')
         if review_recovery is not None:
             raise CandidateError('Same-plan review cannot generate or revise a proposal')
         try:
@@ -1287,8 +1323,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         from .failure_recovery import diagnose
         failure_evidence = failure_context
         if execution_budget is not None:
-            failure_evidence = {**failure_context,'execution_resources':vars(resources),
-                                'execution_budget':execution_budget}
+            failure_evidence = {**failure_context,'current_planning_resources':vars(resources),
+                                'current_planning_execution_budget':execution_budget}
         if review_feedback is not None:
             failure_evidence = {**failure_evidence,'previous_review_feedback':review_feedback}
         recovery=diagnose(client,failure_evidence,proposal,on_stage=on_stage)
@@ -1299,7 +1335,11 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             {'role':'user','content':'Revise this SAME proposal using your diagnosis of its verified failed execution. '
              'Keep all frozen scientific conditions, sizes, potential and outputs. Make the minimal necessary '
              'correction, check the complete subsequent stages too, and return the complete proposal JSON. '
-             'The diagnosis is a hypothesis pending actual validation. '+canonical(recovery).decode()}]
+             'The diagnosis is a hypothesis pending actual validation; matching log quotations verifies '
+             'provenance, not its causal or throughput claims. Original failed_execution_resources/accounting '
+             'belong to the old run; the current planning allowance is a separate future limit. Do not infer '
+             'a timeout from SIGTERM alone or MD throughput from minimization, and do not require an extra '
+             'benchmark solely for runtime uncertainty. No extra submission is authorized. '+canonical(recovery).decode()}]
         if on_stage:on_stage('repairing_plan')
         repair_id=sha256(canonical(dict(base=request_id,kind='execution_failure_repair',diagnosis=recovery)))[:32]
         completion=complete_proposal(repair_id,messages,'execution_failure_repair')
@@ -1313,7 +1353,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
     prepared_geometry = {}
     last_error = None
     seen_proposals=set()
-    validation_limit=1 if review_recovery is not None else request_limit + int(previous_proposal is not None)
+    validation_limit=1 if review_recovery is not None or saved_plan_selection is not None else request_limit + int(previous_proposal is not None)
     for attempt in range(max(1,validation_limit)):
         if on_proposal:
             on_proposal({'request_id':completion['request_id'],
@@ -1326,7 +1366,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
             screen = validate_proposal(proposal, max_atoms=max_atoms, output_layout=output_layout,
                                       require_analysis_plan=require_analysis_plan, packages=adapter.packages,
                                       initial_geometry=initial_geometry)
-            if review_recovery is not None and sha256(canonical(proposal))!=completion['receipt']['output_sha256']:
+            if (review_recovery is not None or saved_plan_selection is not None) and sha256(canonical(proposal))!=completion['receipt']['output_sha256']:
                 raise CandidateError('Same-plan review cannot normalize or alter the original model proposal')
             if screen is not None:
                 if proposal['potential_pin'] not in {x['pin'] for x in compatible}:
@@ -1355,7 +1395,7 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
         except ReviewContractError:
             raise
         except CandidateError as error:
-            if review_recovery is not None:
+            if review_recovery is not None or saved_plan_selection is not None:
                 raise
             last_error = error
             # Inspect the SAME rejected proposal. These deterministic diagnostics
@@ -1431,6 +1471,8 @@ def generate_candidate_draft(client, adapter, *, task_text, units, resources, st
                   'scientific_conditions_verified': False, 'runtime_isolation_verified': False,
                   'execution_authorized': False}
     if recovery:generation['failure_recovery']=recovery
+    if saved_plan_selection is not None:
+        generation['saved_plan_selection']=saved_plan_selection
     files = {**binding.files, 'in.lammps': script,
              'analysis.json': canonical(analysis), 'generation.json': canonical(generation)}
     if initial_geometry is None:

@@ -1193,6 +1193,32 @@ function renderPlanVersions(review){
     if(version.workflow_diff)item.append(node('pre',version.workflow_diff,'plan-code'));
     box.append(item);
   }
+  if(review.saved_plan_selection){
+    box.append(node('p',`已选用原第 ${review.saved_plan_selection.proposal_round||'?'} 稿进行开发复测；科学审核问题仍未解决，不代表科研通过。`,'form-note'));
+  }else if(review.state!=='prepared'){
+    for(const option of (review.saved_plan_options||[])){
+      const block=node('div',undefined,'form-note');
+      block.append(node('p',`选用已保存的第 ${option.proposal_round||'?'} 稿。保留原脚本和未解决科研审核；仅重新绑定已批准资源，不生成新稿。`));
+      const feedback=option.review_feedback?.report;
+      if(feedback){
+        for(const issue of (feedback.issues||[]))block.append(researchContent('未解决审核问题：'+issue));
+        if(feedback.summary)block.append(researchContent('原审核说明：'+feedback.summary));
+      }
+      const label=node('label'),check=document.createElement('input');check.type='checkbox';
+      label.append(check,document.createTextNode('我接受保留原稿未解决的科研审核问题，用于本次开发复测。'));
+      const button=node('button',`选用已保存的第 ${option.proposal_round||'?'} 稿`);button.type='button';button.disabled=true;
+      check.onchange=()=>{button.disabled=!check.checked;};
+      button.onclick=()=>action(async()=>{
+        if(!check.checked||button.disabled)return;button.disabled=true;
+        await api(`/api/tasks/${current.id}/plan/select-saved`,{revision:current.revision,
+          request_id:crypto.randomUUID().replaceAll('-',''),snapshot_sha256:option.snapshot_sha256,
+          accept_unresolved_review:true});
+        await afterChange('已选用保存原稿并核对实际资源；科学审核未通过记录保留。请确认并提交这一份原稿。');
+        await refreshPlanReview();await refreshCandidate();
+      });
+      block.append(label,button);box.append(block);
+    }
+  }
 }
 
 async function refreshPlanReview(){

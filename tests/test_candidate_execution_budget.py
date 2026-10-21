@@ -191,7 +191,9 @@ class CandidateExecutionBudgetTests(unittest.TestCase):
         resources,budget = self.service._new_execution_inputs(self.doc['id'])
         requests = []
         evidence = {'condition_sha256':'d'*64,'request_id':'synthetic-cancelled',
-            'logs':[{'tail':'synthetic timeout'}]}
+            'logs':[{'tail':'synthetic timeout'}],
+            'failed_execution_resources':asdict(self.base),
+            'failed_execution_accounting':{'accounted':True,'actual_core_seconds':1234}}
         result = generate_candidate_draft(self.client,self.f.adapter,task_text='Synthetic complete scope.',
             units='metal',resources=resources,execution_budget=budget,store=self.f.root/'repair-snapshots',
             condition_record_sha256='d'*64,previous_proposal=previous,failure_context=evidence,
@@ -202,12 +204,23 @@ class CandidateExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(self.transport.call_count,2)  # diagnosis + one complete revision
         bodies = [json.loads(call.args[0]) for call in self.transport.call_args_list]
         failure = json.loads(bodies[0]['messages'][1]['content'])['failure']
-        self.assertEqual(failure['execution_budget'],budget)
+        self.assertEqual(failure['current_planning_execution_budget'],budget)
+        self.assertEqual(failure['current_planning_resources'],asdict(resources))
+        self.assertNotIn('execution_budget',failure)
+        self.assertEqual(failure['failed_execution_resources'],asdict(self.base))
+        self.assertNotEqual(failure['failed_execution_resources']['wall_seconds'],resources.wall_seconds)
+        self.assertEqual(failure['failed_execution_accounting']['actual_core_seconds'],1234)
+        self.assertIn('never treat them as the failed run reservation',bodies[0]['messages'][0]['content'])
+        self.assertIn('SIGTERM/cancelled alone does not establish',bodies[0]['messages'][0]['content'])
+        self.assertIn('throughput from minimization',bodies[1]['messages'][-1]['content'])
+        self.assertIn('does not require an additional benchmark',bodies[1]['messages'][0]['content'])
         revision = bodies[1]['messages']
         self.assertIn({'role':'assistant','content':canonical(previous['value']).decode()},revision)
         self.assertEqual(json.loads(revision[1]['content'])['execution_budget'],budget)
         self.assertEqual(evidence,{'condition_sha256':'d'*64,'request_id':'synthetic-cancelled',
-            'logs':[{'tail':'synthetic timeout'}]})
+            'logs':[{'tail':'synthetic timeout'}],
+            'failed_execution_resources':asdict(self.base),
+            'failed_execution_accounting':{'accounted':True,'actual_core_seconds':1234}})
         self.assertEqual(result['snapshot'].verify()['resources'],asdict(resources))
         from auto_lammps.authorization import candidate_check
         self.assertEqual(candidate_check(result['snapshot'],max_atoms=100000)['scientific_status'],'not_evaluated')

@@ -35,6 +35,22 @@ def _artifact(spec):
     return raw
 
 
+def _plan_source_files(row,evidence,report):
+    """Add only AI-declared required accounted inputs, with a distinct origin."""
+    files=deepcopy(row['source_files']);known={item['path'] for item in files}
+    receipts=row['deployment'].get('execution_policy',{}).get('accounted_inputs',[])
+    if not receipts:return files
+    if receipts!=evidence.get('reference_inputs'):
+        raise TaskError('作者方案没有保留固定记账输入的独立回执。')
+    required={item['path']:item['sha256'] for call in report['invocations'] for item in call['required_files']}
+    for receipt in receipts:
+        for item in receipt['files']:
+            if item['path'] in required and item['path'] not in known:
+                if item['sha256']!=required[item['path']]:raise TaskError('AI 所需旧输入摘要与记账回执不一致。')
+                files.append(dict(item,binding_sha256=receipt['binding_sha256'],source_path=item['path']));known.add(item['path'])
+    return files
+
+
 def load_author_dispatch(workspace, path, hpc):
     """Build real services from explicit existing credentials and ledger entries."""
     path = Path(path)
@@ -126,6 +142,8 @@ def load_author_dispatch(workspace, path, hpc):
         if row is None:
             raise TaskError('本任务尚未登记作者 A 的可信执行部署。')
         source, paper, receipt, scope = workspace._metadata(identifier)
+        if getattr(workspace,'lane_deployment',None) is not None:
+            source=workspace.lane_deployment.planner_binding(identifier,source)
         history = workspace.planner.history(identifier)
         if not history or any(item['receipt'] is None or item['state'] == 'unknown' for item in history):
             raise TaskError('作者 A 原方案尚未准备或有未知模型请求，不能换旧稿执行。')
@@ -150,15 +168,15 @@ def load_author_dispatch(workspace, path, hpc):
             raise TaskError('作者源码与执行不能切换保存的 HPC 连接。')
         if sha256(_artifact(row['profile'])) != row['deployment']['profile_sha256']:
             raise TaskError('作者运行 profile 已改变。')
-        return dict(report=deepcopy(report), evidence=deepcopy(evidence),
-            **{key:deepcopy(row[key]) for key in ('source_files', 'deployment', 'resources', 'provenance', 'evaluation')},
+        return dict(report=deepcopy(report), evidence=deepcopy(evidence),source_files=_plan_source_files(row,evidence,report),
+            **{key:deepcopy(row[key]) for key in ('deployment', 'resources', 'provenance', 'evaluation')},
             task_revision=workspace.tasks.get(identifier)['revision'], transport_identity=deepcopy(transport.identity))
 
     def runtime_provider(binding, package):
         verify_config()
         identifier = binding['evidence']['task_id']; row = registrations[identifier]
-        if any(binding[key] != row[key] for key in
-                ('source_files', 'deployment', 'resources', 'provenance', 'evaluation')):
+        if (binding['source_files']!=_plan_source_files(row,binding['evidence'],binding['report'])
+                or any(binding[key] != row[key] for key in ('deployment', 'resources', 'provenance', 'evaluation'))):
             raise TaskError('作者原作业的部署或评测绑定与当前注册不同；未迁移或重新提交。')
         stage, submit, collect = [StageEndpoint(**row[key]) for key in
                                   ('stage_endpoint', 'submission_endpoint', 'collection_endpoint')]

@@ -27,6 +27,8 @@ class AuthorReferenceWorkspace:
         self.execution=None
         self.initial=None
         self.environment_inventory=None
+        self.reference_inputs=None
+        self.lane_deployment=None
         self.model_calls=model_calls
         self.current=ContextVar('author_reference_current',default=None)
         self.locks=private_directory(tasks.path.parent/'author-workspace-locks')
@@ -392,9 +394,10 @@ class AuthorReferenceWorkspace:
     def execution_status(self,identifier):
         self.tasks.get(identifier)
         if self.execution is None:
-            return dict(task_id=identifier,configured=False,can_prepare=False,can_approve=False,
+            inherited=bool(self.lane_deployment is not None and self.bindings.get(identifier,{}).get('execution_resource_receipt'))
+            return dict(task_id=identifier,configured=inherited,can_prepare=inherited,can_approve=False,
                 can_submit=False,latest=None,history=[],role='author_reference',scope='reference_only',B_input=False,
-                scientific_status='not_evaluated',disabled_reason='作者 A 的可信执行部署尚未登记；方案可查看，不能提交计算。')
+                scientific_status='not_evaluated',disabled_reason=('准备时直接复用原已批准作者资源包；不新增科学审核。' if inherited else '作者 A 的可信执行部署尚未登记；方案可查看，不能提交计算。'))
         return self.execution.status(identifier)
 
     def _execution(self):
@@ -404,6 +407,9 @@ class AuthorReferenceWorkspace:
 
     def prepare_execution(self,identifier):
         with self.resources._lease(task_id(identifier)):
+            if self.execution is None and self.lane_deployment is not None:
+                history=self.planner.history(identifier)
+                if history:self.lane_deployment.ensure_resources(identifier,history[-1]['request_id'])
             return self._execution().prepare(identifier)
 
     def approve_execution(self,identifier,revision,package_sha256,*,note=''):
@@ -436,6 +442,8 @@ class AuthorReferenceWorkspace:
             if saved is None and (state['pending_reconciliation'] or state['remaining_rounds']==0):
                 raise TaskError('作者方案原请求待核对或三轮已用完；未重新读取或发送。')
             binding,paper,receipt,scope=self._metadata(identifier)
+            if self.lane_deployment is not None and binding.get('execution_resource_receipt'):
+                self.lane_deployment.ensure_resources(identifier,request)
             validation=self.scopes.get_author_validation(identifier)
             if validation is not None and not validation['can_prepare_A_plan']:
                 raise TaskError(validation['disabled_reason'])
@@ -451,6 +459,12 @@ class AuthorReferenceWorkspace:
                 scope='reference_only',role='author_reference_human_only',scope_id=scope['id'],
                 author_source=sources,invocation_paths=paths,
                 deployment=deepcopy(binding['deployment']),missing=deepcopy(binding.get('missing',[])))
+            if self.lane_deployment is not None:
+                enriched=self.lane_deployment.planner_binding(identifier,binding)
+                value['deployment']=deepcopy(enriched['deployment']);value['missing']=deepcopy(enriched.get('missing',[]))
+            if self.reference_inputs is not None:
+                retained_inputs=self.reference_inputs.planner_inputs(identifier)
+                if retained_inputs:value['reference_inputs']=retained_inputs
             if validation is not None:
                 value['author_validation_id']=validation['id']
             token=self.current.set(dict(task_id=identifier,scope_id=scope['id'],receipt_document_sha256=sha256(canonical(receipt)),input=value))
@@ -478,7 +492,7 @@ def load_author_workspace(tasks,papers,scopes,path,hpc,*,model_provider,connecti
         return raw
     for row in config['registrations']:
         expected={'task_id','paper_id','format','policy','connection_revision','receipt','intent','license_approval','association','selections','invocation_paths','deployment','missing'}
-        if set(row)!=expected or row['format'] not in {'acquisition_v1','legacy_selected_resource_v3'}:raise TaskError('作者部署注册字段不完整。')
+        if set(row) not in (expected,expected|{'execution_resource_receipt'}) or row['format'] not in {'acquisition_v1','legacy_selected_resource_v3'}:raise TaskError('作者部署注册字段不完整。')
         identifier=task_id(row['task_id']);task_id(row['paper_id'])
         if identifier in bindings or row['policy']['reference_task_id']!=identifier:raise TaskError('作者任务绑定重复或不一致。')
         if sha256(artifact(row['license_approval']))!=row['policy']['license_approval_sha256']:raise TaskError('许可读取批准摘要不一致。')
@@ -489,6 +503,12 @@ def load_author_workspace(tasks,papers,scopes,path,hpc,*,model_provider,connecti
         else:reader=AuthorSourceReader(directory,row['policy'],transport=transport)
         def license_check(spec=deepcopy(row['license_approval'])):artifact(spec)
         binding={key:deepcopy(row[key]) for key in ('paper_id','format','selections','invocation_paths','deployment','missing')}
+        if 'execution_resource_receipt' in row:
+            original=row['execution_resource_receipt']
+            if not isinstance(original,dict) or set(original)!={'path','sha256','request_id'}:
+                raise TaskError('作者资源库需要原执行资源回执、摘要和原记账请求。')
+            task_id(original['request_id']);artifact({key:original[key] for key in ('path','sha256')})
+            binding['execution_resource_receipt']=deepcopy(original)
         binding.update(reader=reader,load_receipt=lambda spec=deepcopy(row['receipt']):json.loads(artifact(spec)),
             receipt_file_sha256=row['receipt']['sha256'],load_intent=lambda spec=deepcopy(row['intent']):json.loads(artifact(spec)) if spec else None,
             load_association=lambda spec=deepcopy(row['association']):json.loads(artifact(spec)),verify_license=license_check)

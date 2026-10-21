@@ -1,5 +1,6 @@
 """Runtime-model diagnosis from verified, task-bound failure outputs; no execution."""
 import re
+import json
 from pathlib import Path
 
 from .manifest import canonical, sha256, Snapshot
@@ -52,9 +53,15 @@ def failure_context(jobs, identifier):
     generation=__import__('json').loads(runtime.read_regular(snapshot.path/'generation.json',2000000))
     if generation['input']['condition_record_sha256']!=inputs['condition_record_sha256']:
         raise ValueError('Failed proposal does not match frozen conditions')
+    failed_resources = json.loads(row['resources'])
+    if generation['input'].get('resources') != failed_resources:
+        raise ValueError('Failed execution resources differ from the verified proposal manifest')
     return dict(request_id=row['id'],job_id=row['job_id'],manifest_sha256=row['manifest_sha256'],
         condition_sha256=inputs['condition_record_sha256'],scheduler_state=row['state'],logs=logs,
         collection_sha256=sha256(canonical(receipt['header'])),scientific_status='not_evaluated',
+        failed_execution_resources=failed_resources,
+        failed_execution_resources_sha256=sha256(canonical(failed_resources)),
+        failed_execution_accounting=dict(accounted=True,actual_core_seconds=row['actual_core_seconds']),
         failed_proposal=generation['proposal'])
 
 
@@ -68,7 +75,14 @@ def diagnose(client, evidence, proposal, *, on_stage=None):
          'requirements, invent results, or claim a fix is verified. Return exactly one JSON object {"summary":Chinese explanation,'
          '"evidence":[literal excerpts from supplied log tails],"cause":Chinese explanation distinguishing facts '
          'and hypotheses,"repair":concrete minimal plan changes,"proposed_lesson":a reusable unverified rule}. '
-         'Every field except evidence is a nonempty string. Cite the exact failing command when available. '+GUIDE},
+         'Every field except evidence is a nonempty string. Cite the exact failing command when available. '
+         'failed_execution_resources and failed_execution_accounting describe the ORIGINAL run, bound to its '
+         'verified manifest and ledger. current_planning_resources/current_planning_execution_budget are '
+         'only the allowance for a FUTURE proposal; never treat them as the failed run reservation or elapsed time. '
+         'SIGTERM/cancelled alone does not establish a wall-time timeout or the exact last executed command. '
+         'A minimization timing does not establish production MD throughput; absence of progress output does '
+         'not establish no progress. Preserve uncertainty. A benchmark is a possible future request, never '
+         'an extra authorized submission, nor a prerequisite created solely by missing runtime measurements. '+GUIDE},
         {'role':'user','content':canonical(dict(failure=evidence,existing_proposal=evidence.get('failed_proposal',proposal))).decode()}]
     identifier=sha256(canonical(dict(kind='failure_diagnosis_v2',messages=messages)))[:32]
     # Keep the existing diagnosis identity: a changed adapter must not create a

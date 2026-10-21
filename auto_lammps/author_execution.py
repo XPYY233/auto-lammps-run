@@ -100,7 +100,7 @@ def _deployment(value, resources):
     keys = {'schema_version', 'role', 'profile_sha256', 'approval_sha256',
             'execution_mode', 'formal_isolation', 'gpu_allowed', 'resources',
             'source_roots', 'environments'}
-    if (not isinstance(value, dict) or set(value) != keys
+    if (not isinstance(value, dict) or set(value) not in (keys, keys | {'execution_policy'})
             or type(value['schema_version']) is not int or value['schema_version'] != VERSION
             or value['role'] != _ROLE or value['gpu_allowed'] is not False
             or value['execution_mode'] != 'native_slurm' or value['formal_isolation'] is not False):
@@ -154,6 +154,8 @@ def _deployment(value, resources):
                     raise AuthorExecutionError('Invalid registered author entrypoint')
                 _hash(entry['sha256']); names.add(entry['path'])
         registry[row['id']] = deepcopy(row)
+    from .runtime_launcher import author_execution_policy
+    author_execution_policy(value)
     return source_roots, registry
 
 
@@ -181,6 +183,8 @@ def _raw_plan(report):
                 id=row['id'], label=row['label'], citations=citations(row['citations']),
                 invocation_ids=deepcopy(row['invocation_ids']), argument_bindings=deepcopy(row['argument_bindings']))
                 for row in validation['states']])
+        for raw,normalized in zip(result['coverage'],report['coverage']):
+            if 'accounted_input_files' in normalized:raw['accounted_input_files']=deepcopy(normalized['accounted_input_files'])
         return result
     except (TypeError, KeyError) as exc:
         raise AuthorExecutionError('A complete previously validated author recipe is required') from exc
@@ -205,8 +209,20 @@ def compile_author_package(report, *, evidence, source_files, deployment, resour
         roots, registry = _deployment(deployment, resources)
         files = _source_files(source_files)
         known = {row['path']: row for row in evidence['author_source']['files']}
+        accounted = {}
+        policy = deployment.get('execution_policy', {})
+        for receipt in policy.get('accounted_inputs', []):
+            if receipt not in evidence.get('reference_inputs', []):
+                raise AuthorExecutionError('Accounted reference inputs differ from the source-verified planner receipt')
+            for row in receipt['files']:
+                accounted[(receipt['binding_sha256'], row['path'])] = row
         for name, row in files.items():
-            if (name not in known or any(row[key] != known[name][key] for key in ('size', 'sha256'))
+            original = accounted.get((row['binding_sha256'], row['source_path']))
+            if original is None:
+                original = known.get(name)
+                if row['binding_sha256'] in {receipt['binding_sha256'] for receipt in policy.get('accounted_inputs', [])}:
+                    raise AuthorExecutionError('An accounted output cannot claim arbitrary original-source bytes')
+            if (original is None or any(row[key] != original[key] for key in ('size', 'sha256'))
                     or row['binding_sha256'] not in roots):
                 raise AuthorExecutionError('HPC original file is not bound to the validated author inventory')
         invocations, signatures, outputs = [], set(), {}

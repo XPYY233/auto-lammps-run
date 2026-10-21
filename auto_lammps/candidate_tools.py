@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from .manifest import sha256
 
-VERSION = 5
+VERSION = 6
 MAX_CYCLES = 1000000
 MAX_CYCLE_BLOCKS = 64
 MAX_SAMPLE_TYPES = 64
+MAX_CYCLE_SEED = 2147483646
 MAX_SAVED_STATES = 256
 MAX_SCAN_ATOMS = 100000
 MAX_SCAN_EVALUATIONS = 500000
@@ -20,7 +21,7 @@ _RAW_CONTROL = {'label', 'next', 'jump', 'clear', 'include', 'shell', 'if'}
 _CYCLE_STATE_RESETS = {'load_structure', 'reset_structure', 'delete_atoms',
                        'change_box', 'reset_timestep', 'displace_atoms'}
 
-GUIDE = '''Adapter capabilities (version 5):
+GUIDE = '''Adapter capabilities (version 6):
 begin_cycle <safe_id> <positive_literal_count> / end_cycle <same_id> declares a
 finite, non-nested scientific cycle. At most 64 sequential blocks, at most 1000000
 iterations per block; these are technical limits, NOT additional resource authority.
@@ -53,6 +54,16 @@ random()/normal() expressions cannot be mixed with this tool. LAMMPS equal-style
 is a shared stream initialized only once. Later cycles/clear do not establish an
 independent new seed, and the tool does not promise independent temperature streams.
 Selection uses two draws and skips the first ID algebraically, never rejection/retry.
+cycle_seed <safe_prefix> <positive_literal_first_seed> <positive_literal_stride>
+optionally freezes ${prefix_seed}=first_seed+(iteration-1)*stride inside one cycle.
+Both parameters are explicit model choices; no default is supplied. The COMPLETE
+sequence must be in 1..2147483646, increasing without wrap. It consumes no sampler RNG.
+Only the atom/swap seed argument after this declaration in the SAME cycle may use it;
+definition/deletion is compiler-owned, no aliases/redefinitions. This is reseeding,
+NOT a continuous MC RNG, fix/thermostat-state preservation or statistical independence.
+Explain the sequence, rationale and limitations. Required persistent state: this
+operation cannot satisfy it; never substitute an approximation. Engine 28Mar2023
+atom/swap creates new Park RNGs from the supplied integer (source link below).
 Input must execute with the existing -in file launcher, not stdin: jump SELF needs a
 rewindable input file. Old-engine semantics verified against official 28Mar2023 docs:
 https://raw.githubusercontent.com/lammps/lammps/patch_28Mar2023/doc/src/variable.rst
@@ -195,6 +206,7 @@ https://docs.lammps.org/read_dump.html , https://docs.lammps.org/write_dump.html
 https://docs.lammps.org/read_restart.html , https://docs.lammps.org/write_restart.html ,
 https://docs.lammps.org/set.html , https://docs.lammps.org/delete_atoms.html .
 https://raw.githubusercontent.com/lammps/lammps/patch_28Mar2023/src/MC/fix_atom_swap.cpp .
+https://raw.githubusercontent.com/lammps/lammps/patch_28Mar2023/src/random_park.cpp .
 '''
 
 
@@ -203,7 +215,7 @@ def workflow_tool_context():
     return {'name': 'scientific_workflow_tools', 'version': VERSION,
             'source_sha256': sha256(Path(__file__).read_bytes()),
             'operations': ['capture', 'emit_table', 'begin_cycle', 'end_cycle',
-                           'sample_swap_types', 'run_schedule', 'save_state', 'scan_sites'],
+                           'sample_swap_types', 'cycle_seed', 'run_schedule', 'save_state', 'scan_sites'],
             'limits': {'cycle_blocks': MAX_CYCLE_BLOCKS, 'cycles_per_block': MAX_CYCLES,
                        'saved_states':MAX_SAVED_STATES,'scan_atoms':MAX_SCAN_ATOMS,
                        'scan_minimizations':MAX_SCAN_EVALUATIONS,'scan_types':MAX_SCAN_TYPES},
@@ -322,6 +334,7 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
         raise ValueError('Invalid technical cycle bound')
     cycles, records, line_multipliers, schedules = [], [], {}, []
     active, ids, prefixes, sample_variables = None, set(), set(), {}
+    seed_variables = {}
     seed = None
     calculation_commands = 0
     for number, line in enumerate(body.splitlines(), 1):
@@ -374,6 +387,23 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
             schedule.update(line=number,cycle_id=active['id'])
             active['run_schedule']=schedule
             schedules.append(schedule)
+        elif command == 'cycle_seed':
+            if len(words) != 4 or not re.fullmatch(_SAFE_ID, words[1]) or active is None:
+                raise ValueError('cycle_seed requires a safe prefix, first seed and stride inside a cycle')
+            if words[1] in prefixes:
+                raise ValueError('Sampling prefixes must be unique in the workflow')
+            first = _positive_literal(words[2], MAX_CYCLE_SEED, 'First cycle seed')
+            stride = _positive_literal(words[3], MAX_CYCLE_SEED, 'Cycle seed stride')
+            last = first+(active['count']-1)*stride
+            if last > MAX_CYCLE_SEED:
+                raise ValueError('The complete cycle seed sequence must remain within 1..2147483646 without wrap')
+            prefixes.add(words[1])
+            name = words[1]+'_seed'
+            sequence = dict(prefix=words[1],variable=name,first=first,stride=stride,last=last,
+                            count=active['count'],line=number,cycle_id=active['id'],
+                            method='bounded_arithmetic_reseed',persistent_rng=False)
+            active.setdefault('seed_sequences',[]).append(sequence)
+            seed_variables[name] = sequence
         elif command == 'sample_swap_types':
             if len(words) != 4 or not re.fullmatch(_SAFE_ID, words[1]) or active is None:
                 raise ValueError('sample_swap_types requires a safe prefix, type count and seed inside a cycle')
@@ -434,11 +464,19 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
             _positive_literal(words[4], 2147483647, 'Minimize evaluation bound')
         if sample_variables and re.search(r'\b(?:random|normal)\s*\(', content):
             raise ValueError('Native random()/normal() cannot be mixed with the shared sampling tool RNG')
-        if words[0] in {'variable', 'capture'} and len(words) >= 2 and words[1] in sample_variables:
+        managed_variables = {**sample_variables,**seed_variables}
+        if words[0] in {'variable', 'capture'} and len(words) >= 2 and words[1] in managed_variables:
             raise ValueError('Sampled variables are immutable and managed by the adapter')
         referenced = set(re.findall(r'\$\{([A-Za-z][A-Za-z0-9_]*)\}|\bv_([A-Za-z][A-Za-z0-9_]*)', content))
         for pair in referenced:
             name = pair[0] or pair[1]
+            sequence = seed_variables.get(name)
+            if sequence is not None:
+                if (cycle_id != sequence['cycle_id'] or number <= sequence['line']
+                        or len(words) < 8 or words[:1] != ['fix'] or words[3] != 'atom/swap'
+                        or words[6] != '${'+name+'}' or content.count('${'+name+'}') != 1
+                        or re.search(r'\bv_'+re.escape(name)+r'\b',content)):
+                    raise ValueError('Cycle seed variables may only supply atom/swap seed after declaration in their owning cycle')
             sample = sample_variables.get(name)
             if sample and (cycle_id != sample['cycle_id'] or number <= sample['declaration_line']):
                 raise ValueError('Sampled variable '+name+' may be used only after its declaration in its owning cycle')
@@ -446,7 +484,7 @@ def cycle_metadata(body, *, max_cycles=MAX_CYCLES):
                     and words[2] == 'equal' and not words[3].startswith('$(')):
                 raise ValueError('A dynamic alias to sampled variables outlives its cycle; use capture to freeze it')
     return dict(version=VERSION, cycles=cycles, line_multipliers=line_multipliers,
-                sample_variables=sample_variables, calculation_commands=calculation_commands,
+                sample_variables=sample_variables,cycle_seed_variables=seed_variables,calculation_commands=calculation_commands,
                 sampling_rng='shared_equal_style_stream' if sample_variables else None,
                 sampling_seed=seed,run_schedules=schedules)
 
@@ -779,6 +817,7 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
     starts = {cycle['begin_line']: cycle for cycle in metadata['cycles']}
     ends = {cycle['end_line']: cycle for cycle in metadata['cycles']}
     samples = {sample['line']: sample for cycle in metadata['cycles'] for sample in cycle['samples']}
+    seed_sequences = {item['line']:item for cycle in metadata['cycles'] for item in cycle.get('seed_sequences',[])}
     states={item['line']:item for item in state_scans['states']}
     scans={item['line']:item for item in state_scans['scans']}
     schedules={item['line']:item for item in metadata['run_schedules']}
@@ -825,6 +864,8 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
         elif words[0] == 'end_cycle':
             cycle = ends[number]
             if lower_cycles:
+                for sequence in cycle.get('seed_sequences',[]):
+                    result.append(f'variable {sequence["variable"]} delete')
                 for sample in cycle['samples']:
                     result.extend([f'variable {name} delete' for name in sample['variables']])
                     result.append(f'variable __alr_draw_{sample["prefix"]} delete')
@@ -838,6 +879,13 @@ def expand_tools(body, plan, prefix, *, lower_cycles=False, reload_header=None):
             if lower_cycles:
                 first,last=schedule['run_intervals'][iteration]
                 result.extend([f'if "$(step) != {first}" then "quit 90"',f'run {last-first}'])
+            else:
+                result.append(line)
+        elif words[0] == 'cycle_seed':
+            sequence = seed_sequences[number]
+            if lower_cycles:
+                ordinal = str(iteration) if iteration is not None else f'(v___alr_cycle_{sequence["cycle_id"]}-1)'
+                result.append(f'variable {sequence["variable"]} index $({sequence["first"]}+{ordinal}*{sequence["stride"]}:%.0f)')
             else:
                 result.append(line)
         elif words[0] == 'sample_swap_types':

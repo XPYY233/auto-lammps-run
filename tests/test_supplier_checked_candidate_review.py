@@ -1,5 +1,6 @@
 """One explicit same-draft recovery; synthetic accounting only, no provider or HPC."""
 from copy import deepcopy
+from dataclasses import replace
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -17,13 +18,16 @@ from test_deepseek import response
 class SupplierCheckedCandidateReviewTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.AgentCandidateTests(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
+        if hasattr(self,'resources_override'):self.f.resources=self.resources_override
         self.f.value['analysis']['files'] = ['result.dat']
         self.f.value['analysis']['plan']['tables'][0]['file'] = 'result.dat'
         self.f.value['analysis']['plan']['operations'][0]['file'] = 'result.dat'
         self.f.value['workflow'] = 'run 0\nemit_table result.dat "0 $(pe)"'
         self.tasks = TaskStore(self.f.root/'supplier-tasks.sqlite')
         self.doc = frozen_research(self.tasks)
-        calls = ModelCalls(self.f.root/'supplier-models.sqlite',self.f.calls.config,max_requests=30)
+        calls = ModelCalls(self.f.root/'supplier-models.sqlite',
+            replace(self.f.calls.config,max_input_bytes=getattr(self,'max_input_bytes',self.f.calls.config.max_input_bytes)),
+            max_requests=30)
         self.transport = Mock(side_effect=lambda *args:(200,response(self.f.value)))
         self.client = DeepSeekClient(calls,transport=self.transport,key_reader=lambda:'synthetic-key')
         self.service = CandidateService(self.tasks,self.client,self.f.adapter,resources=self.f.resources,
