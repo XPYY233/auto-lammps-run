@@ -4,6 +4,7 @@ Only private deployment bindings supply source roots, license decisions and
 fixed executables. Browser inputs select a request and a revision note. Source
 quotes are retained as reference evidence, not installed as a local source tree.
 """
+from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ class AuthorReferenceWorkspace:
         self.lane_deployment=None
         self.model_calls=model_calls
         self.current=ContextVar('author_reference_current',default=None)
+        self.metadata_action=ContextVar('author_reference_metadata_action',default=None)
         self.locks=private_directory(tasks.path.parent/'author-workspace-locks')
         self.planner=AuthorReferencePlan(tasks,papers,scopes,self._input,connection_provider=connection_provider)
         with tasks.transaction() as db:
@@ -92,7 +94,78 @@ class AuthorReferenceWorkspace:
                 connection_revision=model['connection_revision'],credential_generation=model['credential_generation'],
                 revision_note=revision_note)
 
+    @contextmanager
+    def _metadata_reads(self,identifier,request):
+        task_id(identifier);task_id(request)
+        if self.metadata_action.get() is not None:
+            raise TaskError('作者元数据读取域不能跨任务或请求复用。')
+        state=dict(task_id=identifier,request_id=request,cache={},probes={})
+        token=self.metadata_action.set(state)
+        try:yield
+        finally:
+            state['cache'].clear();state['probes'].clear()
+            self.metadata_action.reset(token)
+
+    def _metadata_read(self,key,identifier,load,*,fingerprint=canonical,clone=deepcopy):
+        state=self.metadata_action.get()
+        if state is None:return load()
+        if state['task_id']!=identifier:raise TaskError('作者元数据读取域不能跨任务复用。')
+        if key not in state['cache']:
+            value=load();digest=sha256(fingerprint(value))
+            prior=state['probes'].get(key)
+            if prior is not None and prior['digest']!=digest:
+                raise TaskError('准备期间作者来源、范围、许可、连接或环境已变化；未沿用读取快照。')
+            state['probes'][key]=dict(identifier=identifier,load=load,fingerprint=fingerprint,clone=clone,digest=digest)
+            state['cache'][key]=clone(value)
+        return clone(state['cache'][key])
+
+    def _invalidate_metadata_reads(self):
+        state=self.metadata_action.get()
+        if state is not None:state['cache'].clear()
+
+    def _validate_metadata_reads(self):
+        state=self.metadata_action.get()
+        if state is None:return
+        # Verify from fresh reads, sharing only within this independent pass.
+        # Never validate a cached value against itself or replace its baseline.
+        fresh=dict(task_id=state['task_id'],request_id=state['request_id'],cache={},probes={})
+        token=self.metadata_action.set(fresh)
+        try:
+            for key,probe in list(state['probes'].items()):
+                value=self._metadata_read(key,probe['identifier'],probe['load'],
+                    fingerprint=probe['fingerprint'],clone=probe['clone'])
+                if sha256(probe['fingerprint'](value))!=probe['digest']:
+                    raise TaskError('准备期间作者来源、范围、许可、连接或环境已变化；未发送旧快照。')
+        except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
+            if isinstance(error,TaskError):raise
+            raise TaskError('准备期间作者来源、范围、许可、连接或环境未通过重新核验；未发送旧快照。') from None
+        finally:
+            fresh['cache'].clear();fresh['probes'].clear()
+            self.metadata_action.reset(token)
+
+    @staticmethod
+    def _clone_metadata(value):
+        binding,paper,receipt,scope=value
+        # Keep the trusted reader/verification callbacks; copy caller-visible
+        # metadata so one consumer cannot mutate another consumer's snapshot.
+        binding={key:item if key=='reader' or callable(item) else deepcopy(item) for key,item in binding.items()}
+        return binding,deepcopy(paper),deepcopy(receipt),deepcopy(scope)
+
+    def _metadata_fingerprint(self,value):
+        binding,paper,receipt,scope=value;reader=binding['reader']
+        transport=getattr(reader,'transport',None)
+        task=self.tasks.get(binding['reader'].policy['reference_task_id'])
+        return canonical(dict(binding={key:item for key,item in binding.items() if key!='reader' and not callable(item)},
+            reader_policy=reader.policy,transport_identity=transport.identity if transport else None,
+            paper={key:paper[key] for key in ('id','title','doi')},receipt=receipt,scope=scope,
+            task_revision=task['revision']))
+
     def _metadata(self,identifier,*,require_scope=True):
+        return self._metadata_read(('metadata',identifier,require_scope),identifier,
+            lambda:self._load_metadata(identifier,require_scope=require_scope),
+            fingerprint=self._metadata_fingerprint,clone=self._clone_metadata)
+
+    def _load_metadata(self,identifier,*,require_scope=True):
         task=self.tasks.get(identifier)
         if task['mode']!='reproduction':raise TaskError('作者运行方案只属于论文参考任务。')
         binding=self.bindings.get(identifier)
@@ -244,6 +317,7 @@ class AuthorReferenceWorkspace:
             used=db.execute('SELECT count(*) FROM author_source_evidence WHERE task_id=?',(identifier,)).fetchone()[0]
             if used>=32:raise TaskError('参考源码证据版本容量已用完；已有版本和费用保留。')
             db.execute('INSERT INTO author_source_evidence VALUES(?,?,?,?,?)',(key,identifier,data.decode(),sha256(data),datetime.now(timezone.utc).isoformat()))
+        self._invalidate_metadata_reads()
         return value
 
     def _sources(self,identifier,binding,receipt,*,cached_only=False):
@@ -302,7 +376,8 @@ class AuthorReferenceWorkspace:
         return combined
 
     def _cached_sources(self,identifier,binding,receipt):
-        return self._sources(identifier,binding,receipt,cached_only=True)
+        key=('cached_sources',identifier,sha256(canonical(receipt)))
+        return self._metadata_read(key,identifier,lambda:self._sources(identifier,binding,receipt,cached_only=True))
 
     def cached_analysis_sources(self,identifier):
         """Reference-only retained text; never read remote files or invoke AI."""
@@ -355,6 +430,7 @@ class AuthorReferenceWorkspace:
     def _input(self,identifier):
         value=self.current.get()
         if value is None or value['task_id']!=identifier:raise TaskError('作者来源只在当前用户准备动作内装配。')
+        self._validate_metadata_reads()
         binding,paper,receipt,scope=self._metadata(identifier)
         if (scope['id']!=value['scope_id'] or sha256(canonical(receipt))!=value['receipt_document_sha256']):
             raise TaskError('准备期间原目标或固定源码绑定改变。')
@@ -433,6 +509,10 @@ class AuthorReferenceWorkspace:
         return self._execution(identifier).follow(task_id(identifier))
 
     def prepare(self,identifier,request,*,revision_note=''):
+        with self._metadata_reads(identifier,request):
+            return self._prepare(identifier,request,revision_note=revision_note)
+
+    def _prepare(self,identifier,request,*,revision_note=''):
         task_id(identifier);task_id(request)
         revision_note=text(revision_note,4000,required=False)
         fd=os.open(self.locks/(identifier+'.lock'),os.O_CREAT|os.O_NOFOLLOW|os.O_RDWR,0o600)
@@ -460,6 +540,10 @@ class AuthorReferenceWorkspace:
             if self.lane_deployment is not None and (binding.get('execution_resource_receipt') or
                     (self.lane_deployment.policy is not None and getattr(self.lane_deployment.policy,'is_first_library',lambda _:False)(identifier))):
                 self.lane_deployment.ensure_resources(identifier,request)
+                # The ordinary resource action may install/update metadata.
+                # Keep its original proof baselines, but re-read subsequent
+                # metadata instead of carrying a pre-write result forward.
+                self._invalidate_metadata_reads()
             checked=author_source_inputs(sources,identifier)
             paths=list(binding['invocation_paths'])
             for row in checked['reads']:
@@ -480,8 +564,10 @@ class AuthorReferenceWorkspace:
             if validation is not None:
                 value['author_validation_id']=validation['id']
             token=self.current.set(dict(task_id=identifier,scope_id=scope['id'],receipt_document_sha256=sha256(canonical(receipt)),input=value))
-            try:return self.planner.prepare(identifier,request,model['client'],
-                connection_revision=model['connection_revision'],credential_generation=model['credential_generation'],revision_note=revision_note)
+            try:
+                self._validate_metadata_reads()
+                return self.planner.prepare(identifier,request,model['client'],
+                    connection_revision=model['connection_revision'],credential_generation=model['credential_generation'],revision_note=revision_note)
             finally:self.current.reset(token)
         except (ValueError,KeyError,TypeError,OSError,ExecutionDenied) as error:
             if isinstance(error,TaskError):raise

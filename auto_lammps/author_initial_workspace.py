@@ -104,6 +104,10 @@ class InitialAuthorWorkspace:
             raise TaskError('任务已暂停或结束；阅读历史保留。')
 
     def _metadata(self, identifier, request=None):
+        return self.workspace._metadata_read(('initial_metadata',identifier,request),identifier,
+            lambda:self._load_metadata(identifier,request))
+
+    def _load_metadata(self, identifier, request=None):
         self._task(identifier)
         value = self.bootstrap.metadata_for_selection(identifier, request)
         if (value['task_id'] != identifier or value['scope'] != 'reference_only'
@@ -232,6 +236,12 @@ class InitialAuthorWorkspace:
         return context, transport
 
     def _completed(self, identifier):
+        def clone(value):return deepcopy(value[0]),deepcopy(value[1]),value[2],deepcopy(value[3]),deepcopy(value[4])
+        def fingerprint(value):return canonical([value[0],value[1],value[2].identity,value[3],value[4]])
+        return self.workspace._metadata_read(('initial_completed',identifier),identifier,
+            lambda:self._load_completed(identifier),fingerprint=fingerprint,clone=clone)
+
+    def _load_completed(self, identifier):
         metadata = self._metadata(identifier)
         source, transport = self.resource_binding(identifier)
         completed = self.workspace.selected_resources.completed(identifier)

@@ -206,6 +206,39 @@ class InitialAuthorWorkspaceTests(unittest.TestCase):
             if path.is_file():
                 self.assertNotEqual(path.read_bytes(), self.fx.repository.files['input.lmp'])
 
+    def test_prepare_action_reuses_initial_proofs_and_rechecks_once_without_cross_action_cache(self):
+        self.approve();self.acquire()
+        original=self.bootstrap.metadata_for_selection
+        with patch.object(self.bootstrap,'metadata_for_selection',wraps=original) as metadata:
+            with self.workspace._metadata_reads(self.task,'e'*32):
+                first=self.workspace._metadata(self.task)
+                for _ in range(5):
+                    value=self.workspace._metadata(self.task)
+                    value[0]['load_receipt']();value[0]['load_association']();value[0]['verify_license']()
+                self.assertEqual(metadata.call_count,1)
+                self.workspace._validate_metadata_reads()
+                self.assertEqual(metadata.call_count,2)
+            with self.workspace._metadata_reads(self.task,'f'*32):self.workspace._metadata(self.task)
+            self.assertEqual(metadata.call_count,3)
+        self.assertIsNone(self.workspace.metadata_action.get());self.model.assert_not_called()
+
+    def test_initial_action_refuses_changed_original_bootstrap_after_snapshot(self):
+        self.approve();self.acquire()
+        with self.workspace._metadata_reads(self.task,'e'*32):
+            self.workspace._metadata(self.task)
+            with patch.object(self.bootstrap,'metadata_for_selection',side_effect=TaskError('Original scope changed')):
+                with self.assertRaisesRegex(TaskError,'Original scope changed'):self.workspace._validate_metadata_reads()
+        self.assertIsNone(self.workspace.metadata_action.get());self.model.assert_not_called()
+
+    def test_initial_action_refuses_a_saved_connection_change_after_snapshot(self):
+        self.approve();self.acquire()
+        with self.workspace._metadata_reads(self.task,'e'*32):
+            self.workspace._metadata(self.task)
+            profile=dict(self.fx.profile,work_directory=str(self.fx.f.root/'changed-remote'))
+            self.fx.hpc.save(profile,1,known_hosts='Synthetic changed saved connection')
+            with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+        self.assertIsNone(self.workspace.metadata_action.get());self.model.assert_not_called()
+
     def test_scope_change_pauses_reading_without_rewriting_approval(self):
         approved = self.approve()['reading_approval']
         self.fx.scope['scope_sha256'] = 'b'*64

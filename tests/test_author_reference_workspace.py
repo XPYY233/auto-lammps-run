@@ -1,7 +1,8 @@
 """Normal reference HTTP actions over existing synthetic source/plan services."""
 from copy import deepcopy
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from auto_lammps.author_reference_workspace import AuthorReferenceWorkspace
@@ -118,6 +119,113 @@ class AuthorWorkspaceTests(unittest.TestCase):
         traces=list((self.fx.tasks.path.parent/'author-workspace-errors').glob('*.json'))
         self.assertEqual(len(traces),1)
         self.assertIn('input_too_large',traces[0].read_text())
+
+    def test_action_metadata_is_reused_defensively_then_freshly_checked_and_discarded(self):
+        verify=self.binding['verify_license'];verify.reset_mock()
+        with self.workspace._metadata_reads(self.task,'4'*32):
+            first=self.workspace._metadata(self.task)
+            first[0]['missing'].append('Caller mutation must stay private')
+            for _ in range(8):self.assertEqual(self.workspace._metadata(self.task)[0]['missing'],[])
+            self.assertEqual(verify.call_count,1)
+            self.workspace._validate_metadata_reads()
+            self.assertEqual(verify.call_count,2)
+        self.assertIsNone(self.workspace.metadata_action.get())
+        self.workspace._metadata(self.task);self.assertEqual(verify.call_count,3)
+
+    def test_action_metadata_refuses_changes_in_scope_source_license_connection_and_environment(self):
+        mutations=[lambda:self.binding['verify_license'].configure_mock(side_effect=TaskError('License changed')),
+            lambda:self.source.policy.update(receipt_sha256='0'*64),
+            lambda:self.binding['deployment']['resources'].update(gpu_allowed=True),
+            lambda:self.association['paper'].update(title='Changed original association')]
+        for change in mutations:
+            original=deepcopy(self.source.policy);deployment=deepcopy(self.binding['deployment'])
+            association=deepcopy(self.association)
+            with self.subTest(change=mutations.index(change)):
+                with self.workspace._metadata_reads(self.task,'4'*32):
+                    self.workspace._metadata(self.task);change()
+                    with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+            self.source.policy.clear();self.source.policy.update(original)
+            self.binding['deployment']=deployment;self.association.clear();self.association.update(association)
+            self.binding['verify_license'].side_effect=None
+        getter=self.workspace.scopes.get
+        with self.workspace._metadata_reads(self.task,'4'*32):
+            self.workspace._metadata(self.task)
+            def changed_scope(*args,**kwargs):
+                row=getter(*args,**kwargs);row['receipt_sha256']='0'*64;return row
+            with patch.object(self.workspace.scopes,'get',side_effect=changed_scope):
+                with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+        environment=['a'*64]
+        def metadata(identifier,binding):return dict(binding,environment_metadata=dict(report_sha256=environment[0]))
+        with patch.object(self.workspace,'_environment_metadata',side_effect=metadata):
+            with self.workspace._metadata_reads(self.task,'4'*32):
+                self.workspace._metadata(self.task);environment[0]='b'*64
+                with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+        self.assertEqual(self.fx.sent,[])
+
+    def test_cached_source_change_and_resource_write_invalidation_do_not_hide_old_proofs(self):
+        source=[dict(immutable='original')]
+        with patch.object(self.workspace,'_sources',side_effect=lambda *args,**kwargs:deepcopy(source[0])) as reads:
+            with self.workspace._metadata_reads(self.task,'4'*32):
+                self.workspace._cached_sources(self.task,self.binding,self.fx.reader.receipt)
+                self.workspace._cached_sources(self.task,self.binding,self.fx.reader.receipt)
+                self.assertEqual(reads.call_count,1)
+                self.workspace._invalidate_metadata_reads()
+                self.workspace._cached_sources(self.task,self.binding,self.fx.reader.receipt)
+                self.assertEqual(reads.call_count,2)
+                source[0]['immutable']='changed'
+                with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+        self.assertIsNone(self.workspace.metadata_action.get())
+
+    def test_action_metadata_never_leaks_between_tasks_requests_or_failed_actions(self):
+        with self.assertRaisesRegex(TaskError,'synthetic'):
+            with self.workspace._metadata_reads(self.task,'4'*32):
+                self.workspace._metadata(self.task)
+                with self.assertRaises(TaskError):
+                    with self.workspace._metadata_reads(self.task,'5'*32):pass
+                with self.assertRaises(TaskError):self.workspace._metadata('f'*32)
+                raise TaskError('synthetic failure')
+        self.assertIsNone(self.workspace.metadata_action.get())
+        before=self.binding['verify_license'].call_count
+        with self.workspace._metadata_reads(self.task,'5'*32):self.workspace._metadata(self.task)
+        self.assertEqual(self.binding['verify_license'].call_count,before+1)
+
+    def test_prepare_checks_changes_before_recording_or_sending_a_model_request(self):
+        read=self.workspace._sources
+        def changed(*args,**kwargs):
+            value=read(*args,**kwargs)
+            self.binding['verify_license'].side_effect=TaskError('License changed during preparation')
+            return value
+        with patch.object(self.workspace,'_sources',side_effect=changed):
+            with self.assertRaisesRegex(TaskError,'License changed'):self.workspace.prepare(self.task,'4'*32)
+        self.assertEqual(self.fx.sent,[]);self.assertEqual(self.workspace.planner.history(self.task),[])
+        self.assertIsNone(self.workspace.metadata_action.get())
+
+    def test_action_metadata_rechecks_task_pause_and_keeps_the_old_model_history(self):
+        with self.workspace._metadata_reads(self.task,'4'*32):
+            self.workspace._metadata(self.task)
+            self.workspace.tasks.set_paused(self.task,self.workspace.tasks.get(self.task)['revision'],True)
+            with self.assertRaises(TaskError):self.workspace._validate_metadata_reads()
+        self.assertIsNone(self.workspace.metadata_action.get());self.assertEqual(self.fx.sent,[])
+
+    def test_ordinary_prepare_reuses_repeated_lane_metadata_without_skipping_fresh_validation(self):
+        def resources(identifier,request):
+            before=self.binding['verify_license'].call_count
+            for _ in range(20):
+                binding,_,receipt,_=self.workspace._metadata(identifier)
+                self.workspace._cached_sources(identifier,binding,receipt)
+            self.assertEqual(self.binding['verify_license'].call_count,before+1)
+        lane=SimpleNamespace(policy=SimpleNamespace(is_first_library=lambda _:True),
+            ensure_resources=Mock(side_effect=resources),planner_binding=lambda identifier,binding:binding)
+        self.workspace.lane_deployment=lane
+        self.binding['verify_license'].reset_mock()
+        result=self.workspace.prepare(self.task,'4'*32)
+        self.assertEqual(result['state'],'prepared')
+        lane.ensure_resources.assert_called_once_with(self.task,'4'*32)
+        # Repeated lane reads collapse to one, while each independent model
+        # input boundary still revalidates the original proofs from fresh reads.
+        self.assertLessEqual(self.binding['verify_license'].call_count,7)
+        self.assertEqual(self.fx.reader.calls,1);self.assertEqual(len(self.fx.sent),1)
+        self.assertIsNone(self.workspace.metadata_action.get())
 
     def test_browser_cannot_supply_scientific_source_or_allow_dispatch(self):
         for payload in (dict(source='private replacement'),dict(deployment={}),dict(execution_authorized=True)):
