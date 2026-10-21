@@ -686,10 +686,11 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
         author_environment_inventory=AuthorEnvironmentInventory(store,hpc,
             profile_provider=existing_author_environment,audit_directory=store.path.parent/'author-environment-inventory')
         if execution_jobs is not None:author_workspace.environment_inventory=author_environment_inventory
-        if execution_jobs is not None and reference_outputs_service is not None:
+        if execution_jobs is not None:
             from .author_reference_inputs import AuthorReferenceInputs
             from .author_lane_deployment import AuthorLaneDeployment
             from .author_lane_policy import InheritedAuthorResourcePolicy
+            from .library_author_execution import LibraryAuthorResourcePolicy
             author_inputs=AuthorReferenceInputs(author_workspace,reference_outputs_service,
                 audit_directory=store.path.parent/'author-reference-inputs',controller=execution_jobs.controller)
             author_lane=AuthorLaneDeployment(author_workspace,execution_jobs.controller,hpc,
@@ -699,8 +700,12 @@ def create_app(store: TaskStore, *, port=8765, papers=None, model_client=None, c
                 value=source.get('execution_resource_receipt')
                 if value is None:raise TaskError('作者资源库尚无原已批准执行包回执。')
                 return deepcopy(value)
+            enrollment=getattr(execution_jobs,'enrollment',None)
+            enrolled=getattr(enrollment,'identity',None)
+            library_policy=(LibraryAuthorResourcePolicy(author_lane,campaign=enrolled['campaign'],
+                system_sha256=enrolled['system_sha256']) if enrolled else None)
             author_lane.policy=InheritedAuthorResourcePolicy(author_lane,author_inputs,
-                resource_receipt_provider=inherited_author_resource_receipt)
+                resource_receipt_provider=inherited_author_resource_receipt,library_policy=library_policy)
             author_workspace.reference_inputs=author_inputs
             author_workspace.lane_deployment=author_lane
     if author_execution_config is not None:

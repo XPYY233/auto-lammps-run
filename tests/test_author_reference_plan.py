@@ -135,6 +135,25 @@ class AuthorReferencePlanTests(unittest.TestCase):
         self.assertEqual(menu['coverage']['items']['properties']['invocation_ids']['maxItems'],128)
         self.assertEqual(self.calls.status()['used_requests'],0)
 
+    def test_revision_deduplicates_author_text_without_losing_sources_or_previous_answer(self):
+        first=self.prepare()
+        original=deepcopy(self.value)
+        second=self.prepare('5'*32,revision_note='Retain the complete original while improving explanation.')
+        self.assertEqual(second['state'],'prepared',second)
+        context=self.service._stored(self.task['id'],second['request_id'])[1]
+        payload=json.loads(context['messages'][-1]['content'])
+        self.assertEqual(payload['sources'],context['input']['sources'])
+        self.assertNotIn('capability',payload['author_source'])
+        self.assertEqual(payload['author_source']['capability_binding']['sha256'],
+            sha256(canonical(context['input']['author_source']['capability'])))
+        self.assertEqual(payload['author_source']['files'],context['input']['author_source']['files'])
+        proofs=context['input']['author_source']['reads']
+        self.assertEqual(payload['author_source']['read_proofs_sha256'],sha256(canonical(proofs)))
+        self.assertEqual(payload['author_source']['reads'],[{key:value for key,value in row.items()
+            if key not in {'request_sha256','sha256','text_sha256'}} for row in proofs])
+        self.assertEqual(payload['author_plan_revision']['complete_previous_answer'],original)
+        validate_prepared_messages(STAGE,context['messages'],context['input'])
+
     def test_active_adapter_is_in_actual_messages_and_cannot_be_removed_or_changed(self):
         result = self.prepare()
         saved = self.service._stored(self.task['id'],result['request_id'])[1]

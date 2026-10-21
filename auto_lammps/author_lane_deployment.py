@@ -133,7 +133,7 @@ def _remote_install(request, *, action='install', _test_host=False):
     files = request['files']
     required = {'runtime/runtime.json', 'runtime/runtime_launcher.py', 'runtime/remote_stage.py',
                 'runtime/remote_submit.py', 'metadata.json'}
-    complete = required | {'runtime/submission.json','requests/policy.json','requests/.stage.lock','control/source-policy.json','control/grant.key'}
+    complete = required | {'runtime/submission.json','requests/policy.json','control/source-policy.json','control/grant.key'}
     if (not isinstance(files, list) or {row.get('path') for row in files} not in (required,complete)
             or len(files) != len({row.get('path') for row in files})):
         raise ValueError('invalid_lane_file_inventory')
@@ -274,6 +274,18 @@ class AuthorLaneDeployment:
             wall_seconds=min([604800] + [row['policy']['max_wall_seconds'] for row in policies]),
             memory_bytes=min([8*1024**3] + [row['policy']['max_memory_bytes'] for row in policies]),
             storage_bytes=min(row['policy']['total_storage_bytes'] for row in policies))
+        storage_total=resources['storage_bytes']
+        if self.policy is not None and getattr(self.policy,'is_first_library',lambda _:False)(identifier):
+            # The receiver reserves its root metadata separately. Keep room for
+            # collection alongside each approved concurrent reference package;
+            # this is an allocation within the existing policy, not an increase.
+            with controller.ledger._transaction() as db:
+                pools=[controller.ledger._concurrency_pool(db,row['campaign'],'reference',
+                    controller.ledger._policy(db,row['campaign']),[])[1]
+                    for row in db.execute('SELECT campaign FROM evaluations WHERE id IN ('+
+                        ','.join('?' for _ in policies)+')',[item['evaluation'] for item in policies])]
+            resources['storage_bytes']=(storage_total-remote_stage.ROOT_ALLOWANCE)//(max(pools)+1)
+            if resources['storage_bytes']<=0:raise TaskError('现有作者存储策略不足以保留暂存与回收元数据。')
         source_transport = getattr(source['reader'], 'transport', None)
         if not isinstance(source_transport, SavedHPCTransport):
             raise TaskError('作者原件须属于已保存的项目连接。')
@@ -288,10 +300,16 @@ class AuthorLaneDeployment:
         packages = retained.get('source_packages', [retained]); roots = []
         for package in packages:
             member = author_source_inputs(package, identifier)
-            paths = {row['request']['remote_root'] for row in package['reads']}
-            if not paths: continue
-            if len(paths) != 1: raise TaskError('同一作者来源包不能指向多个源根。')
-            root = paths.pop(); runtime.absolute(root)
+            # Reader roots name the acquisition control directory, not its
+            # actual immutable files. Each validated receipt pins that exact
+            # tree; selected bundles add a separate selected-resources root.
+            adapter=member['capability']['adapter']
+            if not package['reads']:continue
+            if adapter not in {'pinned_author_source_reader','pinned_selected_author_source_reader','pinned_legacy_author_source_reader'}:
+                raise TaskError('作者原件源根格式尚未核验。')
+            root=package['acquisition_receipt']['remote_directory']
+            if adapter!='pinned_legacy_author_source_reader':root+='/source'
+            runtime.absolute(root)
             pin = sha256(canonical(member['capability']))
             row = dict(binding_sha256=pin, path=root)
             if row not in roots: roots.append(row)
@@ -334,6 +352,7 @@ class AuthorLaneDeployment:
             helper_review=deepcopy(review), worker_sha256=sha256(REMOTE_CODE.encode()))
         binding['reference_policies_sha256'] = sha256(canonical(policies))
         binding['resources'] = resources
+        binding['stage_storage_total_bytes']=storage_total
         base = str(PurePosixPath(profile['requests_root']).parent)
         lane = str(PurePosixPath(base) / 'author-lanes' / request)
         for row in roots:
@@ -412,8 +431,7 @@ class AuthorLaneDeployment:
         payloads['runtime/submission.json']=canonical(dict(runtime_path=profile['runtime_tree']+'/runtime_launcher.py',
             runtime_sha256=binding['helper_sha256']['runtime_launcher.py'],
             **{key:policy['submission_environment'][key] for key in ('sbatch_path','sbatch_sha256')}))
-        payloads['requests/policy.json']=canonical(dict(schema_version=1,max_total_bytes=binding['resources']['storage_bytes'],approval_sha256=approval))
-        payloads['requests/.stage.lock']=b''
+        payloads['requests/policy.json']=canonical(dict(schema_version=1,max_total_bytes=binding['stage_storage_total_bytes'],approval_sha256=approval))
         payloads['control/source-policy.json']=canonical(dict(candidate_sha256=reviewed['candidate_sha256'],
             review_receipt=reviewed['review_receipt'],review_sha256=review_sha))
         key=runtime.read_regular(Path(self.controller.authorization.directory)/'grant.key',32,private=True)
@@ -446,10 +464,19 @@ class AuthorLaneDeployment:
             if menu['id'] not in ids:result['deployment']['environments'].append(deepcopy(menu))
         resolved={'作者驱动的同一计算分配子进程策略尚须独立审核。','作者原始入口与执行部署尚须独立登记和批准。',
             '此次仅核验解释器元数据；作者流程所需依赖尚待核验，不能视为依赖完备。'}
+        declarations=set()
+        if self.policy is not None and getattr(self.policy,'is_first_library',lambda _:False)(identifier):
+            # These fixed reading-stage statements are retained limitations,
+            # not missing original physics. Resource admission above pins the
+            # actual research-purpose/source/CPU facts; it makes no new legal,
+            # redistribution, whole-repository or scientific-success finding.
+            from .author_initial_workspace import _MISSING
+            declarations=set(_MISSING)
         # A reviewed stdlib child is not evidence for scientific Python modules;
         # unregistered analysis programs remain unavailable in the new menu.
-        result['missing']=[item for item in result['missing'] if item not in resolved]
-        unavailable=[item for item in result['deployment']['missing'] if item not in resolved]
+        retained=[item for item in result['missing']+result['deployment']['missing'] if item in declarations]
+        result['missing']=[item for item in result['missing'] if item not in resolved|declarations]
+        unavailable=list(dict.fromkeys(retained+[item for item in result['deployment']['missing'] if item not in resolved|declarations]))
         result['deployment']['unavailable_capabilities']=unavailable
         result['deployment']['missing']=[]
         result['deployment']['registered_execution_environment_ids']=[menu['id'] for menu in candidate['planner_environments']]
@@ -473,11 +500,18 @@ class AuthorLaneDeployment:
             for item in checked['files']:
                 files.setdefault(item['path'],dict(item,binding_sha256=pin,source_path=item['path']))
         policy=candidate['profile']['author_reference']['execution_policy']
-        if not policy['accounted_inputs']:raise TaskError('作者 lane 尚缺明确核验的旧记账输入。')
-        original=self.controller.ledger.get(policy['accounted_inputs'][0]['request_id'])
-        evaluation=self.controller.ledger.evaluation_snapshot(original['evaluation'])
+        first_library=not policy['accounted_inputs'] and getattr(self.policy,'is_first_library',lambda _:False)(identifier)
+        if first_library:
+            evaluation_id=self.policy.library.reference_evaluation(identifier)
+            resources=deepcopy(context['binding']['resources'])
+        else:
+            if not policy['accounted_inputs']:raise TaskError('作者 lane 尚缺明确核验的旧记账输入。')
+            original=self.controller.ledger.get(policy['accounted_inputs'][0]['request_id'])
+            if not original['accounted']:raise TaskError('旧作者输入尚未记账。')
+            evaluation_id=original['evaluation'];resources=json.loads(original['resources'])
+        evaluation=self.controller.ledger.evaluation_snapshot(evaluation_id)
         identity=evaluation['identity']
-        if identity['role']!='reference' or not original['accounted']:
+        if identity['role']!='reference':
             raise TaskError('作者 lane 必须保留原参考评测和记账身份。')
         directory=private_directory(self.audit/'installed'/candidate['profile_sha256'])
         payloads={item['path']:base64.b64decode(item['base64'],validate=True) for item in context['request']['files']}
@@ -485,7 +519,6 @@ class AuthorLaneDeployment:
         profile_path=directory/'runtime.json';private_bytes_once(profile_path,payloads['runtime/runtime.json'])
         signing=private_directory(directory/'signing');private_bytes_once(signing/'grant.key',payloads['control/grant.key'])
         deployment=dict(candidate['profile']['author_reference'],profile_sha256=candidate['profile_sha256'])
-        resources=json.loads(original['resources'])
         from .author_execution import _deployment,_resources
         _deployment(deployment,_resources(resources))
         profile=candidate['profile'];runtime_path=profile['runtime_tree']
@@ -493,7 +526,7 @@ class AuthorLaneDeployment:
             root_path=profile['requests_root'],helper_path=runtime_path+'/'+name,
             helper_sha256=context['binding']['helper_sha256'][name])
         registration=dict(task_id=identifier,connection_revision=self.controller.staging.client.transport.revision,
-            evaluation=original['evaluation'],resources=resources,source_files=list(files.values()),deployment=deployment,
+            evaluation=evaluation_id,resources=resources,source_files=list(files.values()),deployment=deployment,
             provenance=dict(task_sha256=identity['task'],software_sha256=identity['system'],analysis_sha256=scope['scope_sha256']),
             profile=dict(path=str(profile_path),sha256=candidate['profile_sha256']),
             stage_endpoint=endpoint('remote_stage.py'),submission_endpoint=endpoint('remote_submit.py'),
@@ -503,13 +536,17 @@ class AuthorLaneDeployment:
             batch=dict(partition=self.controller.environment.partition,account=self.controller.environment.account),
             following=dict(max_polls=240,interval_seconds=60,query_timeout=20,query_max_bytes=1000000,retain_queue_identity=True))
         registrations=deepcopy(getattr(self,'_registrations',{}));registrations[identifier]=registration
-        collections=self.policy.inputs.outputs.raw.collections
+        collections=(self.controller.following.analysis.collector.directory if first_library
+                     else self.policy.inputs.outputs.raw.collections)
         config=dict(version=1,audit_directory=str(self.audit/'execution'),snapshots_directory=str(self.audit/'snapshots'),
             collections_directory=str(collections),registrations=list(registrations.values()))
         for key in ('audit_directory','snapshots_directory','collections_directory'):private_directory(config[key])
         raw=canonical(config);config_path=directory/('controller-'+sha256(raw)+'.json');private_bytes_once(config_path,raw)
         from .author_dispatch_config import load_author_dispatch
-        self.workspace.execution=load_author_dispatch(self.workspace,config_path,self.hpc)
+        service=load_author_dispatch(self.workspace,config_path,self.hpc)
+        services=dict(getattr(self.workspace,'execution_services',{}));services[identifier]=service
+        self.workspace.execution_services=services
+        if self.workspace.execution is None:self.workspace.execution=service
         self._registrations=registrations
         return dict(task_id=identifier,state='registered_not_submitted',profile_sha256=candidate['profile_sha256'],
             source_review_sha256=candidate['source_review_sha256'],execution_authorized=False,
@@ -618,27 +655,37 @@ class AuthorLaneDeployment:
         """
         task_id(identifier);task_id(request)
         validation=self.workspace.scopes.get_author_validation(identifier)
-        if not validation or validation.get('state')!='recorded' or not validation.get('can_prepare_A_plan'):
+        first_library=self.policy is not None and getattr(self.policy,'is_first_library',lambda _:False)(identifier)
+        if not first_library and (not validation or validation.get('state')!='recorded' or not validation.get('can_prepare_A_plan')):
             raise TaskError('作者有界验证资源准备须绑定已有显式用户范围；未改变原 P/B。')
         if self.policy is None:raise TaskError('原作者资源库尚未连接，不能另建科学流程。')
-        inventory=self.policy.inputs
-        latest=inventory.status(identifier)['latest']
-        if latest is None:
-            inventory.inspect(identifier,sha256(('accounted-inputs:'+identifier+':'+request).encode())[:32])
+        if first_library:
+            self.policy.library.reference_evaluation(identifier,create=True)
+            self.policy.library.prepare_environment(identifier)
         else:
-            if latest['state']=='unknown':latest=inventory.reconcile(identifier,latest['request_id'])
-            if latest['state']=='not_started':inventory.inspect(identifier,latest['request_id'])
-        inventory.planner_inputs(identifier)
+            inventory=self.policy.inputs
+            latest=inventory.status(identifier)['latest']
+            if latest is None:
+                inventory.inspect(identifier,sha256(('accounted-inputs:'+identifier+':'+request).encode())[:32])
+            else:
+                if latest['state']=='unknown':latest=inventory.reconcile(identifier,latest['request_id'])
+                if latest['state']=='not_started':inventory.inspect(identifier,latest['request_id'])
+            inventory.planner_inputs(identifier)
         self.policy.approved(identifier)
         latest_lane=self.status(identifier)['latest']
         if latest_lane and latest_lane['state']=='unknown':
             self.reconcile(identifier,latest_lane['request_id'])
             latest_lane=self.status(identifier)['latest']
         if latest_lane and latest_lane['state']=='metadata_installed' and 'source_review_sha256' in latest_lane['candidate']:
-            self.activate(identifier)
-            return dict(state='resources_ready',task_id=identifier,source='inherited_existing_author_resource_bundle',
-                execution_authorized=False,calls_model=False,submits_HPC=False)
-        lane_request=sha256(('author-resources:'+identifier+':'+request).encode())[:32]
+            try:self._current(identifier,latest_lane['request_id'])
+            except TaskError:pass  # Known old installation stays immutable; current bytes need a new lane.
+            else:
+                self.activate(identifier)
+                return dict(state='resources_ready',task_id=identifier,
+                    source='fixed_library_author_resource_bundle' if first_library else 'inherited_existing_author_resource_bundle',
+                    execution_authorized=False,calls_model=False,submits_HPC=False)
+        lane_request=sha256(canonical(dict(kind='author-resources',task_id=identifier,request_id=request,
+            worker_sha256=sha256(REMOTE_CODE.encode()),policy_sha256=self.policy.approved(identifier)['candidate_sha256'])))[:32]
         preview=self.preview(identifier,lane_request)
         if not preview['candidate']['can_install_metadata']:
             raise TaskError('当前已安装工具缺少真实受审版本清单；没有新增科学审核。')
@@ -646,14 +693,16 @@ class AuthorLaneDeployment:
             inherited=self.policy.approved(identifier)
             self._event(lane_request,'existing_author_resource_authorization_inherited','approved',
                 candidate_sha256=preview['candidate_sha256'],resource_inheritance_sha256=inherited['review_sha256'],
-                bounded_validation_receipt_sha256=validation['receipt_sha256'],new_user_gate=False,execution_authorized=False)
+                bounded_validation_receipt_sha256=validation['receipt_sha256'] if validation else None,
+                new_user_gate=False,execution_authorized=False)
         value=self.get(identifier,lane_request)
         if value['state']=='unknown':value=self.reconcile(identifier,lane_request)
         elif value['state']=='approved':value=self.install(identifier,lane_request)
         if value['state']!='metadata_installed':
             raise TaskError('作者资源准备回执尚未核实；保留原请求，未消耗模型稿次或提交计算。')
         self.activate(identifier)
-        return dict(state='resources_ready',task_id=identifier,source='inherited_existing_author_resource_bundle',
+        return dict(state='resources_ready',task_id=identifier,
+            source='fixed_library_author_resource_bundle' if first_library else 'inherited_existing_author_resource_bundle',
             execution_authorized=False,calls_model=False,submits_HPC=False)
 
     def reconcile(self, identifier, request):

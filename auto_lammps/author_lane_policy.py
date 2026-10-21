@@ -17,16 +17,24 @@ from .tasks import TaskError
 
 
 class InheritedAuthorResourcePolicy:
-    def __init__(self,lane,reference_inputs,*,resource_receipt_provider):
+    def __init__(self,lane,reference_inputs,*,resource_receipt_provider,library_policy=None):
         self.lane,self.workspace,self.tasks,self.inputs=lane,lane.workspace,lane.tasks,reference_inputs
         if not callable(resource_receipt_provider):raise TaskError('作者资源库须提供原已批准运行的固定资源回执。')
         self.provider=resource_receipt_provider
+        self.library=library_policy
         with self.tasks.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS author_resource_inheritance (sha256 TEXT PRIMARY KEY,task_id TEXT NOT NULL,document TEXT NOT NULL)')
             for action in ('UPDATE','DELETE'):
                 db.execute(f'CREATE TRIGGER IF NOT EXISTS immutable_author_resource_inheritance_{action} BEFORE {action} ON author_resource_inheritance BEGIN SELECT RAISE(ABORT,"immutable author resource inheritance"); END')
 
+    def is_first_library(self,identifier):
+        if self.library is None:return False
+        try:source,_,_,_=self.workspace._metadata(identifier)
+        except (TaskError,KeyError,TypeError,OSError):return False
+        return not bool(source.get('execution_resource_receipt'))
+
     def approved(self,identifier):
+        if self.is_first_library(identifier):return self.library.approved(identifier)
         spec=self.provider(identifier)
         if (not isinstance(spec,dict) or set(spec)!={'path','sha256','request_id'} or not Path(spec['path']).is_absolute()):
             raise TaskError('作者资源库尚未绑定原运行资源回执；不接受浏览器路径。')

@@ -27,6 +27,7 @@ class AuthorReferenceWorkspace:
         self.tasks,self.papers,self.scopes=tasks,papers,scopes
         self.bindings=bindings;self.model_provider=model_provider
         self.execution=None
+        self.execution_services={}
         self.initial=None
         self.environment_inventory=None
         self.reference_inputs=None
@@ -395,35 +396,41 @@ class AuthorReferenceWorkspace:
 
     def execution_status(self,identifier):
         self.tasks.get(identifier)
-        if self.execution is None:
-            inherited=bool(self.lane_deployment is not None and self.bindings.get(identifier,{}).get('execution_resource_receipt'))
+        execution=self.execution_services.get(identifier,self.execution)
+        if execution is None:
+            inherited=bool(self.lane_deployment is not None and
+                (self.bindings.get(identifier,{}).get('execution_resource_receipt') or
+                 (self.lane_deployment.policy is not None and getattr(self.lane_deployment.policy,'is_first_library',lambda _:False)(identifier))))
             return dict(task_id=identifier,configured=inherited,can_prepare=inherited,can_approve=False,
                 can_submit=False,latest=None,history=[],role='author_reference',scope='reference_only',B_input=False,
                 scientific_status='not_evaluated',disabled_reason=('准备时直接复用原已批准作者资源包；不新增科学审核。' if inherited else '作者 A 的可信执行部署尚未登记；方案可查看，不能提交计算。'))
-        return self.execution.status(identifier)
+        return execution.status(identifier)
 
-    def _execution(self):
-        if self.execution is None:
+    def _execution(self,identifier):
+        execution=self.execution_services.get(identifier,self.execution)
+        if execution is None:
             raise TaskError('作者 A 执行未配置：需要现有参考账本、原件目录、固定环境与提交/回收端点。')
-        return self.execution
+        return execution
 
     def prepare_execution(self,identifier):
         with self.resources._lease(task_id(identifier)):
-            if self.execution is None and self.lane_deployment is not None:
+            library=bool(self.lane_deployment is not None and self.lane_deployment.policy is not None
+                and getattr(self.lane_deployment.policy,'is_first_library',lambda _:False)(identifier))
+            if self.lane_deployment is not None and identifier not in self.execution_services and (self.execution is None or library):
                 history=self.planner.history(identifier)
                 if history:self.lane_deployment.ensure_resources(identifier,history[-1]['request_id'])
-            return self._execution().prepare(identifier)
+            return self._execution(identifier).prepare(identifier)
 
     def approve_execution(self,identifier,revision,package_sha256,*,note=''):
         with self.resources._lease(task_id(identifier)):
-            return self._execution().approve(identifier,revision,package_sha256,note=note)
+            return self._execution(identifier).approve(identifier,revision,package_sha256,note=note)
 
     def submit_execution(self,identifier,package_sha256):
         with self.resources._lease(task_id(identifier)):
-            return self._execution().dispatch(identifier,package_sha256)
+            return self._execution(identifier).dispatch(identifier,package_sha256)
 
     def follow_execution(self,identifier):
-        return self._execution().follow(task_id(identifier))
+        return self._execution(identifier).follow(task_id(identifier))
 
     def prepare(self,identifier,request,*,revision_note=''):
         task_id(identifier);task_id(request)
@@ -444,12 +451,15 @@ class AuthorReferenceWorkspace:
             if saved is None and (state['pending_reconciliation'] or state['remaining_rounds']==0):
                 raise TaskError('作者方案原请求待核对或三轮已用完；未重新读取或发送。')
             binding,paper,receipt,scope=self._metadata(identifier)
-            if self.lane_deployment is not None and binding.get('execution_resource_receipt'):
-                self.lane_deployment.ensure_resources(identifier,request)
             validation=self.scopes.get_author_validation(identifier)
             if validation is not None and not validation['can_prepare_A_plan']:
                 raise TaskError(validation['disabled_reason'])
+            # Ordinary plan preparation already owns the approved source read.
+            # Retain it before the library policy verifies its complete receipts.
             sources=self._sources(identifier,binding,receipt)
+            if self.lane_deployment is not None and (binding.get('execution_resource_receipt') or
+                    (self.lane_deployment.policy is not None and getattr(self.lane_deployment.policy,'is_first_library',lambda _:False)(identifier))):
+                self.lane_deployment.ensure_resources(identifier,request)
             checked=author_source_inputs(sources,identifier)
             paths=list(binding['invocation_paths'])
             for row in checked['reads']:

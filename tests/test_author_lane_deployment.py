@@ -98,7 +98,7 @@ class AuthorLaneDeploymentTests(unittest.TestCase):
         candidate=result['candidate'];profile=candidate['profile']
         self.assertEqual(profile['native_slurm'],self.profile_value['native_slurm'])
         self.assertEqual(profile['author_reference']['environments'],[])
-        self.assertEqual(profile['author_reference']['source_roots'][0]['path'],self.fx.read_request['remote_root'])
+        self.assertEqual(profile['author_reference']['source_roots'][0]['path'],self.fx.reader.receipt['remote_directory']+'/source')
         self.assertTrue(candidate['can_install_metadata']);self.assertGreater(len(candidate['execution_missing']),3)
         self.assertEqual(len(candidate['files']),5);self.assertNotIn('grant.key',json.dumps(candidate))
         self.assertFalse(result['execution_ready']);self.assertFalse(result['execution_authorized'])
@@ -140,7 +140,8 @@ class AuthorLaneDeploymentTests(unittest.TestCase):
         self.service.policy=SimpleNamespace(inputs=inventory,approved=Mock())
         with patch.object(self.workspace.scopes,'get_author_validation',return_value=dict(
                 state='recorded',can_prepare_A_plan=True)),patch.object(self.service,'status',return_value=dict(
-                latest=dict(state='metadata_installed',candidate=dict(source_review_sha256='f'*64)))),patch.object(self.service,'activate'):
+                latest=dict(state='metadata_installed',request_id='d'*32,candidate=dict(source_review_sha256='f'*64)))),\
+                patch.object(self.service,'_current'),patch.object(self.service,'activate'):
             result=self.service.ensure_resources(self.task,'b'*32)
         inventory.reconcile.assert_called_once_with(self.task,original)
         inventory.inspect.assert_called_once_with(self.task,original)
