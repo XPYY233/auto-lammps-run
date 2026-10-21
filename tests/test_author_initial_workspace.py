@@ -344,6 +344,41 @@ class InitialAuthorWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace.planner.history(self.task), [])
         self.model.assert_not_called()
 
+    def test_ordinary_read_follows_only_missing_421_line_tail_and_keeps_original_receipts(self):
+        self.fx.repository.files['input.lmp']=''.join('# Synthetic line '+str(i)+'\n' for i in range(1,422)).encode()
+        self.approve();self.acquire();reads=[]
+        def capture(command,**options):
+            envelope=json.loads(b''.join(options['input_chunks']));reads.append(deepcopy(envelope['request']))
+            with patch('sys.platform','linux'),patch.dict(os.environ,{'SSH_CONNECTION':'synthetic only'}):
+                report=source_worker.read_source_report(envelope['request'])
+            return dict(returncode=0,failure='',stdout=base64.b64encode(canonical(report)).decode(),stderr='')
+        def reader(*args,**kwargs):return SelectedAuthorSourceReader(*args,**kwargs,capture=capture)
+        # Retain the old first-page format before ordinary source collection.
+        with patch('auto_lammps.author_initial_workspace.SelectedAuthorSourceReader',side_effect=reader):
+            binding,_,receipt,_=self.workspace._metadata(self.task)
+            choices=binding['selections'];request=binding['reader']._selection(receipt,choices)
+            report=binding['reader'].read(receipt,choices,purpose='author_reference')
+            original=binding['reader'].retained(receipt,[dict(request=request,response=report)])
+            self.workspace._save_source_evidence(self.task,original)
+            before=canonical(original)
+            result=self.workspace.collect_sources(self.task)
+            self.assertEqual(result['complete_text_files'],['input.lmp'])
+            self.assertEqual(result['truncated_files'],[])
+            fragments=result['text_coverage']['complete_files'][0]['fragments']
+            self.assertEqual([(r['start_line'],r['returned_end_line']) for r in fragments],[(1,400),(401,421)])
+            self.assertTrue(all(r['truncated'] for r in fragments))
+            self.assertEqual(len(reads),2)
+            self.assertEqual(reads[-1]['selections'][0]['start_line'],401)
+            self.assertEqual(reads[-1]['selections'][0]['end_line'],421)
+            self.assertEqual(self.workspace.collect_sources(self.task)['complete_text_files'],['input.lmp'])
+            self.assertEqual(len(reads),2,'Already complete text must not be read again')
+            cached=self.workspace._cached_sources(self.task,binding,receipt)
+            self.assertEqual(len(cached['reads']),2)
+        with self.tasks.transaction() as db:
+            records=[json.loads(row[0]) for row in db.execute('SELECT document FROM author_source_evidence WHERE task_id=?',(self.task,))]
+        self.assertIn(before,[canonical(row) for row in records]);self.assertEqual(len(records),2)
+        self.assertEqual(self.workspace.planner.history(self.task),[]);self.model.assert_not_called()
+
     def test_metadata_budget_prefers_source_then_documentation_and_keeps_explicit_unread_reasons(self):
         files = [dict(path='small.txt', size=1), dict(path='data.csv', size=200),
                  dict(path='large.txt', size=16*1024+1), dict(path='README.md', size=1024),

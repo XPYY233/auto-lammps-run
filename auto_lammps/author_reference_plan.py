@@ -35,6 +35,7 @@ MAX_ROUNDS = 3
 MAX_INVOCATIONS = 128
 MAX_SOURCE_PACKAGES = 4
 MAX_SOURCE_FILES = 128
+MAX_SOURCE_TEXT_BYTES = 512 * 1024
 FLAGS = dict(scope='reference_only', role='author_reference_human_only', B_input=False,
              approval=False, execution_authorized=False, physical_evaluation_performed=False,
              scientific_status='not_evaluated', proposal_status='model_proposed_not_verified')
@@ -85,7 +86,7 @@ def author_source_inputs(value, identifier):
     if value is None:
         return dict(capability=None, sources=[], files=[], reads=[], invocation_paths=[])
     if isinstance(value, dict) and 'source_packages' in value:
-        return _source_packages(value, identifier)
+        return author_source_collection(value, identifier)
     if isinstance(value, dict) and (value.get('capability') or {}).get('adapter') == 'pinned_selected_author_source_reader':
         from .selected_author_source_reader import validated_inputs
         return validated_inputs(value, identifier)
@@ -146,7 +147,61 @@ def author_source_inputs(value, identifier):
     return dict(capability=deepcopy(capability), sources=sources, files=deepcopy(capability['files']), reads=proofs)
 
 
-def _source_packages(value, identifier):
+def author_source_text_coverage(checked):
+    """Prove complete original bytes from already validated fragment receipts.
+
+    A fragment's ``truncated`` flag remains its original worker observation.
+    Only contiguous coverage plus the whole-file byte identity proves a file.
+    """
+    try:
+        files={row['path']:row for row in checked['files']}
+        sources={row['id']:row for row in checked['sources']}
+        if len(files)!=len(checked['files']) or len(sources)!=len(checked['sources']):
+            raise ValueError('duplicate text coverage identity')
+        text_bytes=sum(len(row['text'].encode('utf-8')) for row in sources.values())
+        if text_bytes>MAX_SOURCE_TEXT_BYTES:raise ValueError('text coverage byte limit')
+        grouped={path:[] for path in files}
+        for row in checked['reads']:
+            if row.get('state')!='read':continue
+            file=files[row['path']];source=sources[row['source_id']]
+            start,end,total=row['start_line'],row['returned_end_line'],row['total_lines']
+            if (any(row[key]!=file[key] for key in ('sha256','size'))
+                    or any(type(item)is not int for item in (start,end,total,row['end_line']))
+                    or not 1<=start<=end<=total<=1000000
+                    or end!=min(row['end_line'],total)
+                    or row['end_line']-start+1>author_source_worker.MAX_LINES
+                    or row['truncated'] is not (start>1 or row['end_line']<total)
+                    or len(source['text'].splitlines())!=end-start+1
+                    or sha256(source['text'].encode())!=row['text_sha256']):
+                raise ValueError('text coverage fragment identity changed')
+            grouped[row['path']].append(row)
+        complete,incomplete=[],[]
+        batches={row['request_sha256'] for row in checked['reads']}
+        for path,file in files.items():
+            fragments=sorted(grouped[path],key=lambda row:row['start_line'])
+            counts={row['total_lines'] for row in fragments}
+            if len(counts)>1:raise ValueError('text coverage file version changed')
+            next_line=1;gap=False;chunks=[]
+            for row in fragments:
+                if row['start_line']<next_line:raise ValueError('overlapping text coverage')
+                if row['start_line']!=next_line:gap=True
+                chunks.append(sources[row['source_id']]['text'])
+                next_line=row['returned_end_line']+1
+            raw=''.join(chunks).encode('utf-8')
+            if fragments and not gap and next_line==fragments[0]['total_lines']+1:
+                if len(raw)!=file['size'] or sha256(raw)!=file['sha256']:
+                    raise ValueError('whole original text bytes changed')
+                complete.append(dict(file,total_lines=fragments[0]['total_lines'],fragments=deepcopy(fragments)))
+            else:
+                reason=('source_text_byte_budget' if text_bytes+file['size']-len(raw)>MAX_SOURCE_TEXT_BYTES
+                        else 'source_read_batch_budget' if len(batches)>=16 else 'missing_contiguous_text')
+                incomplete.append(dict(file,reason=reason,fragments=deepcopy(fragments)))
+        return dict(complete_files=complete,incomplete_files=incomplete)
+    except (ValueError,KeyError,TypeError,UnicodeError):
+        raise TaskError('作者全文证明存在缺失身份、重叠、混合版本或原文件字节不符；未认定全文已读。') from None
+
+
+def author_source_collection(value, identifier):
     """Union independently verified packages; never substitute a new receipt."""
     task_id(identifier)
     packages = value.get('source_packages')
@@ -183,8 +238,8 @@ def _source_packages(value, identifier):
                 continue
             sources[row['id']] = deepcopy(row)
             total += len(row['text'].encode('utf-8'))
-            if total > author_source_worker.MAX_TEXT_BYTES:
-                raise TaskError('作者来源包唯一文本合计超出 256 KiB；未删减片段。')
+            if total > MAX_SOURCE_TEXT_BYTES:
+                raise TaskError('作者来源包唯一文本合计超出固定 512 KiB 集合容量；单包仍限256KiB，未删减片段。')
         for row in checked['reads']:
             key = (row.get('source_id'), row['request_sha256'])
             if key in proofs and proofs[key] != row:

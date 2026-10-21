@@ -14,7 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import traceback
 
-from .author_reference_plan import AuthorReferencePlan, author_source_inputs, _deployment
+from .author_reference_plan import AuthorReferencePlan, author_source_inputs, author_source_text_coverage, _deployment
 from .author_source_reader import AuthorSourceReader
 from .deepseek import ModelError
 from .hpc_transport import SavedHPCTransport
@@ -290,12 +290,20 @@ class AuthorReferenceWorkspace:
             requests.append(request)
         key=sha256(canonical(dict(task_id=identifier,capability=capability,requests=requests)))
         with self.tasks.transaction() as db:
-            row=db.execute('SELECT document,sha256 FROM author_source_evidence WHERE id=? AND task_id=?',(key,identifier)).fetchone()
-        if row:
-            value=json.loads(row[0])
-            if sha256(canonical(value))!=row[1]:raise TaskError('已保存作者读取证据摘要不一致。')
-            author_source_inputs(value,identifier)
-            return value
+            rows=db.execute('SELECT id,document,sha256 FROM author_source_evidence WHERE task_id=? ORDER BY rowid',(identifier,)).fetchall()
+        value=None
+        for row in rows:
+            candidate=json.loads(row['document'])
+            if sha256(canonical(candidate))!=row['sha256']:raise TaskError('已保存作者读取证据摘要不一致。')
+            if (candidate.get('capability')==capability and candidate.get('acquisition_receipt')==receipt
+                    and [item['request'] for item in candidate.get('reads',[])[:len(requests)]]==requests
+                    and len(candidate.get('reads',[]))>=len(requests)):
+                author_source_inputs(candidate,identifier)
+                if value is None or len(candidate['reads'])>len(value['reads']):value=candidate
+            elif row['id']==key:raise TaskError('已保存作者读取证据与原选择不一致。')
+        if value is not None:
+            if cached_only:return value
+            return self._complete_source_pages(identifier,binding,receipt,value,selections)
         if cached_only:
             raise TaskError('作者原件文本缓存尚未就绪；请先使用读取原件入口，未自动访问HPC。')
         with self.tasks.transaction() as db:
@@ -312,12 +320,69 @@ class AuthorReferenceWorkspace:
         if legacy:value['legacy_staging_intent']=intent
         if selected:value=reader.retained(receipt,reads)
         author_source_inputs(value,identifier)
+        self._save_source_evidence(identifier,value)
+        return self._complete_source_pages(identifier,binding,receipt,value,selections)
+
+    def _save_source_evidence(self,identifier,value):
+        key=sha256(canonical(dict(task_id=identifier,capability=value['capability'],
+            requests=[item['request'] for item in value['reads']])))
         data=canonical(value)
         with self.tasks.transaction() as db:
+            previous=db.execute('SELECT sha256 FROM author_source_evidence WHERE id=?',(key,)).fetchone()
+            if previous:
+                if previous['sha256']!=sha256(data):raise TaskError('原作者读取请求已有另一字节回执，未覆盖。')
+                return
             used=db.execute('SELECT count(*) FROM author_source_evidence WHERE task_id=?',(identifier,)).fetchone()[0]
             if used>=32:raise TaskError('参考源码证据版本容量已用完；已有版本和费用保留。')
             db.execute('INSERT INTO author_source_evidence VALUES(?,?,?,?,?)',(key,identifier,data.decode(),sha256(data),datetime.now(timezone.utc).isoformat()))
         self._invalidate_metadata_reads()
+
+    def _complete_source_pages(self,identifier,binding,receipt,value,selections):
+        """Read only missing continuation pages of admitted text candidates."""
+        from .author_initial_workspace import _SOURCE_EXTENSIONS,_DOCUMENT_EXTENSIONS,_TEXT_NAMES
+        from .author_source_worker import MAX_LINES,MAX_TEXT_BYTES
+        reader=binding['reader'];legacy=binding['format']=='legacy_selected_resource_v3'
+        intent=binding['load_intent']() if legacy else None
+        targets=[]
+        for choice in selections:
+            path=PurePosixPath(choice['path']);name=path.name.lower()
+            if (choice['start_line']==1 and name!='log' and not name.startswith('log.')
+                    and path.suffix.lower()!='.log'
+                    and (path.suffix.lower() in _SOURCE_EXTENSIONS|_DOCUMENT_EXTENSIONS
+                         or name in _TEXT_NAMES or name in {'requirements.txt','cmakelists.txt'}
+                         or name.startswith(('readme.','license.','copying.')))):
+                if choice['path'] not in targets:targets.append(choice['path'])
+        while len(value['reads'])<16:
+            checked=author_source_inputs(value,identifier);coverage=author_source_text_coverage(checked)
+            pending={row['path']:row for row in coverage['incomplete_files']};batch=[]
+            sources={row['id']:row for row in checked['sources']}
+            total=sum(len(row['text'].encode()) for row in sources.values())
+            reserved=total
+            for path in targets:
+                item=pending.get(path)
+                if not item or not item['fragments']:continue
+                fragments=item['fragments'];next_line=1
+                for fragment in fragments:
+                    if fragment['start_line']!=next_line:break
+                    next_line=fragment['returned_end_line']+1
+                else:
+                    last=fragments[-1]
+                    present=sum(len(sources[row['source_id']]['text'].encode()) for row in fragments)
+                    if next_line<=last['total_lines'] and reserved+item['size']-present<=MAX_TEXT_BYTES:
+                        batch.append(dict(path=path,start_line=next_line,end_line=min(next_line+MAX_LINES-1,last['total_lines'])))
+                        reserved+=item['size']-present
+                if len(batch)==8:break
+            if not batch:break
+            request=(reader.selection_request(receipt,intent,batch) if legacy else reader._selection(receipt,batch))
+            if any(item['request']==request for item in value['reads']):
+                raise TaskError('作者续页已有原回执但尚不能证明连续全文；保留缺段，不重复读取。')
+            report=(reader.read(receipt,intent,batch,purpose='author_reference') if legacy
+                    else reader.read(receipt,batch,purpose='author_reference'))
+            if report.get('state')!='read':
+                raise TaskError('作者源码续页尚未核验；原已读片段与回执保留，未发送模型。')
+            extended=deepcopy(value);extended['reads'].append(dict(request=request,response=report))
+            checked=author_source_inputs(extended,identifier);author_source_text_coverage(checked)
+            self._save_source_evidence(identifier,extended);value=extended
         return value
 
     def _sources(self,identifier,binding,receipt,*,cached_only=False):
@@ -418,13 +483,15 @@ class AuthorReferenceWorkspace:
         with self.resources._lease(identifier):
             binding,_,receipt,_=self._metadata(identifier,require_scope=False)
             value=author_source_inputs(self._sources(identifier,binding,receipt),identifier)
+            coverage=author_source_text_coverage(value)
             read={row['path'] for row in value['reads'] if row.get('state')=='read' and row.get('path')}
             return dict(version=1,task_id=identifier,scope='reference_only',B_input=False,
                 calls_model=False,submits_HPC=False,execution_authorized=False,
                 physical_evaluation_performed=False,scientific_validation=False,
                 files=len(value['files']),read_files=len(read),source_fragments=len(value['sources']),
                 unread_files=[row['path'] for row in value['files'] if row['path'] not in read],
-                truncated_files=[row['path'] for row in value['reads'] if row.get('truncated')],
+                truncated_files=[row['path'] for row in coverage['incomplete_files'] if row['fragments']],
+                complete_text_files=[row['path'] for row in coverage['complete_files']],text_coverage=coverage,
                 message='原作者文件与读取证明已保留；未读或截断文件明确列出，不消耗方案轮次。')
 
     def _input(self,identifier):

@@ -44,8 +44,9 @@ _MISSING = ['许可证使用范围尚未核验；本次仅确认本项目研究�
 def _reading_selections(files):
     """Plan bounded text windows using retained metadata, never file contents.
 
-    Count whole-file bytes conservatively before applying the existing 400-line
-    window. Data files remain in the acquisition receipt, explicitly unread.
+    Count whole-file bytes conservatively before the first 400-line window.
+    The workspace follows only missing bounded continuation pages. Data files
+    remain in the acquisition receipt, explicitly unread.
     """
     candidates, omitted = [], {}
     for row in files:

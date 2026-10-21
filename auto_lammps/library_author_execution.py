@@ -10,7 +10,7 @@ import inspect
 import json
 from pathlib import Path
 
-from .author_reference_plan import author_source_inputs
+from .author_reference_plan import author_source_inputs, author_source_text_coverage
 from .manifest import canonical, sha256
 from .runtime_launcher import hash_value, read_regular
 from .tasks import TaskError, task_id
@@ -106,8 +106,7 @@ class LibraryAuthorResourcePolicy:
         # instructions to select the actual entry and argument bytes.
         paths=source.get('invocation_paths',[])
         if not paths:
-            paths=list(dict.fromkeys(row['path'] for row in checked['reads'] if row.get('state')=='read'
-                and row.get('start_line')==1 and row.get('truncated') is False))
+            paths=[row['path'] for row in author_source_text_coverage(checked)['complete_files']]
         if not paths or any(path not in known for path in paths):
             raise TaskError('作者调用说明路径尚未绑定实际资源 SHA。')
         return dict(source,invocation_paths=paths),paper,scope,dict(policy,acquisition_id=receipt.get('acquisition_id',receipt['id']),
@@ -150,8 +149,7 @@ class LibraryAuthorResourcePolicy:
         python=[row for row in report['python_candidates'] if row['status']=='verified' and
                 (row['path']==self.lane.controller.environment.python_path or row['real_path']==self.lane.controller.environment.python_path)]
         if len(python)!=1:raise TaskError('首次作者运行器缺少唯一已核验解释器。')
-        complete={row['path'] for row in checked['reads'] if row.get('state')=='read' and
-                  row.get('start_line')==1 and row.get('truncated') is False}
+        complete={row['path'] for row in author_source_text_coverage(checked)['complete_files']}
         entries=[{key:row[key] for key in ('path','sha256')} for row in checked['files'] if row['path'] in complete]
         if not entries:raise TaskError('作者入口需要完整原件读取证明；不能猜测入口或摘要。')
         programs=[]
