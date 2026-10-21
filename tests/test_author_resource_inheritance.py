@@ -52,7 +52,8 @@ class AuthorResourceInheritanceTests(unittest.TestCase):
         self.assertEqual(before,self.fx.tasks.approvals(self.task));self.fx.capture.assert_not_called()
         self.assertEqual(self.service.approved(self.task),result)
         context,_=self.fx.service._prepared_context(self.task,'a'*32)
-        self.assertEqual(len(context['request']['files']),10)
+        self.assertEqual(len(context['request']['files']),9)
+        self.assertFalse(any(row.get('path','').endswith('.stage.lock') for row in context['request']['files']))
         self.assertEqual(context['candidate']['profile']['author_reference']['execution_policy']['review_sha256'],result['review_sha256'])
         self.assertNotIn('base64',json.dumps(context['candidate']))
 
