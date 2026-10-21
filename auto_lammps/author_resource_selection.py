@@ -47,6 +47,40 @@ def _strings(value, maximum=64):
     return [text(item, 2000) for item in value]
 
 
+def selection_progression(previous,current,receipt):
+    """Permit acquisition of the prior selection, not replacement of its pins."""
+    stable=set(previous)|set(current)
+    stable-= {'first_selection','author_plan','existing_files','available_files','sources'}
+    if any(previous.get(key)!=current.get(key) for key in stable):
+        raise TaskError('原P范围、Git树、连接或许可已变化，不能覆盖资料选择。')
+    if current.get('first_selection') and not previous.get('first_selection'):
+        raise TaskError('已有原稿不能回到首次无原稿选择。')
+    old_sources={row['id']:row for row in previous['sources']}
+    new_sources={row['id']:row for row in current['sources']}
+    if (any(new_sources.get(key)!=row for key,row in old_sources.items())
+            or any(row.get('origin')!='author_source' for key,row in new_sources.items() if key not in old_sources)):
+        raise TaskError('补读作者来源不能删除旧片段或替换原论文来源。')
+    old={row['path']:row for row in previous['existing_files']}
+    new={row['path']:row for row in current['existing_files']}
+    if any(new.get(path)!=row for path,row in old.items()):
+        raise TaskError('原件补齐不能删除旧文件或改变原SHA。')
+    added=set(new)-set(old)
+    selected={row['path']:row for row in (receipt.get('report') or {}).get('selections',[])}
+    if added and (receipt.get('state')!='selected' or not added<=set(selected)
+            or any(new[path]['size']!=selected[path]['size'] for path in added)):
+        raise TaskError('新增原件必须来自上一已保存的有效选择，不能借修订注入文件。')
+    before={row['path']:row for row in previous['available_files']}
+    after={row['path']:row for row in current['available_files']}
+    if after!={path:row for path,row in before.items() if path not in added}:
+        raise TaskError('固定树的可选blob身份变化，不能补充选件。')
+    return dict(operation='retain_pins_and_append_verified_acquisition',
+                added_files=[deepcopy(new[path]) for path in sorted(added)],
+                previous_author_request=(previous.get('author_plan') or {}).get('request_id'),
+                current_author_request=(current.get('author_plan') or {}).get('request_id'),
+                added_author_source_ids=sorted(set(new_sources)-set(old_sources)),
+                original_scope_unchanged=True,execution_authorized=False)
+
+
 def selection_context(evidence):
     """The mandatory Adapter's exact fixed-tree selection menu and JSON schema."""
     if (not isinstance(evidence, dict) or any(evidence.get(key)!=value or type(evidence.get(key)) is not type(value)
@@ -382,8 +416,9 @@ class AuthorResourceSelection:
         if prior:
             previous=prior[-1];row,old,receipt,_=self._stored(identifier,previous['request_id'])
             if receipt is None or receipt['state']=='unknown':raise TaskError('原资料选择状态未知，不能换请求号重发。')
-            if old['input']!=evidence or old['model_binding']['model_ledger_sha256']!=model['model_ledger_sha256']:
-                raise TaskError('原P范围、作者方案、Git树、原件或模型账本已变化，不能覆盖资料选择。')
+            if old['model_binding']['model_ledger_sha256']!=model['model_ledger_sha256']:
+                raise TaskError('模型账本已变化，不能覆盖资料选择。')
+            progress=selection_progression(old['input'],evidence,receipt)
             if receipt['state']=='selected' and not note:
                 raise TaskError('已有原件选取建议；请查看或取件，修订需说明具体要求，未重复付费。')
             call=client.calls.lookup(previous['request_id']) or {};returned=call.get('receipt') or {}
@@ -400,6 +435,7 @@ class AuthorResourceSelection:
                 parent_receipt_sha256=row['receipt_sha256'],complete_previous_answer=deepcopy(answer),
                 previous_answer_sha256=sha256(canonical(answer)) if answer is not None else None,
                 inherited_answer_from=inherited,operation='revise_complete_previous_answer',
+                verified_source_progression=progress,
                 feedback=dict(state=receipt['state'],error_code=receipt['error_code'],message=receipt['message'],
                     previous_requested_revision=old['revision_note'],requested_revision=note),
                 original_answer_modified=False,target_scope_reduction_allowed=False)
