@@ -417,6 +417,34 @@ class Ledger:
                         revision=revision, previous_sha256=expected_previous_sha256, policy=updated))
             return updated
 
+    def raise_campaign_submission_capacity(self, campaign: str, *, max_active: int,
+                                         approval_sha256: str, expected_previous_sha256: str):
+        """Append an explicitly approved capacity increase during known jobs.
+
+        This is submission admission capacity, including queued reservations, not
+        a Slurm running-job throttle. It changes no resource or attempt limits.
+        Unknown dispatches must be reconciled before the controller can use it.
+        """
+        _identifier(campaign); _positive(max_active)
+        _digest(approval_sha256); _digest(expected_previous_sha256)
+        with self._transaction() as db:
+            previous = self._policy(db, campaign)
+            if hashlib.sha256(_json(previous).encode()).hexdigest() != expected_previous_sha256:
+                raise Conflict('Campaign policy changed; re-read the approved revision')
+            if approval_sha256 == previous['approval_sha256']:
+                raise Conflict('A capacity increase needs its own approval evidence')
+            if max_active <= previous['concurrency']:
+                raise Conflict('Only an increase of submission capacity is permitted')
+            self._require_reconciled_dispatches(self._campaign_requests(db, campaign))
+            updated = dict(previous, concurrency=max_active, approval_sha256=approval_sha256)
+            revision = db.execute('SELECT COALESCE(MAX(revision),0)+1 FROM campaign_policy_revisions '
+                                  'WHERE campaign=?', (campaign,)).fetchone()[0]
+            db.execute('INSERT INTO campaign_policy_revisions VALUES (?,?,?,?)',
+                       (campaign, revision, _json(updated), expected_previous_sha256))
+            self._event(db, None, 'campaign_submission_capacity_raised', dict(campaign=campaign,
+                        revision=revision, previous_sha256=expected_previous_sha256, policy=updated))
+            return updated
+
     @staticmethod
     def _concurrency_pool(db, campaign, role, policy, rows):
         approval = db.execute('SELECT max_active FROM reference_parallelism WHERE campaign=?',

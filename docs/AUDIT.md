@@ -3806,3 +3806,10 @@ FeAl普通修订动作在消耗第3稿前被原参考输入元数据unknown阻�
 原CoCrNi请求第五次产品跟进已于本轮成功应用，仍running；此前一次查询失败已恢复，没有重提。页面动态渲染期间两次展开选择器失效，仅定位失败，无模型或执行动作；以最新原请求跟进回执和真实线程在线状态核对，不将旧锁或旧页面值冒充实时证据。
 
 本轮两个代码修复提交已正常推送；随后审计增量推送在连接GitHub 443端口约75秒后失败。审计提交仍在本地，不强推、不回退已安装版本；待网络恢复再补推，不将远端同步问题当作科研作业失败。
+
+
+### 2026-10-22 Approved queue-admission capacity increase (#172)
+
+The controller treated queued/prepared requests as occupied capacity and blocked a valid untouched proposal before HPC dispatch. A general policy revision cannot run during active jobs. The user explicitly approved the narrow scheduling fix and removed this benchmark campaign's running-job cap. Added a trusted append-only capacity increase with fresh approval and expected-policy digests; unknown dispatches still block it. Existing identities, attempts, reservations, costs, per-job CPU/memory/wall limits and total resource budgets remain unchanged. The API does not implement a Slurm running throttle. Scientific proposal generation, validation, runtime and analysis are untouched.
+
+Validation: six synthetic capacity tests plus 34 existing ledger and 17 reference-policy tests passed. One requested test glob matched no file and returned zero tests; this was a control command error, not a passing suite or scientific attempt. Further checks use actual test files. Runtime application and actual dispatch remain to be verified separately.
