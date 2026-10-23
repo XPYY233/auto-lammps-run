@@ -4159,3 +4159,7 @@ Original FollowingService retained diagnostics and settled actual CPU cost for t
 
 ### MD037 codex one-shot native engine failure
 Original FollowingService retained diagnostics and settled actual CPU cost for the original failed job. No complete scientific output or pass established; exact diagnostics remain private and cause is not claimed repaired. Stop this arm without new proposal, repeat submission or custom postprocessor. The next untouched case may use the released reservation.
+
+
+### MD100 public audit synchronization unavailable
+Evidence: pushing the safe audit branch failed with an HTTPS connection timeout to GitHub port443 after75seconds. Impact: audit commit retained locally; no benchmark request, model call or simulation was retried or changed. Cause: network connectivity failure reported by Git; underlying cause unverified. Action: preserve the commit and private failure receipt, defer synchronization rather than repeating the operation. Validation: local public-tree scan found0issues and diff whitespace checks passed before the attempt; remote synchronization not established.
