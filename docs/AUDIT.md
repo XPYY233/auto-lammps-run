@@ -4133,3 +4133,17 @@ The control turn was interrupted while both original scientific children were st
 - Cause: native-reported condition; causal diagnosis unverified.
 - Corrective action: retain the failure and skip this arm under the one-shot rule; no repair or retry.
 - Validation status: failed; no successful simulation or scientific result claimed.
+
+
+### MD024 Codex one-shot native engine failure
+Original FollowingService reconciled the original accepted job to failed, retained native diagnostics and settled its actual CPU cost. Impact: no complete scientific output or pass established. Exact engine diagnostics remain private; no repaired cause is claimed. Action: stop this arm without a second proposal/submission or custom postprocessor; next untouched case may use the released original resource reservation.
+
+
+### MD030 codex one-shot native engine failure
+Original FollowingService retained diagnostics and settled actual CPU cost for the original failed job. No complete scientific output or pass established; exact diagnostics remain private and cause is not claimed repaired. Stop this arm without new proposal, repeat submission or custom postprocessor. The next untouched case may use the released reservation.
+
+
+### MD031 codex original first dispatch failure
+Original staging failed (UploadUncertain). Private native receipt preserved; stop this arm and further dispatch. No scientific revision or repeat submission.
+
+MD031 staging cause evidence: the original native upload trace returned SSH exit255 with server-closed connection before a confirmed upload receipt, using the already renewed saved credential revision2. No expiry or scientific error inferred. Original undispatched arm is stopped; CPU reservation released through native cancellation while storage/history remain. Further dispatch stopped this turn; next untouched original must wait for a healthy ordinary service observation. No restage or retry of MD031.
