@@ -4147,3 +4147,15 @@ Original FollowingService retained diagnostics and settled actual CPU cost for t
 Original staging failed (UploadUncertain). Private native receipt preserved; stop this arm and further dispatch. No scientific revision or repeat submission.
 
 MD031 staging cause evidence: the original native upload trace returned SSH exit255 with server-closed connection before a confirmed upload receipt, using the already renewed saved credential revision2. No expiry or scientific error inferred. Original undispatched arm is stopped; CPU reservation released through native cancellation while storage/history remain. Further dispatch stopped this turn; next untouched original must wait for a healthy ordinary service observation. No restage or retry of MD031.
+
+
+### MD033 codex one-shot native engine failure
+Original FollowingService retained diagnostics and settled actual CPU cost for the original failed job. No complete scientific output or pass established; exact diagnostics remain private and cause is not claimed repaired. Stop this arm without new proposal, repeat submission or custom postprocessor. The next untouched case may use the released reservation.
+
+
+### MD035 codex one-shot native engine failure
+Original FollowingService retained diagnostics and settled actual CPU cost for the original failed job. No complete scientific output or pass established; exact diagnostics remain private and cause is not claimed repaired. Stop this arm without new proposal, repeat submission or custom postprocessor. The next untouched case may use the released reservation.
+
+
+### MD037 codex one-shot native engine failure
+Original FollowingService retained diagnostics and settled actual CPU cost for the original failed job. No complete scientific output or pass established; exact diagnostics remain private and cause is not claimed repaired. Stop this arm without new proposal, repeat submission or custom postprocessor. The next untouched case may use the released reservation.
