@@ -3819,3 +3819,317 @@ Queue-capacity validation update: the full offline suite ran 2597 tests, with on
 
 
 The same author-source boundary failure was reproduced against the unchanged original installed baseline (8 of 9 focused tests passed); it is not repaired in this scheduling-only change. Full-suite results therefore remain explicitly failing. The original installed ledger bytes were verified equal to the pre-change source: only the isolated trusted policy tool applied the new revision; all scientific actors and execution tools continue to use the unchanged original installation.
+
+
+### 2026-10-22 MD004 DeepSeek original one-shot execution failure
+
+Original FollowingService reconciled the existing job as failed, accounted it and collected diagnostics. The engine returned 1 at a thermodynamic table print after zero-step initialization and write_data: `Compute temp thermo_temp used in variable thermo keyword between runs is not current` (thermo.cpp:1131). Production trajectory and final structure are absent; complete requested MD output is not available. Actual allocation cost is 63,264 CPU core-seconds. This is an execution failure of the retained original proposal, not a transport failure or scientific pass. Preserve output, proposal, receipt and costs; skip this arm without repair, new proposal, resubmission or identity change. The precise tool/engine state mechanism remains unverified and is not repaired within this frozen one-shot comparison. Other original jobs are still running; scheduler status does not establish their scientific progress.
+
+
+2026-10-23 monitoring documentation review: the image forwarding helper rejected the requested low detail and omitted all reference pixels, despite its advertised parameter. Therefore that call did not establish visual review. Reopen with a supported high detail value before continuing; do not claim the omitted images were reviewed. This is a control/UI-tool error, not a scientific proposal, API call or HPC attempt. Existing scheduler queries remain original-request read-only operations.
+
+
+### 2026-10-23T02:20:05.450764+00:00 MD100 MD011 Codex one-shot authorization failure
+
+Evidence: original accounted service raised RuntimeError. Impact: this arm stopped with original proposal, snapshot and receipts retained. Cause or unverified hypothesis: Original authorization ensure returned false or unknown. Corrective action: no proposal repair or second dispatch; controller must reconcile any existing request. Validation status: failed stage, scientific success not established.
+
+
+MD011 Codex authorization evidence follow-up: the original transport exited 255 and reported Permission denied during SSH authentication. Grant installation remains unconfirmed; no scheduler dispatch occurred. The native cancel_prepared operation released only unused compute reservation and retained storage/evidence. No repair or retry was attempted. Scientific status remains not evaluated.
+
+
+### 2026-10-23T02:22:14.441913+00:00 MD100 MD012 Codex one-shot authorization_ensure
+- Evidence: original installed service returned AssertionError at authorization_ensure; full diagnostics retained privately.
+- Impact: this arm stopped; sole frozen proposal, snapshot and all existing execution identities retained.
+- Cause: unverified beyond the original stage error; no scientific repair attempted.
+- Corrective action: none under one-shot rules. No new identity or repeat dispatch. Validation of this stage remains failed.
+
+
+- 2026-10-23T02:23:26.196589+00:00 MD100 MD013/codex: original one-shot authorization stage failed (RuntimeError). Private receipts and original input retained; no revised proposal or retry. Impact: no claimed scientific success. Cause: original tool diagnostic, not independently verified. Corrective action: stop and hand off; validation status: failed.
+
+- Follow-up evidence (MD012 Codex, same turn): native authorization ensure returned literal false and recorded authorization_delivery_unconfirmed. No staging or scheduler dispatch occurred. The original delivery receipt was retained; cause remains unverified. Original cancel_prepared safely released only unused CPU reservation; storage/evidence and failure history retained. No retry.
+
+
+2026-10-23 extension to fifty cases: three new independent original proposals passed native preparation but the authorization transport was denied by SSH before staging or dispatch. Read-only certificate inspection confirms the configured login certificate expired before the current turn. Preserve those actual stage failures and release only unused reservations through the original ledger. Pause other first authorization attempts while this shared prerequisite is unavailable; independent proposal generation can continue without modification or retry. Renewal is an account-connectivity prerequisite, not permission to repair scientific proposals or repeat failed arms. Two control-only navigation errors (unexpanded tilde during certificate read and a guessed ModelCalls summary method) caused no model request or scientific stage; actual APIs and expanded path were then inspected.
+
+
+### MD016 Codex one-shot native preparation
+- Evidence: the sole original proposal failed the installed native candidate-preparation stage (PlanIterationLimit).
+- Impact: no HPC dispatch; this case/arm is retained as failed and skipped.
+- Cause: native contract rejection or preparation failure; detailed private receipt retained, no scientific cause asserted.
+- Corrective action: no revised proposal, software repair or retry; preserved the original draft and diagnostics.
+- Validation: failure retained; no scientific success claimed.
+
+
+### MD paired one-shot MD018 runtime-AI native_candidate failure
+Observed 2026-10-23T02:38:56.569527+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD013 runtime-AI native_candidate failure
+Observed 2026-10-23T02:39:21.467923+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD014 runtime-AI native_candidate failure
+Observed 2026-10-23T02:39:33.311392+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD016 runtime-AI native_candidate failure
+Observed 2026-10-23T02:39:36.133461+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Freeze an inclusive frame interval with one to eight exact selected frames). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD015 runtime-AI native_candidate failure
+Observed 2026-10-23T02:40:54.119636+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Structure specification: Invalid crystal species). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD020 runtime-AI native_candidate failure
+Observed 2026-10-23T02:41:38.813275+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD021 runtime-AI native_candidate failure
+Observed 2026-10-23T02:41:48.507114+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD017 runtime-AI native_candidate failure
+Observed 2026-10-23T02:41:53.503667+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD023 runtime-AI native_candidate failure
+Observed 2026-10-23T02:42:53.977369+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD025 runtime-AI native_candidate failure
+Observed 2026-10-23T02:43:07.752053+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD028 runtime-AI native_candidate failure
+Observed 2026-10-23T02:43:12.088197+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD024 runtime-AI native_candidate failure
+Observed 2026-10-23T02:43:43.798131+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD027 runtime-AI native_candidate failure
+Observed 2026-10-23T02:43:57.600664+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD029 runtime-AI native_candidate failure
+Observed 2026-10-23T02:44:25.002932+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD026 runtime-AI native_candidate failure
+Observed 2026-10-23T02:44:36.559834+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD030 runtime-AI native_candidate failure
+Observed 2026-10-23T02:45:09.643310+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD032 runtime-AI native_candidate failure
+Observed 2026-10-23T02:45:18.904414+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD031 runtime-AI native_candidate failure
+Observed 2026-10-23T02:45:43.141250+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD033 runtime-AI native_candidate failure
+Observed 2026-10-23T02:46:06.224013+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Declare two to six distinct elements and their exact positive particle type IDs). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD034 runtime-AI native_candidate failure
+Observed 2026-10-23T02:46:17.285374+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD035 runtime-AI native_candidate failure
+Observed 2026-10-23T02:46:50.715650+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD036 runtime-AI native_candidate failure
+Observed 2026-10-23T02:47:12.135977+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD038 runtime-AI native_candidate failure
+Observed 2026-10-23T02:47:28.821286+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Declare both scalar headers and their exact column mapping). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD041 runtime-AI native_candidate failure
+Observed 2026-10-23T02:48:58.750238+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD040 runtime-AI native_candidate failure
+Observed 2026-10-23T02:49:07.948688+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD020 Codex one-shot native preparation failure
+- Evidence: original installed candidate preparation rejected the only proposal; private error receipt retained.
+- Impact: no frozen valid candidate or HPC dispatch; this case/arm stops without revision.
+- Cause: PlanIterationLimit; specific contract error retained privately, not yet independently diagnosed.
+- Corrective action: preserve proposal, honest receipt and failure; skip this case/arm, with no software or scientific repair.
+- Validation: failed native preparation; no local physics, authorization, staging or submission.
+
+
+### MD paired one-shot MD014/codex execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD015/codex execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD017/codex execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD043 runtime-AI native_candidate failure
+Observed 2026-10-23T02:49:25.443565+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD018/codex execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD019/deepseek execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD019/codex execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD022/deepseek execution-stage failure
+Original unchanged proposal failed the accounted native execution stage: authorization: RuntimeError Original authorization ensure returned false or unknown. Evidence, identity and costs retained privately; no revision or repeat submission; skipped per protocol.
+
+
+### MD paired one-shot MD042 runtime-AI native_candidate failure
+Observed 2026-10-23T02:49:51.444316+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD039 runtime-AI native_candidate failure
+Observed 2026-10-23T02:50:09.891667+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD044 runtime-AI native_candidate failure
+Observed 2026-10-23T02:50:15.838925+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD045 runtime-AI native_candidate failure
+Observed 2026-10-23T02:50:55.114152+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD046 runtime-AI native_candidate failure
+Observed 2026-10-23T02:50:58.621869+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD047 runtime-AI native_candidate failure
+Observed 2026-10-23T02:51:33.482492+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD049 runtime-AI native_candidate failure
+Observed 2026-10-23T02:51:57.604178+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD050 runtime-AI native_candidate failure
+Observed 2026-10-23T02:52:08.230860+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD paired one-shot MD048 runtime-AI native_candidate failure
+Observed 2026-10-23T02:52:09.082723+00:00: original single-proposal attempt did not pass the existing stage (PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Duplicate column or unsupported unit). Original response, tool receipt and costs retained privately. No corrective scientific version or repeat call/submission; skipped under user protocol. Not a verified software fix.
+
+
+### MD021 Codex one-shot native preparation failure
+
+Evidence: the sole native candidate-preparation call failed; original proposal and private error receipt were retained. Impact: this arm stops before authorization, staging, or dispatch. Cause: PlanIterationLimit at native preparation; not independently verified. Corrective action: retain and skip under the one-proposal rule; no repair or second call. Validation status: failed preparation, no HPC dispatch, no scientific-success claim.
+
+MD021 Codex failure detail: the original native check reported "Every run_schedule requires its complete matching save_state steps operation". The sole proposal declared run_schedule sampling without matching save_state steps. This is a candidate-contract failure before snapshot freezing, not a scheduler or resource-admission failure. No correction was attempted; original proposal and completion remain unchanged, and the arm is final failed/skipped with zero dispatches.
+
+
+### MD paired experiment shared credential and metadata failures
+Shell SSH credential renewal did not renew the application-owned immutable credential copy. Seven further untouched original proposals encountered SSH authorization-delivery failures against the old saved connection; preserved as actual failures and not retried. Existing HPCConnections.save/check created and verified a new credential revision for future untouched requests; old request bindings/history retained. Two control metadata assumptions (missing snapshot for clarification and alternate handoff shape) were recorded privately without another scientific generation or validation. No scientific software, original proposal, resources or identities changed. The shared failure should not be attributed to a model scientific ability.
+
+
+### 2026-10-23T02:59:52.676532+00:00 MD024 Codex one-shot preparation failure
+- Evidence: the original installed candidate service failed during the sole native preparation; original proposal, honest completion receipt and private failure record retained.
+- Impact: no authorization, staging, submission or target physical evaluation was invoked; this case/arm stops.
+- Cause: AttributeError; detailed cause remains in the private failure evidence and is not treated as a verified software fix.
+- Corrective action: retain and skip under the one-proposal rule, with no modification or retry.
+- Validation: failed, not scientifically evaluated.
+
+
+### 2026-10-23T03:02:34.664910+00:00 MD024 Codex metadata-only correction
+- Clarification: the preceding AttributeError occurred when the child read a returned manifest dictionary as an object after the original candidate service had already completed and frozen its inputs. It was a handoff metadata error, not a native candidate or scientific failure.
+- Recovery: located the unique existing snapshot by the original frozen condition and proposal digests; verified it read-only and wrote the missing handoff metadata.
+- Preservation: original proposal, completion receipt and error record remain byte-for-byte unchanged. No new proposal, candidate generation, physical calculation, authorization, staging or submission was invoked. Scientific status remains not evaluated.
+
+- 2026-10-23T03:05:22.803251+00:00 MD026/codex: first native candidate preparation failed (AttributeError); private immutable failure evidence SHA-256 f6729738fb81fa44b5ac257240d5d994951da21c4da5116533cf735ccbf72fce. Impact: no authorization, staging, HPC dispatch or local physics. Cause: native exception retained; no verified fix. Corrective action: retain first proposal/failure and stop this case without revision or retry. Validation: preparation failed; scientific status not evaluated.
+
+- 2026-10-23T03:08:07.352305+00:00 MD026/codex clarification: the previously recorded AttributeError occurred only while writing handoff metadata after successful native freeze and verification; candidate preparation itself did not fail. Original error evidence is retained. Read-only identity reconciliation recovered the existing first snapshot and saved handoff metadata only. No second generation/validation, scientific edit, authorization, staging or HPC dispatch occurred.
+
+
+### MD paired one-shot MD022/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+
+### MD paired one-shot MD023/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+
+### MD paired one-shot MD025/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+
+### MD032 Codex original one-shot preparation failure
+
+Evidence: the installed native candidate preparation did not return a verified handoff. Impact: this case arm stops before reservation or dispatch; original proposal and private diagnostics retained. Cause: PlanIterationLimit; exact private diagnostic retained without public execution data. Action: no revision, retry, new identity, wrapper or software change. Validation status: preparation failed; no HPC submission or physics result claimed.
+
+MD032 Codex cause detail: the native validator rejected the original proposal because every run_schedule requires its complete matching save_state steps operation. This is a candidate-contract rejection, not an engine failure. No input correction, second preparation, reservation or dispatch was attempted.
+
+
+### MD paired one-shot MD026/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+- 2026-10-23T03:29:26.533852+00:00 MD034 Codex attempt1: the first scientific proposal failed original native candidate preparation. Original proposal, completion receipt and exact private diagnostics retained. Impact: no reservation, authorization, upload or dispatch. Cause: native rejection; detailed cause remains in private evidence. Action: stop this arm without repair or a second proposal; validation remains failed.
+
+
+### MD paired one-shot MD027/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+
+### 2026-10-23T03:33:44.851527+00:00 MD036 Codex one-shot preparation
+- Evidence: the sole native preparation/verification ended with PlanIterationLimit. Original proposal and failure evidence retained privately.
+- Impact: preparation stopped; no reservation, authorization, upload or dispatch performed.
+- Cause: native exception observed; no scientific cause inferred.
+- Action: retain attempt one, skip without repair or another proposal.
+- Validation: no successful simulation or scientific result established.
+
+
+### MD paired one-shot MD028/codex engine failure
+Original engine returned nonzero and the native collector retained incomplete declared outputs and diagnostics. Actual scheduler cost and unmodified source retained privately. No new scientific version, retry submission or temporary scientific postprocessor; this case arm is stopped under the experiment protocol.
+
+
+### MD041 paired one-shot Codex generation transport failure
+Scientist child stream disconnected before any retained original proposal or native preparation. No completion/usage was exposed; generation failure retained separately from scientific validation failure. No replacement generation or HPC submission under the one-shot protocol.
+
+
+### MD045 Codex one-shot native preparation failure (2026-10-23)
+- Evidence: the original installed candidate service rejected the sole first proposal at native_candidate_preparation (PlanIterationLimit); private original proposal and receipt retained.
+- Impact: no reservation, authorization, staging, dispatch or physics execution; this arm stops without repair or a second proposal.
+- Cause: native diagnostic retained privately; causal explanation remains unverified.
+- Corrective action: preserve the failed arm and notify the controller to skip it.
+- Validation: no fix or retry performed.
+
+
+### MD047 Codex one-shot candidate preparation failure
+
+Evidence: the original installed native candidate preparation failed; the immutable first proposal and full private failure receipt are retained. Impact: this arm is stopped before any reservation or dispatch. Cause: PlanIterationLimit; the specific native cause remains in the private receipt and is not assumed repaired. Corrective action: no retry, replacement proposal, software change, or second identity. Validation status: preparation failed; no physical calculation or scientific success is claimed.
+
+
+### MD049/MD050 administrative interruption before original proposal
+The control turn was interrupted while both original scientific children were still reading native API documentation. Original session evidence and both children confirmed no saved proposal, native preparation or HPC request. Resumed those same two children and existing contexts, without replacement children, scientific revisions or repeated preparation. This is a control interruption, not a native scientific failure or model quality outcome.
+
+
+### MD050 Codex one-shot preparation failure — 2026-10-23T04:52:55.101600+00:00
+- Evidence: original proposal retained; installed native preparation invoked once; PlanIterationLimit: 三轮内未形成完整有效方案；最后检查问题：Every run_schedule requires its complete matching save_state steps operation
+- Impact: preparation failed before reservation, authorization, upload or dispatch; no physical evaluation.
+- Cause: native-reported condition; causal diagnosis unverified.
+- Corrective action: retain the failure and skip this arm under the one-shot rule; no repair or retry.
+- Validation status: failed; no successful simulation or scientific result claimed.
